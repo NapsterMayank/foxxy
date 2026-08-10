@@ -18,14 +18,15 @@ Last updated: **10 August 2026**
 | Corpus | **IMPORTED.** 137 chapters · 4,686 chunks · 2,741 questions · 639 concepts · 176 edges · 57 misconception patterns |
 | Architecture | Modular backend + isolated product frontend + marketing/CMS deployable |
 | Team | 1 engineer |
-| Backend modules | **3 of 11 built** (identity, learner, content). Schema for the `practice` response log is applied |
+| Backend modules | **4 of 11 built** (identity, learner, content, notify). Schema for the `practice` response log is applied |
 | Backend processes | **2** — `api` and `worker`. The worker exists and runs one real job |
-| Frontend | **not started** — 0 files |
+| Frontend | **scaffolded** - 81 source files under `frontend/src`, committed. Build-order step 0 (the five foundation gaps) not yet closed |
+| Marketing site | **scaffolded** - 32 files under `website/`, committed. Per `06-FRONTEND-SEPARATION-PLAN.md` |
 | Tests | **1,453 passing**, 78 files |
 | Migrations | `0000_baseline` + `0001_pedagogy`. `npm run db:generate` on a clean tree emits nothing |
 | Gates | type-check · lint · build · test · coverage — all green. `platform/authz` 100%, global 93.0% |
 | Estimated remaining | **~116 days ≈ 23 weeks solo** |
-| Git | repo at project root, **staged, no commit yet** |
+| Git | **1 commit** - `0545689`, 441 files, working tree clean. No remote configured |
 
 ---
 
@@ -452,6 +453,13 @@ per-chapter counts are in `.corpus-extract/reports/chapter-readiness.ndjson`.
 | 10 Aug 2026 | **Wave 1 — the half-done foundations closed.** `tenant_id` NOT NULL + strict guard + tenant on every insert path (migration `0008`, D-073 resolved); drizzle snapshot chain rebuilt, `db:generate` emits nothing (D-081); global 100/min authenticated rate limit applied (D-080); `POST /links/code` bounded (D-085); `CORS_ORIGINS` split into read/write (D-082); the hardcoded-migration-list pattern made a lint error after a THIRD instance (D-075 resolved) | 1,142 |
 | 10 Aug 2026 | **The corpus is imported.** Migration `0001_pedagogy` (3 tables, no tenant, forward/rollback/re-apply proven); `scripts/import-corpus.ts` streaming 66 MB twice, deterministic UUIDv5 keys, reconciling deletes, **idempotency proven by digest not asserted**; `scripts/clear-content.ts`; 137 chapters / 4,686 chunks / 2,741 questions / 639 concepts / 176 edges / 57 patterns / 773 held out; both retrieval paths verified by hand. **Four of the five source shapes were wrong and three failed silently** (D-098). D-098..D-109 | 1,453 |
 | 9 Aug 2026 | **Foundation hooks — roadmap section 8, all six.** Migrations `0004`-`0007`: tenancy, role enum + schools/classes stub + `audit_log`, evidence capture, notify/metrics/jobs. New platform modules `pii`, `metrics`, `audit`, `notify-channel`, `jobs`. **The `worker` process**, with the expired-session sweeper. Tenant isolation enforced in `platform/authz`. D-061..D-072 | 1,077 |
+| 10 Aug 2026 | **Wave 1 - foundations closed.** `tenant_id` NOT NULL with a strict guard (D-073); drizzle snapshot chain rebuilt; global 100/min authenticated limiter at `onRoute`; `POST /links/code` limited; `CORS_ORIGINS` split into read and write allow-lists. Third and fourth instances of the hardcoded-migration-list defect found and the pattern made unavailable by lint. D-080..D-086 | 1,142 |
+| 10 Aug 2026 | **Frontend foundation review.** Five mechanism gaps closed in the plan before any code: auth/session strategy, backend-error-to-UI table, the SSE-over-POST correction (`EventSource` is GET-only), design token values, and CI gates with enforced numbers. Doc numbering collision resolved. D-087..D-090 | 1,142 |
+| 10 Aug 2026 | **Wave 2a - migration collapse.** `0000`-`0008` collapsed to a single baseline; old chain kept in `drizzle/_superseded/` | 1,142 |
+| 10 Aug 2026 | **Wave 2b - `notify` module.** Kind-to-channel table, worker delivery, dead-letter, quiet hours, digest scheduler skeleton. **A cross-tenant hole was found in 3 of 4 methods** - the guard compared `actor.tenantId` with itself. D-091..D-094 | 1,396 |
+| 10 Aug 2026 | **Corpus extraction.** MCP diagnosed as unable to carry 58 MB of vectors through a context window; extracted instead by keyset pagination over a session-pooler connection. 9,349 rows across 5 NDJSON files, every line count checked against a separate database count. A real password had reached a git-tracked `.env.example` and was remediated. D-095..D-097 | 1,396 |
+| 10 Aug 2026 | **Corpus import.** Migration `0001_pedagogy`; 137 chapters, 4,686 chunks, 2,741 questions, 639 concepts, 176 edges, 57 patterns, 773 held out. Idempotency proven by digest comparison across two full runs. **Four of five `Source*` shapes were wrong, three silently** - all 639 concepts and 57 patterns would have imported as zero. D-098..D-109 | 1,453 |
+| 10 Aug 2026 | **Initial commit** `0545689` - 441 files. Repository had survived two near-losses of `PROGRESS.md` with zero commits | 1,453 |
 
 ---
 
