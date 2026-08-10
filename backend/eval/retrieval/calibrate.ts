@@ -1,6 +1,6 @@
 import { createHttpClient } from '../../src/platform/http/index';
 import { createVoyageEmbed } from '../../src/platform/embed/index';
-import { calibrate, toMeasuredThreshold } from '../../src/modules/retrieval/index';
+import { CANDIDATE_LIMIT, calibrate, toMeasuredThreshold } from '../../src/modules/retrieval/index';
 import { IN_CORPUS_QUESTIONS } from './golden/in-corpus';
 import { OFF_SYLLABUS_QUESTIONS } from './golden/off-syllabus';
 import { createHarness, scoreSet, toSamples } from './harness';
@@ -132,9 +132,28 @@ async function main(): Promise<number> {
     );
     line();
     line(`separated:              ${String(report.separated)}`);
-    line(`suggested threshold:    ${fixed(report.suggestedThreshold)}`);
-    line(`off-syllabus abstained: ${(report.offSyllabusAbstainRate * 100).toFixed(1)}%`);
-    line(`in-corpus FALSE abstain:${(report.inCorpusFalseAbstainRate * 100).toFixed(1)}%  <-- the expensive mistake`);
+    line();
+    line('  RULE A — 5/95 midpoint (symmetric, treats both errors as equal)');
+    line(`    threshold             ${fixed(report.suggestedThreshold)}`);
+    line(`    off-syllabus abstained${(report.offSyllabusAbstainRate * 100).toFixed(1)}%`);
+    line(`    in-corpus FALSE abstain ${(report.inCorpusFalseAbstainRate * 100).toFixed(1)}%  <-- the expensive mistake`);
+    line();
+    line(
+      `  RULE B — in-corpus false-abstain budget ${(report.falseAbstainBudget * 100).toFixed(1)}%  <-- ADOPTED`,
+    );
+    line(`    threshold             ${fixed(report.budgetedThreshold)}`);
+    line(
+      `    off-syllabus abstained${(report.budgetedOffSyllabusAbstainRate * 100).toFixed(1)}%`,
+    );
+    line(
+      `    in-corpus FALSE abstain ${(report.budgetedInCorpusFalseAbstainRate * 100).toFixed(1)}%`,
+    );
+    // Printed apart from the abstain rates because it has a different fix. A
+    // zero-candidate in-corpus question is a retriever or a content gap; no
+    // threshold, not even zero, can recover it. Summed into the false-abstain
+    // rate it would read as "the floor is too high" and be tuned forever.
+    line(`in-corpus NO candidates:${(report.inCorpusNoCandidateRate * 100).toFixed(1)}%  <-- retriever/content, not threshold`);
+    line(`off-syll. NO candidates:${(report.offSyllabusNoCandidateRate * 100).toFixed(1)}%`);
 
     if (!report.separated) {
       line();
@@ -149,6 +168,23 @@ async function main(): Promise<number> {
       measuredAt: new Date().toISOString().slice(0, 10),
       corpusChunkCount,
       embeddingModel: 'voyage-3',
+      // The depth this run scored at. Passed from the same constant the
+      // harness gave the service rather than written out again — a threshold
+      // stamped with a depth it was not measured at is worse than one stamped
+      // with none, because the service's depth check would then pass.
+      candidateLimit: CANDIDATE_LIMIT,
+      /**
+       * RULE B, and the reason is in the two error rates printed above.
+       *
+       * The 5/95 midpoint is the rule `domain/calibration.ts` shipped with, and
+       * on the first real run it cost 24.1% in-corpus false abstention. That is
+       * one student in four told "I do not know" about material the corpus
+       * covers, bought in exchange for rejecting more off-syllabus questions —
+       * which Foxy's grounding and citation verification is the layer that
+       * handles anyway. The asymmetry is stated in that file's own header; this
+       * is the first run where it had teeth.
+       */
+      policy: 'in-corpus-false-abstain-budget',
     });
 
     line();

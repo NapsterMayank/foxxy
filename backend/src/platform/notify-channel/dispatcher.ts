@@ -1,5 +1,6 @@
 import type { Logger } from '../logger/index';
 import { PLATFORM_METRICS, createNoopMetrics, type MetricsPort } from '../metrics/index';
+import { PII_REDACTED, looksLikePii } from '../pii/index';
 import type {
   Channel,
   ChannelMessage,
@@ -105,6 +106,39 @@ export interface NotificationDispatcherOptions {
 /** Opting out of in-app is opting out of a page. See the header. */
 const NON_OPTIONAL_CHANNELS: readonly ChannelName[] = ['in-app'];
 
+/**
+ * A channel failure, made safe to write down.
+ *
+ * ===========================================================================
+ * THE REASON STRING COMES FROM THE PROVIDER, AND PROVIDERS PUT THE ADDRESS IN
+ * IT.
+ *
+ * This log line already refused to write the RECIPIENT — the comment below it
+ * says so, and it is correct. What it did was log `error.message` verbatim, and
+ * an SMTP rejection routinely reads:
+ *
+ *     550 5.1.1 <parent@example.test>: Recipient address rejected
+ *
+ * So the address arrived anyway, through the error rather than through the
+ * recipient, which is the half nobody was looking at. The same is true of
+ * WhatsApp and push provider errors, which echo the phone number or the token.
+ *
+ * It was never caught because the only test exercising this path used a fake
+ * whose message is the literal `"email exploded"` — a string that cannot fail
+ * the assertion it was written for.
+ *
+ * REDACT THE WHOLE STRING RATHER THAN THE MATCH. `platform/pii` detects; it does
+ * not offer a substring rewriter, and writing one here would put a second,
+ * subtly different PII pattern in `platform/` — exactly the drift that module
+ * exists to prevent. The diagnostic loss is bounded and visible: the metric,
+ * the channel name and the kind are all still logged, so the failure is still
+ * counted and still attributable. The operator loses the provider's sentence,
+ * in the specific case where that sentence contains somebody's address.
+ */
+function safeReason(reason: string): string {
+  return looksLikePii(reason) ? PII_REDACTED : reason;
+}
+
 export function createNotificationDispatcher(
   options: NotificationDispatcherOptions,
 ): NotificationDispatcher {
@@ -156,10 +190,12 @@ export function createNotificationDispatcher(
               event: 'notify.channel_failed',
               channel: name,
               kind: message.kind,
-              // The message only. Never the recipient — an address or a user id
-              // in a log line is the leak `platform/pii` exists to prevent, and
-              // a failure log is the easiest place to forget that.
-              err: reason,
+              // The message only, and SCRUBBED. Never the recipient — an
+              // address or a user id in a log line is the leak `platform/pii`
+              // exists to prevent, and a failure log is the easiest place to
+              // forget that. The provider's own error is the second way the
+              // address gets in; see `safeReason`.
+              err: safeReason(reason),
             },
             'a notification channel failed; other channels were still attempted',
           );

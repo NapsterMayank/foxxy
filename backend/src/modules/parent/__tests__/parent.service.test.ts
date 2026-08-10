@@ -16,6 +16,8 @@ import {
   makeChapter,
   makeQuestion,
 } from '../../../../tests/fixtures/index';
+import { weekKeyOf } from '../domain/week-window';
+import { createParentRepository, type NewDigest } from '../parent.repository';
 import type { ParentActor } from '../parent.types';
 
 /**
@@ -592,6 +594,81 @@ describe('digest generation is idempotent per (parent, child, week)', () => {
     expect(lastWeek.created).toBe(true);
     expect(lastWeek.digest.id).not.toBe(thisWeek.digest.id);
     expect(lastWeek.digest.weekStart).not.toBe(thisWeek.digest.weekStart);
+  });
+
+  it('is settled by the DATABASE when the application pre-check cannot help', async () => {
+    /**
+     * ========================================================================
+     * THE OTHER HALF OF IDEMPOTENCY, AND THE HALF THAT WAS UNOBSERVED.
+     *
+     * `parent.repository.insertDigest` ends in `ON CONFLICT ... DO NOTHING`,
+     * and the comment above it makes a specific claim: two concurrent
+     * generations — a parent tapping refresh while the weekly worker runs —
+     * would BOTH find nothing on the `findDigest` pre-check and BOTH insert, so
+     * "the unique index is the only thing that can settle that".
+     *
+     * Changing that clause to `DO UPDATE` left 150/150 green. Every existing
+     * idempotency test calls `generateDigest` twice IN SEQUENCE, so the
+     * application-level pre-check answers first and the INSERT never runs a
+     * second time — the database half is never reached, and therefore never
+     * observed.
+     *
+     * This test goes STRAIGHT TO THE REPOSITORY, which is what a concurrent
+     * second caller effectively does: it has already passed the pre-check, and
+     * the statement is all that is left. Two properties, not one:
+     *
+     *   `created: false`   — the loser reports truthfully, so the caller does
+     *                        not send a second digest email.
+     *   THE ROW IS UNCHANGED — `DO UPDATE` returns a row (so `created` would be
+     *                        `true`) AND overwrites a digest a parent may
+     *                        already have read, with a different summary and a
+     *                        different `generatedAt`.
+     * ========================================================================
+     */
+    const { parent, child } = await makePair('approved');
+    const repository = createParentRepository(harness.container.poolFor('parent'));
+
+    const weekStart = weekKeyOf(harness.clock.now());
+    const base: NewDigest = {
+      parentUserId: parent.userId,
+      studentUserId: child.userId,
+      weekStart,
+      summary: { en: 'The FIRST summary.', hi: 'पहला सारांश।' },
+      suggestedAction: { en: 'Ask about fractions.', hi: 'भिन्न के बारे में पूछें।' },
+      misconceptionCode: null,
+      sessionsCount: 3,
+      questionsAnswered: 12,
+      daysPractised: 2,
+      chapterId: null,
+      tenantId: TEST_TENANT_ID,
+      generatedAt: harness.clock.now(),
+    };
+
+    const first = await repository.insertDigest(base);
+    // A DIFFERENT payload, so an overwrite is visible rather than merely
+    // possible. Same key, which is the only thing the constraint looks at.
+    const second = await repository.insertDigest({
+      ...base,
+      summary: { en: 'The SECOND summary.', hi: 'दूसरा सारांश।' },
+      sessionsCount: 99,
+      generatedAt: new Date(harness.clock.now().getTime() + 60_000),
+    });
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+
+    const stored = await repository.findDigest(parent.userId, child.userId, weekStart);
+    expect(stored?.summary.en).toBe('The FIRST summary.');
+    expect(stored?.sessionsCount).toBe(3);
+    expect(stored?.generatedAt.getTime()).toBe(base.generatedAt.getTime());
+
+    // And still exactly one row — an upsert would also satisfy a count of one,
+    // which is why the assertions above are about the CONTENT.
+    const rows = await harness.postgres.client.query(
+      `select 1 from weekly_digests where parent_user_id = $1 and student_user_id = $2`,
+      [parent.userId, child.userId],
+    );
+    expect(rows.rowCount).toBe(1);
   });
 
   it('does not generate on a GET — reading a page must not write a row', async () => {

@@ -912,9 +912,29 @@ The content pipeline produced **concepts** but never produced **question-level p
 - Cost is a few days of generation plus a human verification pass, not months
 - **Generating across the full bank is explicitly out of scope** until the pilot proves the format
 
-### D-078 · 2,564 chunks carry no embedding and must be re-embedded
-**Status:** Active
-9.2% of chunks are stamped `mistral-embed` with a **NULL vector**. They are invisible to vector retrieval. Re-embed with `voyage-3` at 1024 dimensions to match the rest. Cheap, one-time, and it must happen before threshold calibration — otherwise the calibration is measured against a corpus with a 9% hole in it.
+### D-078 · ~~2,564 chunks carry no embedding and must be re-embedded~~ → **20 chunks, measured**
+**Status:** **Superseded in its numbers, 10 August 2026.** The concern was real; the figures were not. Both are stated below so the correction is legible rather than a silent overwrite.
+
+**What this entry said:** 9.2% of chunks — 2,564 — are stamped `mistral-embed` with a **NULL vector**, invisible to vector retrieval, and must be re-embedded with `voyage-3` at 1024 dimensions **before threshold calibration**, or the calibration is measured against a corpus with a 9% hole in it.
+
+**What the imported database actually holds** (`select count(*) … from rag_chunks`, dev, 10 August 2026):
+
+| | rows |
+|---|---|
+| imported | **4,686** |
+| active (`is_active`) | **4,403** |
+| active with a NULL embedding | **20** |
+| active with an embedding | **4,383** |
+
+**So: 20, not 2,564 — 0.45% of the active corpus, not 9.2%.** The original count described the SOURCE export; the importer is what decided which rows landed and which were skipped, and the two were never reconciled.
+
+**Consequences of the correction:**
+- **The blocker is void.** Threshold calibration did not need to wait for a re-embed, and it ran on this corpus on 10 August 2026 (see D-179). A 0.45% hole does not move a percentile.
+- **Re-embedding 20 chunks is a chore, not a project.** Still worth doing — they are invisible to the dense half — but it does not gate anything.
+- **`4,403` is the number to quote for "the corpus", not `4,686`.** They differ by 283 inactive rows, and the active count is the population a query can return. Anywhere a comment or a threshold's provenance says how large the corpus is, it means the active count.
+- The unchanged half of the entry: those 20 rows are **real content, reachable by full-text search**, which is why they were imported rather than skipped. `retrieval.repository.ts`'s dense query excludes them explicitly (`embedding is not null`) so pgvector cannot sort NULL distances into the top 50.
+
+**The lesson, which is the reusable part:** this figure sat in the log for months, was quoted in five source comments, and gated a piece of work — and nobody had run the count against the database it described. A number in this log that has never been re-measured against the system it claims to describe is a hypothesis with a table around it.
 
 ### D-059 · RESOLVED — chunk-to-chapter linkage is sound
 `chapter_number IS NULL` returns **0 rows** across all 27,778 chunks. Chapter-scoped retrieval will not under-cover. The concern is closed.
@@ -2726,3 +2746,726 @@ belongs to `practice`: it is written to `practice_sessions.invalid_reason` and
 read by a human deciding what to say to a student. `signals` gets the VERDICT
 only — giving it the reason would invite it to grow a second opinion about what
 the reason means, in a second place, from evidence it did not gather.
+
+---
+
+## Log hygiene and enforcement-rule evasions — 10 August 2026
+
+> One live credential leak and five holes in rules that looked authoritative
+> and enforced less than they claimed. D-178 to D-183 continue from D-177.
+> **Every rule changed here was verified by writing a file that breaks it,
+> confirming lint exits non-zero with the intended message, and deleting it —
+> the exercise the README calls for, and the one that found the leak below.**
+
+### D-178 · The session token was written to the logs in plaintext, and redaction could not see it
+**Status:** Closed — fixed and pinned by an HTTP-level test
+
+`app/plugins/request-id.ts` bound `url: request.url` into the per-request child
+logger and emitted one `info` line per response. For the one endpoint that
+carries a credential in its query string, that line was:
+
+```json
+{"level":"info","requestId":"…","method":"GET",
+ "url":"/api/v1/auth/verify?token=hu06Wi4jXIIzTob9Hy_62bR1ywlxI9E6dpRRdOjhMeg",
+ "statusCode":302,"durationMs":22,"msg":"request completed"}
+```
+
+**That token grants a session on redemption.** Anyone with read access to the
+log stream — which in a container is stdout, collected by default — could
+complete somebody else's email verification.
+
+**Why the central redaction did not help, and this is the general lesson.**
+`platform/logger/redaction.ts` builds `REDACT_PATHS` from 21 sensitive key
+names, including `token`, at three depths. It is comprehensive, configured once,
+and asserted against its own list — which is precisely why it read as finished.
+But pino redacts by KEY, and here the secret was inside a VALUE: one string,
+bound under the key `url`, that pino has no reason to parse. The list could have
+been twice as long and still been blind. **A redaction list is a claim about the
+shape of your data; this leak was a place where the shape was wrong, not where
+the list was short.**
+
+**The fix strips the query string at the binding site** (`stripQueryString`, in
+`platform/logger/redaction.ts`, next to the list it complements). A PATH is what
+correlation wants — which endpoint was called. A QUERY STRING is where secrets
+live. Dropping it removes a field that never carried signal.
+
+**Deliberately NOT a filter on credential-shaped parameter names.** That is the
+same allow-list shape as `SENSITIVE_KEYS`, and it fails the first time a
+parameter is named `t`, `k` or `code`.
+
+**Why the existing test could not fail.** `identity.security.test.ts`'s "no
+credential ever reaches a log line" drives the identity SERVICE directly. With
+no HTTP request there is no Fastify hook, no child logger and no `url` binding
+at all — the leak lived entirely in the gap between what that test exercised and
+what production runs. The new test
+(`src/app/__tests__/request-id-url-redaction.test.ts`) goes through
+`app.inject`, captures what the REAL pino logger writes (the fake does not
+redact; asserting against it would prove a property of the fake), and was
+confirmed to FAIL with the one-line fix reverted — three of its four assertions
+go red.
+
+### D-179 · The dev mail adapter printed every recipient and every body to stdout
+**Status:** Closed — pinned by `platform/mail/__tests__/console-mail.test.ts`
+
+`createConsoleMail` wrote `to: <address>` plus the whole rendered `data` —
+title, body, and the verification token inside it. **It is the DEFAULT adapter
+at the composition root and no Resend adapter exists**, so this was not a local
+debugging convenience: it was the production path for every notification email,
+writing PII and credentials to the log stream, having bypassed
+`platform/logger` and its redaction entirely.
+
+Invisible to the suite because every harness substitutes `RecordingMail` — the
+same structural blindness as D-178. The thing that runs in production is the
+thing no test drives.
+
+It now prints the template, the recipient's DOMAIN with the person removed
+(`[REDACTED]@example.com`), and the data KEYS with every value dropped. Keys are
+kept because a missing template field is the common bug and its name is enough
+to see it; values are where the body and the token were. **The cost is real and
+accepted: copying a verification link out of the dev console no longer works.**
+Read the token from the database, or from `RecordingMail` in a test.
+
+### D-180 · D-075 evaded a THIRD time, by backticks — the fourth recurrence of a `Literal`-shaped guard
+**Status:** Closed — three evasion shapes proven to fire
+
+D-075 (no test may hardcode a LIST of migrations) has now been fixed four times.
+Its array rule selects `ArrayExpression > Literal`; the chain rule's visitor was
+`Literal(node)`. **A `TemplateLiteral` is neither.** This exited 0:
+
+```ts
+run(readDownMigration(`0008_tenant_not_null.down.sql`, 'superseded'));
+run(readDownMigration(`0007_notify_metrics_jobs.down.sql`, 'superseded'));
+```
+
+Backticks are idiomatic and neither prettier nor eslint pushes back on them. Two
+further shapes also passed, both of which move the extension out of the string:
+`['0009_a','0010_b'].map((s) => ...)` with the `.sql` added in the callback, and
+`'0013_e' + EXT`.
+
+**Two changes close all three.** The visitor now reads static `TemplateLiteral`
+quasis as well as `Literal` strings, and `.sql` is OPTIONAL in the pattern —
+because in the last two shapes the extension is not in the string at all. A bare
+`0013_e` is already a complete migration identity; the extension was decoration
+the defect had learned to hide behind. The cost of the optional extension is
+that a string shaped exactly `0000_lower_snake` now counts even without `.sql`,
+and three of those in one file is the thing being banned anyway.
+
+**The recurring lesson is about the guard, not the defect.** Four fixes, three
+of them defeated by writing the same list in slightly different syntax, because
+each fix pinned the SHAPE the defect happened to have that time. A rule keyed to
+one node type has an escape hatch in the language grammar.
+
+Proven: all three shapes report (array-of-backticks, 2 errors; vertical chain,
+"names 3 different migrations"; map + concatenation, "names 4"), and the
+legitimate case — one prerequisite plus a subject in both directions — still
+exits 0.
+
+### D-181 · The database rule's message claimed more than its scope enforced
+**Status:** Closed — scope widened, and the gap that remains is written down
+
+`DB_PATTERNS` said "Database access lives in *.repository.ts files only" and was
+applied under `src/app/**` and `src/modules/**` — two subtrees out of five.
+`src/platform/**`, `src/shared/**` and `src/worker/**` were unpoliced, and three
+files import `drizzle-orm` outside a repository today:
+`worker/jobs/expired-session-sweeper.ts`, `platform/jobs/postgres-queue.ts`,
+`platform/jobs/heartbeat.ts`.
+
+**A rule whose text overstates its reach is worse than a narrow rule**, because
+everyone downstream reads the text and believes it — the same failure as the
+`../*/!(index)` pattern that matched nothing while looking authoritative.
+
+The scope is now all of `src/**`. The two directories that cannot comply are
+exempted **by name, in a block that names the three files and calls itself the
+gap**, and the message now states the exemptions instead of denying them. They
+are exempted rather than rewritten because rewriting them is a separate change
+with its own review. Deleting those two directories from the exemption list is
+the follow-up; adding a third is not.
+
+Proven: `drizzle-orm` imported from `platform/logger` and from `shared/` both
+report; from `worker/` it does not, which is the documented exemption behaving
+as written.
+
+### D-182 · `globalThis.process.env` needs no import, so neither rule could see it
+**Status:** Closed — four shapes proven to fire
+
+`no-restricted-imports` never fired because `process` is a global that needs no
+import, and `no-restricted-properties` matches the identifier `process`, so
+`globalThis.process` — a different member expression naming the same object —
+walked past both. Four shapes exited 0:
+
+```ts
+globalThis.process.env.DATABASE_URL
+globalThis['process'].env.DATABASE_URL
+const p = process; p.env.DATABASE_URL
+const { env } = process; env.DATABASE_URL
+```
+
+Three syntax selectors close them (the last two are the same
+`VariableDeclarator`). All four now report.
+
+### D-183 · Dynamic `import()` bypassed every boundary rule at once
+**Status:** Closed — proven to fire
+
+`no-restricted-imports` inspects `ImportDeclaration` nodes and nothing else, so
+
+```ts
+await import('@/modules/knowledge/knowledge.service');   // exited 0
+```
+
+defeated the module public surface, the module escape rule, `ENV_PATTERNS` and
+`DB_PATTERNS` **simultaneously** — four rules, one line, no diagnostic.
+
+Banned outright inside `src/**` and `tests/**` rather than filtered by
+specifier: a filter would be a SECOND list of restricted paths maintained beside
+the first, and two lists drift. There is no legitimate lazy import inside the
+server — the graph is constructed once, at boot, by the composition root, and
+deferring a module load would only move a wiring failure from startup to
+whenever the first request happens to reach it.
+
+`scripts/` is exempted and keeps two deliberate dynamic imports: they defer
+`platform/config`'s eager, process-exiting environment read until the script has
+decided it needs it.
+
+**A note on `no-restricted-syntax` that cost real time:** the rule REPLACES
+across flat-config objects, it does not merge. The tests block previously
+declared only the migration patterns, so a syntax rule added elsewhere would
+have been silently switched off for every test file — most of the repository.
+Each declaration now spreads the shared arrays explicitly.
+
+### D-184 · The system prompt was assembled, tested exhaustively, and never pinned as SENT
+**Status:** Closed — mutation-proven
+
+A mutation replaced the request literal at `foxy.service.ts:367-374` with one
+that **dropped the system message entirely**, set `temperature: 1.5` (the
+legitimate maximum across every mode and action is 0.5) and `maxTokens: 4096`.
+**All 170 tests passed.**
+
+`assemblePrompt` is a pure function with 23 tests over it, and every property
+that matters — the Foxy persona, the CBSE grade/subject scope, the grounding
+rule *"Answer ONLY from the reference passages given below"*, the `[chunk:<id>]`
+citation instruction, the age-11-to-18 rails — was asserted on **a value nobody
+was obliged to send**. Not one test in `src/modules/foxy/__tests__/` read
+`harness.llm.recorder.requests`; every LLM assertion was on `callCount()` alone,
+which answers "was the model called" and never "with what".
+
+This matters more than it looks: a separate audit established that the abstain
+threshold is currently **unreachable** (`below-threshold` cannot fire, so
+`no-candidates` is the only abstention the real pipeline produces). That makes
+the grounding rule in the system prompt **the only thing** between a weak
+retrieval hit and an ungrounded answer given to a child.
+
+Fixed by making the request the single artefact: `toLlmRequest` in
+`domain/prompt.ts` is the only builder, it refuses a missing system message, a
+temperature above `FOXY_MAX_TEMPERATURE` (0.5) and a non-positive budget, and
+`sendMessage` hands the built request — not the assembled prompt — to
+`streamedTurn`. Eight service tests now assert on `recorder.requests`: the
+grounding rule and citation instruction are present, the grade and subject are
+named, **every retrieved chunk id appears in the request**, the temperature
+equals the mode's and is under the ceiling, and the budget equals the per-mode
+or per-action figure rather than a constant.
+
+Re-applying the original mutation now fails 9 tests.
+
+### D-185 · The trace re-derived the prompt instead of recording it — a self-consistent lie
+**Status:** Closed — mutation-proven
+
+`foxy.service.ts:440-442` built the `retrieval_traces.prompt` column from
+`prompt.system` **at persistence time**, rather than from the object handed to
+`deps.llm.stream`. Under D-184's mutation the existing trace test at
+`foxy.service.test.ts:217` still passed: the forensic record asserted a system
+prompt the model had never received.
+
+Migration 0005 calls this column "the only way you will ever debug a bad
+answer". A column that describes a request rather than recording one is worse
+than a missing column — it is the artefact somebody trusts at 2am while
+investigating what a child was told.
+
+`streamedTurn` no longer receives the assembled prompt at all. It receives the
+`LlmRequest` and the language, and the trace is `renderSentPrompt(request.messages)`
+— the same object, rendered once. **Divergence is now structurally impossible
+rather than merely unintended.** Proven by mutating the render to drop the
+system message: 2 tests fail.
+
+### D-186 · Two foxy tests that passed under the mutation they were named for
+**Status:** Closed — both rewritten, both mutation-proven
+
+**(a) The vacuous usage-limit test.** `foxy.service.test.ts:667-685`, *"blocks
+BEFORE retrieval and before the model"*, passed with the usage limit **removed
+entirely**. It called `sendMessage(...).catch(() => undefined)` and never
+drained `turn.frames` — and `sendMessage` returns a *promise of a stream*, so
+the model is only reached on drain. Resolving instead of rejecting therefore
+left `callCount` at zero just the same. Vacuous in both directions, under a name
+that overclaimed. It now asserts the refusal is a `RATE_LIMIT` error, drains the
+stream if one was returned at all, and asserts nothing was persisted. (Its
+sibling at `:620-637` did catch the mutation, so the limit itself was never
+unpinned.)
+
+**(b) Incremental citation stripping was not pinned above the unit level.**
+Replacing the streaming filter with a post-hoc one (buffer the whole answer,
+strip once) failed exactly **one** test, and only on an incidental token count.
+The reason is `createFakeLlm`: it splits on `' '`, and `[chunk:<uuid>]` contains
+no space, so **a marker always arrived whole**. A real model splits markers
+mid-token routinely.
+
+`__tests__/char-stream-llm.ts` adds a fake that streams one character at a time
+and counts what it has yielded. Two tests: the student's visible text never
+contains `[`, `chunk:` or the id at **any** point in the stream and is always a
+prefix of the final answer; and the first visible token arrives while the model
+is still streaming (`yielded() < total()`), which is the property a post-hoc
+filter cannot satisfy and a final-string comparison cannot detect. The post-hoc
+mutation now fails both.
+
+### D-187 · The grade/subject filter was pinned only in the direction that finds nothing
+**Status:** Closed — mutation-proven in both directions
+
+Removing the retrieval filter was caught only because retrieval then returned
+**nothing** — every foxy fixture seeded grade 8 science, which is the test
+student's own grade and subject. Nothing proved that a chunk sitting in grade 6,
+or in mathematics, is *unreachable*.
+
+Two tests now seed off-limits content deliberately, worded to be a **strong**
+lexical match for the query so a missing filter wins on relevance rather than by
+luck: a grade-8 student must not receive the grade-6 chunk or the mathematics
+chunk, in the trace's `retrieved` list or in the prompt. And where the student's
+own grade has no chunk at all while another grade has one that answers the
+question word for word, the correct answer is to **abstain** — borrowing it is
+the failure.
+
+Proven by widening the injected search to merge grade 6 and mathematics results:
+the leakage test fails on the retrieved ids.
+
+### D-178 · `identity` gets the mutation test the other three modules already had
+**Status:** Active
+
+`billing`, `foxy` and `parent` each carried a `*.authz-mutation.test.ts`.
+`identity` — the module that OWNS the boundary, and the one all three resolve
+to — carried none. Replacing the second line of `tenantOfStudent`
+(`return repository.findUserTenant(studentUserId)`) with `return actor.tenantId`,
+which is the D-091 self-comparison exactly, left **all 344 tests green**. The
+thirteen-line comment above that function names the failure mode in as many
+words; nothing tested it, because every existing caller passes
+`tenantId: TEST_TENANT_ID` on BOTH sides.
+
+`src/modules/identity/__tests__/identity.authz-mutation.test.ts` installs three
+breaks deliberately — the tenant echoed off the actor (both directions), the
+link status hardcoded to `approved`, and the status cached instead of read per
+call — and asserts each is OBSERVABLE. The read side of D-073 is now pinned;
+the existing D-073 tests covered the WRITE side only. **5 of its 9 tests go red** 
+under the mutation.
+
+### D-179 · `content.authoriseRead` is asserted through the SERVICE, per use-case
+**Status:** Active
+
+Replacing the body of `authoriseRead` with a no-op left **50/50 passing**.
+`kind: 'content'` carries no tenant (migration 0004 gives the corpus none), so
+the ownership half of the guard is vacuous BY DESIGN and the read rule allows
+every authenticated actor — nothing an ordinary test does can tell "allowed"
+from "not asked".
+
+The live effect is `assertTenantMatch`'s first line: *an actor with no tenant is
+not a half-authenticated caller, it is a wiring defect, and it must not be able
+to reach anything at all*. Gutted, an actor whose `tenantId` is `''` or
+whitespace reaches the entire curriculum.
+
+**Only two of the five methods have an HTTP route.** `getQuestionsForChapter`,
+`getHeldOutQuestionsForChapter` and `getChunksByIds` are called module-to-module
+by `practice` and `retrieval`; for those three `authoriseRead` is the ONLY
+authorisation in the path and no route-level check masks it. Ten assertions now
+cover five use-cases x two tenantless shapes, all through the service. **All ten
+go red** under the no-op.
+
+Also corrected: `content.service.test.ts`'s "denies a write attempt at the
+guard" reaches PAST the service to `harness.container.authz` directly. It
+asserts the authz table refuses writes and nothing about whether
+`content.service` consults the guard. Its comment claimed otherwise; the comment
+now states its real scope.
+
+### D-180 · The delivery plan's channel decision is enforced on the wire, and now observed
+**Status:** Active
+
+`notify.service.ts`'s `optOut` subtraction —
+
+```ts
+deps.dispatcher.channelsFor(kind).filter((c) => !channels.includes(c))
+```
+
+— replaced with `[]` left **139/139 green**. It is the ONLY place a recipient's
+opt-out is enforced on the wire: `planDelivery` removes opted-out channels at
+send time, the plan rides on the job, and this subtraction is what stops the
+dispatcher putting them back from its own policy.
+
+It is unobservable TODAY only because every `KIND_POLICY` row has at most one
+remote channel, so "what the plan chose" and "what the dispatcher would choose"
+cannot differ. It becomes load-bearing the moment `digest_ready` gains
+`'whatsapp'` — the change `domain/kinds.ts` advertises as "ONE ROW EDIT" — at
+which point a recipient who opted out of WhatsApp receives WhatsApp.
+
+Two tests now make the halves disagree deliberately (dispatcher
+`['whatsapp','email']`, plan `['email']`) and assert `{ whatsapp: 0, email: 1 }`
+as separate counts.
+
+**And the test that claimed to prove "adding a channel needs no service change"
+asserted a SUM.** `whatsapp.sent.length + email.sent.length > 0`. Tightened to
+`{ whatsapp: 1, email: 0 }` it reported `{ whatsapp: 0, email: 1 }`: the new
+channel received nothing and the test passed on email alone. It now rehearses
+the one-row edit where it actually lands — on the PLAN, by amending the job
+payload — and asserts both channels received the real message, counted
+separately.
+
+### D-181 · `notify` could not tell Hindi from English
+**Status:** Active
+
+`BilingualText` is a PROPERTY NAME, not a language: `{ en: 'x', hi: 'x' }`
+type-checks, and `notifications_bilingual_check` only rejects BLANKS. Devanagari
+assertions before this change: **5 in `parent`, 0 in `notify`, 0 in
+`platform/notify-channel`**. P7's enforcement in the module that sends every
+notification in the product rested entirely on a required property.
+
+Two tests added. The first asserts the SCRIPT on the stored columns, read raw
+rather than through the service's mapper (a mapper that swapped the columns
+would satisfy a round-trip assertion perfectly).
+
+The second kills the surviving mutant. `in-app-channel.ts` writing
+`titleHi: message.title.hi || message.title.en` left 139/139 green, because
+`hi` is non-empty everywhere and `x || y` with truthy `x` is `x` — a fallback
+nobody can observe is indistinguishable from no fallback until it fires. It can
+fire: `BilingualText.hi` is typed `string`, so `hi: ''` COMPILES. Today that
+reaches the CHECK and is refused loudly at the source; with the fallback the
+insert SUCCEEDS and an English string is filed as somebody's Hindi, permanently.
+The channel is called directly, because this is the ADAPTER's rule and
+`notify.send` is not its only caller.
+
+### D-182 · The database half of digest idempotency is now observed
+**Status:** Active
+
+`parent.repository.insertDigest` ends in `ON CONFLICT ... DO NOTHING`, and its
+comment makes a specific claim: two concurrent generations — a parent tapping
+refresh while the weekly worker runs — both pass the `findDigest` pre-check and
+both insert, so "the unique index is the only thing that can settle that".
+
+Changing that clause to `DO UPDATE` left **150/150 green**. Every existing
+idempotency test calls `generateDigest` twice IN SEQUENCE, so the
+application-level pre-check answers first and the INSERT never runs a second
+time — the database half is never reached and therefore never observed.
+
+The new test goes straight to the repository, which is what a concurrent second
+caller effectively is, and asserts two things rather than one: `created: false`
+(so the loser does not send a second digest email) and THE ROW IS UNCHANGED
+(`DO UPDATE` returns a row AND overwrites a digest a parent may already have
+read, with a different summary and a different `generatedAt`). A row COUNT alone
+would not distinguish them, which is why the assertions are about content.
+
+### D-183 · Two comments that asserted coverage which did not exist
+**Status:** Active
+
+**`parent.routes.test.ts`'s oracle test.** Its docstring listed a fifth deny case
+as *"another tenant — an approved link across a tenant boundary"*, and called it
+"the one that separates this from a formality". The fifth entry was *"a child
+linked to somebody ELSE"*, and **no tenant boundary was crossed anywhere in the
+file**. Both are legitimate refusals, but they are refused by DIFFERENT rules —
+consent and tenancy — and only the consent one was pinned. An audit confirmed
+the byte-identical property does hold across all of them with a probe; four were
+pinned and the docstring asserted five. A genuine sixth case now exists: an
+APPROVED pair whose child row is moved to the second tenant while the parent's
+session keeps its own.
+
+**`dispatcher.ts` logged the provider's error verbatim.** The line's own comment
+says it never logs the recipient, and it does not — but SMTP rejections embed
+the envelope (`550 5.1.1 <parent@example.test>: Recipient address rejected`), and
+WhatsApp and push providers echo the number and the token the same way. The
+address arrived through the ERROR rather than through the recipient. It was
+never caught because the only test on that path uses a fake whose message is the
+literal `"email exploded"` — a string that cannot fail the assertion it was
+written for.
+
+`safeReason` redacts the WHOLE string when `looksLikePii` fires, rather than the
+match: `platform/pii` detects but offers no substring rewriter, and writing one
+in `platform/notify-channel` would put a second, subtly different PII pattern in
+`platform/` — the drift that module exists to prevent. The channel, the kind and
+the metric are still logged, so the failure stays counted and attributable.
+
+### D-188 · Anti-cheat rule 2 judged the answer key, not the student
+**Status:** Active
+
+`domain/anti-cheat.ts` said the "not every answer the same index" rule operates
+on the CANONICAL option index. `practice.service.ts` builds **one shuffle map
+per question** and translates every tap through that question's own map, so the
+bored tap-through the rule exists to catch — the same SCREEN POSITION, six times
+— produces six different canonical indices. The rule was evaluating the authored
+`correct_index` distribution instead of the student's behaviour.
+
+Measured by simulation, 20,000 attempts x 6 four-option questions, production
+`Math.random`:
+
+| behaviour | over canonical | over presentation |
+|---|---|---|
+| same screen position every time | 21/20000 = **0.105%** | 20000/20000 = **100.000%** |
+| honest random play | 13/20000 = 0.065% | 16/20000 = 0.080% |
+
+Detection of the targeted behaviour went from ~0 to complete at an unchanged
+false-positive cost — the 0.08% is `4/4^6 ≈ 0.098%`, the floor four options and
+six questions make unavoidable, and is exactly why the rule is switched off at
+three questions where it would be ~6%.
+
+The inverse failure is the half that reached students: a full-marks attempt on a
+chapter whose `correct_index` happens to be uniform stores one canonical index
+every time and was scored ZERO for it.
+
+`AttemptResponse` now carries `presentationIndex` alongside `selectedIndex`, and
+rule 2 reads the former. **D-058 is untouched** — the canonical index is still
+the only index persisted; the presentation index is recovered at validation time
+from the session's own map and written nowhere. `presentationIndex` is optional
+solely because `modules/signals` re-validates rows read back from
+`practice_responses`, which store the canonical index alone; when it is absent
+the rule is SKIPPED rather than falling back, because a fallback reinstates the
+defect for whichever caller forgot the field.
+
+### D-189 · The contract described a server-side time backstop that did not exist
+**Status:** Active
+
+`shared/contracts/practice.contract.ts` stated that "the server-side backstop is
+that the session's own `started_at` bounds the total". It did not: `startedAt`
+appeared only as a column mapping, a response field and a sort key, and rule 1
+validated entirely against client-supplied `timeSpentMs`. **Six questions
+claiming 12s each passed validation inside a 2-second real session.**
+
+`submitSession` now computes `realElapsedMs = now - session.startedAt` — both
+instants from the injected clock — and `validateAttempt` CLAMPS the claimed
+total to it before averaging. Clamp rather than compare: a claim SMALLER than
+the wall clock is ordinary and honest (a paused tab, a student who walked away)
+and must stand; only a claim LARGER than the wall clock is impossible.
+
+Consequence: a frozen `FixedClock` now makes any non-trivial claim `too_fast`,
+which is correct. Every honest test spends the time it reports; the ones that
+deliberately do not are named so.
+
+### D-190 · Two thresholds that were free to move with the suite green
+**Status:** Active
+
+`SAME_ANSWER_MIN_QUESTIONS` moved 3 -> 10 and `MIN_AVERAGE_MS_PER_QUESTION`
+moved 3000 -> 300 with **219/219 practice tests passing**. Every test referenced
+the constants, which is correct for boundary tests and useless as a pin. The
+test named *"ALLOWS exactly 3 identical answers"* was written
+`allSame(SAME_ANSWER_MIN_QUESTIONS)` — at 10 it asserted that ten identical
+answers are allowed while still reporting itself as the test for three. The time
+floor was pinned only incidentally in `app/__tests__/routes.test.ts`, a test
+about module WIRING.
+
+Both are now asserted as literals in
+`modules/practice/__tests__/anti-cheat.test.ts`, beside the boundary tests
+rather than instead of them. A threshold has to be pinned where it is authored.
+
+### D-191 · The write paths of `practice` had no access test at all
+**Status:** Active
+
+`startSession`'s `assertCanAccess` could be DELETED with 219/219 green — it is
+the one call that creates the session row, and therefore the only place the
+`tenant_id` that every later check reads is decided. Making `loadSession`'s
+guard conditional on `action === 'read'` also passed, because **every existing
+access test was a read**.
+
+Both mutations now fail. Note the layering: `refuses submitSession on another
+student's session` survives the second mutation because `learner` guards
+`getMastery` independently — the tests that isolate practice's own guard are the
+`submitAnswer` cross-student case and the cross-tenant case on both writes, and
+the file says so.
+
+### D-192 · The per-question shuffle map was untested, because the harness map is constant
+**Status:** Active
+
+`tests/helpers/app-harness.ts` supplies `random: () => 0.5`. It produces a map
+that genuinely reorders — which is why the D-058 test works — and it produces
+the SAME map for every question in a session. Under it, making `shuffleFor`
+return the FIRST question's map for every question passed **219/219**.
+
+That writes a canonical index derived from another question's permutation.
+`questions.distractor_misconceptions` is keyed by original index (D-048), so
+every misconception resolves to a real code for the wrong distractor —
+plausibly, silently, and unrecoverably, because the map that would have
+translated it is the one that was not used. The existing D-058 test uses a
+SINGLE-QUESTION session and structurally cannot see it.
+
+The practice tests now build a module with a seeded LCG for the multi-question
+cases, and assert the precondition — the maps reorder AND differ from one
+another — before asserting that each stored index round-trips through its OWN
+question's map.
+
+### D-193 · Graph coverage reported `orderable: true` for a grade with zero plannable chapters
+**Status:** Active
+
+`getGraphCoverage('8','mathematics')` returned 14/14, ratio **1.0**,
+`orderable: true`, `cycle: []`. Every one of those 14 chapters failed
+`findLearningPath` with `reason: 'cycle'`.
+
+`computeGraphCoverage` projected **in-scope nodes only**; `findLearningPath`
+projects **all corpus nodes**. Grade 8 mathematics has 19 prerequisite edges
+pointing back into grade 7 mathematics, whose projection contains a cycle. In
+isolation grade 8 is acyclic — so `orderable` was a true statement about a graph
+nobody ever walks, and it read as health. This is D-129's own argument recurring
+inside the instrument built to detect it.
+
+`orderable` and the new `plannableChapters` are now computed from the CORPUS
+projection, one `findLearningPath` per covered chapter — the identical call the
+feature makes. Measured before/after on the dev corpus (137 chapters, 176 edges):
+
+| grade | subject | total | withGraph | plannable | orderable before | after |
+|---|---|---|---|---|---|---|
+| 6 | mathematics | 12 | 10 | 10 | true | true |
+| 7 | mathematics | 15 | 15 | 2 | false | false |
+| 8 | mathematics | 14 | 14 | **0** | **true** | **false** |
+| 9 | mathematics | 13 | 13 | 13 | true | true |
+| 10 | mathematics | 15 | 14 | 14 | true | true |
+| 6 | science | 12 | 12 | 12 | true | true |
+| 7 | science | 13 | 12 | 12 | true | true |
+| 8 | science | 13 | 13 | 13 | true | true |
+| 9 | science | 14 | 12 | 12 | true | true |
+| 10 | science | 16 | 13 | 13 | true | true |
+
+One row changed verdict, and it is the one the instrument existed to catch.
+Corpus-wide, **101 of 128** covered chapters are plannable — a 27-chapter gap no
+field on the old report expressed.
+
+The old scoped reading survives as `orderableWithinScope`, a subordinate
+DIAGNOSTIC: the disagreement between the two is the diagnosis, separating "this
+grade contradicts itself" (grade 7 mathematics) from "this grade is internally
+fine and its out-of-grade prerequisite is not" (grade 8 mathematics). It is
+documented as never being the answer to "can this grade be planned".
+
+---
+
+## Retrieval quality and the abstention threshold — 10 August 2026
+
+> **ID COLLISION NOTE.** `D-178`, `D-179` and `D-180` each appear more than once in this file already, from parallel workstreams appending on the same day. The four entries below take `D-201`..`D-204` (D-193 was the highest in use at the time of writing); if another stream claimed them concurrently, renumber THESE rather than the others — they are the newest and nothing references them yet.
+
+### D-201 · The sparse half ANDed every query term, and abstained on 44% of questions the corpus answers
+**Status:** Active — fixed in `src/modules/retrieval/retrieval.repository.ts`
+
+`websearch_to_tsquery` conjoins every non-stopword. Measured:
+
+```
+"what did mendel find out from his experiments on pea plants"
+  -> 'mendel' & 'find' & 'experi' & 'pea' & 'plant'
+  chunks matching 'mendel'                :  6
+  chunks matching 'mendel | pea | plants' : 89
+  chunks matching the full AND query      :  0   -> the sparse half returns nothing
+```
+
+…while the corpus contains, verbatim: *"Mendel used a number of contrasting visible characters of garden peas – round/wrinkled seeds, tall…"*.
+
+Across the 54-question in-corpus golden set (`npm run eval:retrieval:recall`, dev corpus, candidate limit 50):
+
+| | zero candidates | mean candidates |
+|---|---|---|
+| BEFORE — AND semantics | **24 of 54 (44.4%)** | 3.87 |
+| AFTER — OR + `ts_rank_cd` | **0 of 54 (0.0%)** | 49.19 |
+
+**Decision: OR semantics, with the RANKING doing the discrimination.** The lexemes are taken from `to_tsvector(config, query)` — the same parser and dictionary that built `rag_chunks.search_vector`, so query and index tokenise identically by construction — quoted by Postgres's own `quote_literal`, joined with `|`, and cast. A query that reduces to no lexemes yields `null` and matches nothing, as before.
+
+**The property deliberately preserved:** `websearch_to_tsquery` was chosen over `to_tsquery` because `to_tsquery` RAISES on ordinary prose ("what is refraction?" is a syntax error a student would see as a failed answer). Nothing in the new query can raise on user input either — the only cast is applied to an aggregate of Postgres-quoted lexemes. Verified against empty input, stopword-only input, Devanagari under the `simple` configuration, and `"quoted phrase" -excluded term & | ! ( )`.
+
+**What is deliberately lost:** websearch's negation. `-term` becomes an ordinary OR term. Ranked last among the lexemes it barely moves the order, and the alternative is a second, fragile tokeniser in TypeScript for a syntax a student typing into a chat box does not use.
+
+**What OR costs, stated:** the sparse list is now nearly always full. Extra recall at the bottom of a 50-list is close to free — RRF reads only rank, and rank 50 of one list contributes 1/110 — but it means the sparse half no longer discriminates by ITSELF. That job moved to the ranking (D-202) and to the measured threshold (D-203). A graded AND-then-OR fallback was considered and rejected: it is a second query path in the one module whose header says there is exactly one, and measurement showed the ranking alone puts the right passage higher (see D-202's probe 3, where an AND-first prior demoted the actual proof from rank 5 to rank 8).
+
+### D-202 · `ts_rank` saturates at exactly 1.0, so the top of every sparse list was ordered by random UUID
+**Status:** Active — fixed in the same file
+
+`ts_rank` returns `float4`. For any well-matched document the value pins to exactly 1.0. Measured on *"what is refraction of light"*, grade 10 science: **twelve chunks tied at exactly 1.0**, so the top twelve were ordered entirely by the `id asc` tiebreak — that is, by random UUID — and the chunk that states the laws of refraction sat at **rank 14** with `0.9999998`, below any cut.
+
+**Decision: `ts_rank_cd(search_vector, tsq, 1 | 32)`.** Cover density rather than a saturating sum, with two normalisation bits, both load-bearing:
+
+- **`1`** — divide by `1 + log(document length)`. Without it a long chunk repeating one lexeme outranks a short one that answers the question. Probe 3 below is the case that chose it.
+- **`32`** — divide by `rank + 1`, bounding into [0, 1).
+
+Measured on three probes, rank of the passage that actually answers the question, and distinct scores in the top 12:
+
+| probe (grade/subject) | before: `ts_rank`, AND | after: `ts_rank_cd(33)`, OR |
+|---|---|---|
+| "what is refraction of light" (10/science) | rank **14**, 4 distinct scores in top 12 (12 tied at 1.0) | rank **2**, **12 distinct** |
+| "what did mendel find out from his experiments on pea plants" (10/science) | **0 rows — abstained** | rank **1**, **12 distinct** |
+| "prove that root 2 is an irrational number" (9/mathematics) | 3 rows, none the proof | rank **5**, **12 distinct** |
+
+Normalisation flags 0, 2, 4 and 32 alone were each measured on the same three probes and each ranked at least one target worse; `1 | 32` was the only setting with no ties in any top 12.
+
+**This is not a cosmetic change bundled in with D-201 — it is what makes D-201 safe.** With a saturating rank an OR query is fifty rows in arbitrary order.
+
+### D-203 · The abstention threshold was unreachable by construction; it is now MEASURED
+**Status:** Active — supersedes the `UNCALIBRATED` constant
+
+`ABSTAIN_THRESHOLD.value` was `minFusedScore(50, 60)` = 1/110, compared with a strict `<`. The worst score a document can achieve is **exactly** 1/110. So `below-threshold` could never fire; the only abstention the pipeline could produce was `no-candidates`. The unit test that claimed to pin this asserted `value === minFusedScore(CANDIDATE_LIMIT, RRF_K)` — the expression the constant was defined by, a tautology that would have held for any value.
+
+**Calibrated 10 August 2026** — 54 in-corpus + 20 off-syllabus questions, scored end to end through the shipped service, voyage-3 at 1024 dimensions, 4,403 active chunks, candidate depth 50, RRF k = 60:
+
+| fused top score | n | min | p5 | median | p95 | max |
+|---|---|---|---|---|---|---|
+| in-corpus | 54 | 0.028850 | **0.029877** | 0.032018 | 0.032787 | 0.032787 |
+| off-syllabus | 20 | 0.024448 | 0.024448 | 0.030622 | **0.032522** | 0.032522 |
+
+In-corpus questions returning no candidates: **0 of 54**.
+
+**The distributions overlap** (`separated: false` — in-corpus p5 sits below off-syllabus p95), so the placement RULE is the policy, and the two available rules disagree by a factor of six in what they cost:
+
+| rule | value | off-syllabus refused | **in-corpus wrongly refused** |
+|---|---|---|---|
+| 5/95 midpoint (the shipped `suggestThreshold`) | 0.031200 | 55.0% | **24.1%** |
+| in-corpus false-abstain budget, 5% (**ADOPTED**) | **0.029877** | 35.0% | **3.7%** |
+
+**Decision: the budgeted rule.** `domain/calibration.ts`'s own header argues the asymmetry — a false abstention is a student told "I do not know" about material the corpus covers; a false acceptance is a weak passage Foxy's grounding and citation verification already has to survive. The midpoint encodes no such weighting, and 24.1% is not a price that argument permits. `suggestThresholdWithinFalseAbstainBudget` was added alongside `suggestThreshold` rather than replacing it, and the harness prints BOTH with both error rates, so the trade is visible rather than implied. The chosen rule is recorded in the provenance (`policy`, `falseAbstainBudget`).
+
+**What this threshold is NOT: a relevance detector.** The overlap is structural. Both halves return 50 rows for any input a student can type, so the fused top score is dominated by whether ANY document is ranked highly by both — a question about the Krebs cycle asked of grade 10 science still produces agreement between two retrievers about which wrong chunk is least wrong. **Off-syllabus rejection is shared: this catches ~35% of it and `foxy`'s grounding owns the rest.** Anyone raising the number to improve that share should read the 24.1% first. *(Open question, for assessment: whether the trace should carry the dense half's raw top cosine distance as a second, independent signal. It is a genuine relevance measure and is already computed; putting it on the fused scale is not possible, so it would be a new decision, not a tweak.)*
+
+**Context — what the same measurement would have produced the day before.** With the AND-semantics sparse half, 20 of 20 off-syllabus and 24 of 54 in-corpus questions returned no sparse rows at all; a dense-only turn scores exactly 1/(60+1) = 0.016393, so both distributions would have been pinned to that value at both facing percentiles. Any rule places the line at 0.016393, and a threshold equal to the only score present abstains on nothing. **The floor would have measured as fully inert while looking calibrated.** Fixing the retriever is what made a threshold measurable at all — which is the argument for doing D-201 and D-202 before this entry, not after.
+
+**Two coupled defects fixed with it, both of which made the guard decorative:**
+
+1. **`assertThresholdOnFusedScale` was never called on the threshold the service uses.** `retrieval.service.ts` read `deps.threshold ?? ABSTAIN_THRESHOLD`; the shipped constant had a unit test, the OVERRIDE — the supported path, the one the eval harness and every future caller takes — had nothing. `{ value: 0.7 }` is a sensible cosine floor, an unreachable fused one, and would have abstained on every query while the trace reported the threshold without complaint. **The exact historical defect, reproducible through the parameter provided to avoid a second code path.** Both guards now run in the service constructor, before any query can be issued; a bad value is a process that does not start.
+2. **Inertness was coupled to a constant the service lets you override.** The value was baked from `CANDIDATE_LIMIT = 50` while the service reads `deps.candidateLimit ?? CANDIDATE_LIMIT`. At depth 100 the bottom of the fused scale drops to 1/160 and ranks 51-100 fall below a floor described in its own file as incapable of filtering — silently. **`candidateLimit` is now a required field ON the threshold**, not a constant looked up elsewhere, and `assertThresholdMatchesCandidateDepth` refuses a mismatch at construction. The measured percentiles describe one depth and no other.
+
+**Any change to the retriever invalidates this measurement completely** — the sparse query, the ranking function, `RRF_K`, `CANDIDATE_LIMIT`, or the embedding model. That is a re-run, not an adjustment.
+
+### D-204 · `hnsw.ef_search` was absent on the worker pool, where retrieval also runs
+**Status:** Active — fixed in `src/platform/db/pools.ts`
+
+D-049 set `hnsw.ef_search = 100` as a connection parameter on the `ai` pool, and three separate comments described `ai` as "the only pool that gets it". The description was true; the conclusion was wrong. `app/routes.ts` builds retrieval on a different pool in the worker process:
+
+```ts
+db: forWorker ? container.pools.worker : container.poolFor('retrieval')
+```
+
+So the worker's vector query ran on connections where the parameter had never been set, pgvector applied its default of 40, and `limit 50` returned 40 rows. No error, no log line, no wrong answer — just a top-50 that is quietly a top-40, **in the one process nobody watches a latency graph for**. The symptom is a corpus that reads as slightly thin in background jobs and normal in the API.
+
+**Decision: the setting follows the QUERY, not the pool's name.** `worker` now carries it; `auth` and `core` still do not, because no vector query can reach them and a setting sprayed everywhere stops documenting anything. The worker keeps the ORDINARY statement timeout — adding search breadth must not also hand a background job the 5-second vector ceiling.
+
+**Why this survived: it was covered only by a Docker-gated integration test.** `tests/integration/hnsw-ef-search.test.ts` proves the setting works — it runs a real HNSW scan at 40 and at 100 and watches pgvector cap the row count — and it is the important test. But it needs a container, so on every machine and every lane without one, "is the parameter on the pool retrieval actually runs on?" had no answer. The same was true of the hard grade/subject filter, which is a content-safety property, not a quality one.
+
+**So both got fast-lane coverage, and the shape of it is the reusable part:**
+- `src/platform/db/__tests__/pools-startup-options.test.ts` constructs the pools — `pg.Pool` connects to nothing until a client is checked out — and asserts the startup options for every pool retrieval can be handed.
+- `src/modules/retrieval/__tests__/retrieval.repository.test.ts` extracts the two queries into pure builders and renders them through drizzle's own `PgDialect`, asserting the `where`, the parameters, the ranking function and the text-search configuration per language.
+
+Neither replaces the integration suite — they cannot tell you the query RUNS. They replace the integration suite being the ONLY copy. Each was verified by re-applying the original defect and watching the new test fail.
+
+### D-205 · The service-test harness states its own abstention floor; production keeps the MEASURED one
+**Status:** Active — `tests/helpers/app-harness.ts`, pinned by `src/app/__tests__/wiring.test.ts`
+
+D-203 replaced an inert floor with a real one measured against **real voyage-3 query embeddings**. `tests/helpers/app-harness.ts` mirrors the production wiring on purpose, so it inherited that floor — while embedding with `createDeterministicEmbed`, whose vectors are reproducible hashes of the input text and **carry no semantics whatsoever**.
+
+**A meaningless vector produces a meaningless fused score, and comparing a meaningless number against a floor measured on meaningful ones is not a test of the floor.** It makes every assertion in every suite built on the harness contingent on the arrangement of a fake.
+
+That is what happened. Exactly one foxy test — `sends the ACTION's budget and temperature when a button produced the turn` — began failing with `the model was never called`. The turn had a perfectly good seeded grade-8 science chunk; the only reason it abstained is that a hash landed a hair below 0.029877. Every neighbouring test in the same describe block passed. **That is the worst version of this failure mode: the suite's colour tracks the fixture strings rather than the behaviour, so it moves when somebody rewords a test's sample question.**
+
+**Decision: the harness declares `HARNESS_ABSTAIN_THRESHOLD` — value 0, "never abstain on score", `UNCALIBRATED` with the reason written into the provenance.** Not a magic number in a wiring call; a named, exported constant whose declaration carries the argument. This is the same position, for the same reason, that `tests/integration/retrieval-search.test.ts` already took for itself — that suite tests the SQL and said so. The divergence from `app/routes.ts` is now the one place in the harness that is deliberate and labelled, rather than an inheritance nobody could see.
+
+**It is not a weakening, because abstention keeps all of its coverage:**
+- `no-candidates` — seed no chunks for the grade. **Not a score comparison**, so a zero floor exercises it in full, through the real pipeline.
+- `below-threshold` — injected via `AppHarnessOptions.search` / `useSearch`, which returns the abstention directly.
+- the safety refusals — upstream of retrieval entirely.
+- the decision function — `retrieval/__tests__/abstain-threshold.test.ts`.
+- the distributions and the error rates — the golden-set harness in `eval/retrieval/`.
+
+All were re-run and pass. A test that genuinely wants the score-based path now passes `AppHarnessOptions.threshold` and states why, rather than leaning on whatever the default happens to be — **an inherited floor is invisible, a stated one is arguable.**
+
+**The half of this that is NOT a test change: production could now drift the other way and nothing would say so.** Three seams zero this floor for good reasons (the eval sweep, the retrieval integration suite, and now every service suite), and `buildModules` runs the shipped value by *not passing one* — the absence of a line, which no diff draws attention to. That is the shape from which a fourth override reaches the composition root and sits there for a year. It is D-203's failure inverted: not a floor that abstains on everything, a floor that abstains on **nothing** while its provenance still reads `MEASURED`.
+
+So `RetrievalService` now exposes the **resolved** threshold — after `deps.threshold ?? ABSTAIN_THRESHOLD` and after both constructor guards — and `wiring.test.ts` asserts on it: the provenance is `MEASURED`, the value is `0.029877369007803793`, it is strictly greater than zero, and the **background worker's is the same object shape as the API process's** (two construction sites, two places an override could land on one and not the other; Foxy and the worker would then disagree about what "we do not know" means). Read-only and carrying its provenance, so nothing can consume it as a bare number without also being handed the evidence.
+
+**Verified by re-applying the P12 mutation the failing test exists to catch** — dropping `{ role: 'system', … }` from `toLlmRequest`, which deletes the grounding rule, the citation instruction, the grade/subject scope and the age rails from what the model receives. 7 tests fail under it, including the one this entry fixed. **A repair that makes a test green but blunts its mutation is worse than the failure it replaced**, and that is the check that distinguishes the two.

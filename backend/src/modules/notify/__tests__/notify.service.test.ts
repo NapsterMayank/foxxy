@@ -24,7 +24,13 @@ import {
   type AppHarness,
   type HarnessAccount,
 } from '../../../../tests/helpers/app-harness';
-import { createNotifyModule, toChannelPolicy, type NotifyModule } from '../index';
+import {
+  createNotifyModule,
+  toChannelPolicy,
+  type NotifyModule,
+  type NotifyPreferencesStore,
+  type StoredPreferences,
+} from '../index';
 import { KIND_POLICY, NOTIFY_METRICS } from '../domain/kinds';
 import { weekKey, weekStartOf } from '../domain/digest-week';
 import type { DigestContent, DigestSource, NotifyJobEnqueuer } from '../notify.service';
@@ -135,6 +141,15 @@ function buildNotify(options: {
   readonly queue?: NotifyJobEnqueuer;
   readonly cache?: CachePort;
   readonly digest?: DigestSource;
+  /**
+   * The preferences store, which production reads from `platform/cache`.
+   *
+   * Substituted rather than written through the cache key, because that key is
+   * a private constant of `notify.preferences-store.ts` — a test that hardcoded
+   * it would be asserting against an implementation detail and would break on
+   * the migration to a real table that file's header promises.
+   */
+  readonly preferences?: NotifyPreferencesStore;
 } = {}): BespokeNotify {
   const logger = new FakeLogger();
   const metrics = new MemoryMetrics({ clock: harness.clock });
@@ -168,6 +183,7 @@ function buildNotify(options: {
     // harness that always wired a fake would hide the fact that the default
     // posture is "no source, and loud about it".
     ...(options.digest === undefined ? {} : { digest: options.digest }),
+    ...(options.preferences === undefined ? {} : { preferences: options.preferences }),
   });
 
   return { module, metrics, logger };
@@ -221,6 +237,100 @@ describe('every notification has both English and Hindi text (§8.9)', () => {
 
     expect(notification?.title).toEqual(MESSAGE.title);
     expect(notification?.body).toEqual(MESSAGE.body);
+  });
+
+  it('stores HINDI in the Hindi columns — not a second copy of the English', async () => {
+    /**
+     * ========================================================================
+     * `notify` COULD NOT TELL HINDI FROM ENGLISH, AND NOTHING NOTICED.
+     *
+     * `BilingualText` is a PROPERTY NAME, not a language. `{ en: 'x', hi: 'x' }`
+     * type-checks, and the `notifications_bilingual_check` CHECK only rejects
+     * BLANKS. Between them, the compiler and the database will happily accept a
+     * notification whose "Hindi" is English.
+     *
+     * Measured before this test was written: Devanagari assertions in `parent`,
+     * 5. In `notify`, 0. In `platform/notify-channel`, 0. P7's enforcement in
+     * the module that sends every notification in the product rested entirely
+     * on the required property.
+     *
+     * So this asserts the SCRIPT, on the stored columns, read raw rather than
+     * through the service's own mapper — a mapper that swapped the two columns
+     * would satisfy a round-trip assertion perfectly.
+     * ========================================================================
+     */
+    const account = await student('devanagari@example.test');
+    const { module } = buildNotify();
+
+    const sent = await module.service.send({
+      recipientUserId: account.userId,
+      kind: 'digest_ready',
+      ...MESSAGE,
+    });
+
+    const rows = await harness.postgres.client.query<{
+      title_en: string;
+      body_en: string;
+      title_hi: string;
+      body_hi: string;
+    }>(`select title_en, body_en, title_hi, body_hi from notifications where id = $1`, [
+      sent.notificationId,
+    ]);
+    const row = rows.rows[0];
+
+    // Devanagari, U+0900..U+097F. The same assertion `parent` already makes.
+    expect(row?.title_hi).toMatch(/[ऀ-ॿ]/u);
+    expect(row?.body_hi).toMatch(/[ऀ-ॿ]/u);
+    // And DISTINCT from the English, which is what an `|| en`-shaped fallback
+    // or a copied column would collapse.
+    expect(row?.title_hi).not.toBe(row?.title_en);
+    expect(row?.body_hi).not.toBe(row?.body_en);
+    // The English half is still English — a swap would satisfy everything above.
+    expect(row?.title_en).toBe(MESSAGE.title.en);
+  });
+
+  it('lets a BLANK Hindi reach the CHECK rather than substituting English', async () => {
+    /**
+     * THE MUTANT THAT SURVIVED. `in-app-channel.ts` writing
+     *
+     *     titleHi: message.title.hi || message.title.en
+     *
+     * left 139/139 green, because `hi` is non-empty in every existing test and
+     * `x || y` with a truthy `x` is `x`. A fallback nobody can observe is
+     * indistinguishable from no fallback — until the day it fires.
+     *
+     * The day it fires is this one: `BilingualText.hi` is typed `string`, so
+     * `hi: ''` COMPILES. Today that reaches the database and
+     * `notifications_bilingual_check` refuses it — loudly, at the source, where
+     * somebody fixes the caller. With the `|| en` fallback in place the insert
+     * SUCCEEDS and an English string is silently filed as this user's Hindi,
+     * permanently, in a row that will be read back long after the send.
+     *
+     * The channel is called DIRECTLY: `notify.send` is not the only caller of
+     * the in-app adapter, and this is the adapter's rule.
+     */
+    const account = await student('blank-hi-channel@example.test');
+    const inApp = harness.container.channels['in-app'];
+
+    await expect(
+      inApp.send(
+        { userId: account.userId, tenantId: TEST_TENANT_ID },
+        {
+          kind: 'digest_ready',
+          // Blank, not missing — the shape somebody writes to get past a
+          // required property they have no translation for.
+          title: { en: 'Your weekly summary', hi: '' },
+          body: { en: 'Asha completed 4 missions.', hi: '' },
+        },
+      ),
+    ).rejects.toThrow(/notifications_bilingual_check/);
+
+    // NOTHING was written. A fallback would have left a row behind.
+    const rows = await harness.postgres.client.query(
+      `select 1 from notifications where recipient_user_id = $1`,
+      [account.userId],
+    );
+    expect(rows.rowCount).toBe(0);
   });
 
   it('is refused by the DATABASE when a blank language slips past the type', async () => {
@@ -400,6 +510,56 @@ describe('a mail-port failure does not break the calling flow (§8.9)', () => {
     const serialised = JSON.stringify(logger.lines);
     expect(serialised).not.toContain('pii@example.test');
     expect(serialised).not.toContain(account.userId);
+  });
+
+  it('never writes an address the PROVIDER put in its own error message', async () => {
+    /**
+     * ========================================================================
+     * THE HALF THE TEST ABOVE CANNOT SEE.
+     *
+     * It uses `fakeChannel(..., 'throw')`, whose message is the literal
+     * `"email exploded"`. That string contains no address, so the assertion
+     * `not.toContain('pii@example.test')` is satisfied by the FAKE, not by the
+     * code — and the dispatcher's `err: reason` pass-through was never
+     * exercised at all.
+     *
+     * Real SMTP rejections are not like that. They quote the envelope:
+     *
+     *     550 5.1.1 <parent@example.test>: Recipient address rejected
+     *
+     * and WhatsApp and push providers echo the phone number and the device
+     * token the same way. So the recipient's address reaches the log through
+     * the ERROR rather than through the recipient — past a line whose own
+     * comment says it never logs the recipient.
+     * ========================================================================
+     */
+    const account = await student('smtp-victim@example.test');
+    const rejecting: Channel = {
+      name: 'email',
+      send(): Promise<ChannelResult> {
+        return Promise.reject(
+          new Error('550 5.1.1 <smtp-victim@example.test>: Recipient address rejected'),
+        );
+      },
+    };
+    const { module, logger } = buildNotify({ channels: { email: rejecting } });
+
+    await module.service.send({
+      recipientUserId: account.userId,
+      kind: 'digest_ready',
+      ...MESSAGE,
+    });
+    await expect(module.service.deliver(await claimNextDeliveryJob())).rejects.toThrow();
+
+    const serialised = JSON.stringify(logger.lines);
+    expect(serialised).not.toContain('smtp-victim@example.test');
+    // The failure is still ATTRIBUTABLE — redaction that also lost the channel
+    // and the kind would be an outage nobody could diagnose.
+    expect(
+      logger.lines.some(
+        (line) => line.obj.event === 'notify.channel_failed' && line.obj.channel === 'email',
+      ),
+    ).toBe(true);
   });
 });
 
@@ -1023,15 +1183,38 @@ describe('the delivery job', () => {
 
 describe('adding a channel requires NO change to the service', () => {
   it('delivers through a channel this module has never heard of', async () => {
-    // 05-ROADMAP.md §4: Phase 2 delivers the parent digest over WhatsApp,
-    // because "parents open WhatsApp; they do not open email". This test is the
-    // rehearsal, and it is the honest form of the claim: `whatsapp` today is a
-    // `DependencyError` that throws on every call. Here it is replaced with a
-    // working adapter and ONE POLICY ROW is changed. Nothing in
-    // `notify.service.ts` is touched, and the notification is delivered over it.
-    //
-    // If this test ever needs a service edit to pass, "adding a channel is one
-    // adapter" has quietly stopped being true.
+    /**
+     * 05-ROADMAP.md §4: Phase 2 delivers the parent digest over WhatsApp,
+     * because "parents open WhatsApp; they do not open email". This test is the
+     * rehearsal, and `whatsapp` in production today is a `DependencyError` that
+     * throws on every call — here it is a working adapter, registered in the
+     * channel map by name, and NOTHING IN `notify.service.ts` IS TOUCHED.
+     *
+     * =======================================================================
+     * WHAT THIS TEST USED TO ASSERT, AND WHY THAT WAS WORTHLESS.
+     *
+     * It changed the DISPATCHER's policy row only, then asserted
+     * `whatsapp.sent.length + email.sent.length > 0` — A SUM. Tightened to
+     * `{ whatsapp: 1, email: 0 }` it reported `{ whatsapp: 0, email: 1 }`: the
+     * new channel received NOTHING, and the test passed on the email delivery
+     * alone. It was green for a reason unrelated to its name.
+     *
+     * The reason is real and is the subject of the block below: the SERVICE's
+     * plan is computed from `KIND_POLICY` at send time and travels on the job,
+     * and `dispatchRemote` subtracts everything the dispatcher would have
+     * chosen but the plan did not, as an `optOut`. Widening only the
+     * dispatcher's half therefore changes nothing — correctly.
+     *
+     * =======================================================================
+     * SO THE ONE-ROW EDIT IS REHEARSED WHERE IT ACTUALLY LANDS: ON THE PLAN.
+     *
+     * `KIND_POLICY.digest_ready.channels` gaining `'whatsapp'` shows up as
+     * `['whatsapp', 'email']` in the delivery job's payload — the container
+     * builds the dispatcher from `toChannelPolicy()`, so both halves move
+     * together on that one edit. The job is amended here rather than the module
+     * constant, because a test that mutated a frozen module-level table would
+     * leak into every other test in the file.
+     */
     const account = await student('newchannel@example.test');
     const whatsapp = fakeChannel('whatsapp', 'ok');
     const email = fakeChannel('email', 'ok');
@@ -1046,14 +1229,113 @@ describe('adding a channel requires NO change to the service', () => {
       kind: 'digest_ready',
       ...MESSAGE,
     });
-    // The plan still comes from `KIND_POLICY`, which the container has not been
-    // told about — so the job carries `['email']`, and the dispatcher's own
-    // policy is what adds WhatsApp back. Both halves are data.
     expect(sent.created).toBe(true);
 
-    const outcome = await module.service.deliver(await claimNextDeliveryJob());
+    const job = await claimNextDeliveryJob();
+    const outcome = await module.service.deliver({
+      ...job,
+      payload: { ...job.payload, channels: ['whatsapp', 'email'] },
+    });
+
     expect(outcome).toBe('delivered');
-    expect(whatsapp.sent.length + email.sent.length).toBeGreaterThan(0);
+    // BOTH, counted separately. The whole point is that the channel the service
+    // has never heard of received the message — a sum cannot say that.
+    expect(whatsapp.sent).toHaveLength(1);
+    expect(email.sent).toHaveLength(1);
+    // And it received the real message, not an empty shell.
+    expect(whatsapp.sent[0]?.message.title).toEqual(MESSAGE.title);
+  });
+
+  it('respects the PLAN when the dispatcher would have chosen more', async () => {
+    /**
+     * ========================================================================
+     * THE SURVIVING MUTANT. `notify.service.ts`'s `optOut` subtraction —
+     *
+     *     deps.dispatcher.channelsFor(kind).filter((c) => !channels.includes(c))
+     *
+     * — replaced with `[]` left 139/139 GREEN. It is the ONLY place a
+     * recipient's opt-out is enforced ON THE WIRE: `planDelivery` removes the
+     * opted-out channels from the plan at send time, the plan rides on the job,
+     * and this subtraction is what stops the dispatcher putting them back from
+     * its own policy.
+     *
+     * It is unobservable TODAY only because every `KIND_POLICY` row has at most
+     * one remote channel, so "what the plan chose" and "what the dispatcher
+     * would choose" cannot differ. It becomes load-bearing the moment
+     * `digest_ready` gains `'whatsapp'` — the exact change `domain/kinds.ts`
+     * advertises as "ONE ROW EDIT" — at which point a recipient who opted out
+     * of WhatsApp would receive WhatsApp.
+     *
+     * So the two halves are made to disagree deliberately: the dispatcher is
+     * given `['whatsapp', 'email']` and the job carries the plan's `['email']`.
+     * The correct outcome is email only.
+     * ========================================================================
+     */
+    const account = await student('planwins@example.test');
+    const whatsapp = fakeChannel('whatsapp', 'ok');
+    const email = fakeChannel('email', 'ok');
+
+    const { module } = buildNotify({
+      channels: { whatsapp, email },
+      policy: { ...toChannelPolicy(), digest_ready: ['whatsapp', 'email'] },
+    });
+
+    await module.service.send({
+      recipientUserId: account.userId,
+      kind: 'digest_ready',
+      ...MESSAGE,
+    });
+
+    const job = await claimNextDeliveryJob();
+    // The plan, as `KIND_POLICY` computed it. Stated rather than assumed, so a
+    // future row edit cannot silently turn this test into the one above.
+    expect(job.payload.channels).toEqual(['email']);
+
+    expect(await module.service.deliver(job)).toBe('delivered');
+
+    expect(email.sent).toHaveLength(1);
+    // ZERO. With the subtraction removed this is 1, and a recipient who turned
+    // WhatsApp off has just been sent a WhatsApp message.
+    expect(whatsapp.sent).toHaveLength(0);
+  });
+
+  it('carries a recipient OPT-OUT all the way to the wire', async () => {
+    /**
+     * The same subtraction, expressed as the product rule it exists for.
+     *
+     * The preference is recorded through the module's own API, the plan is
+     * computed from it at send time, and the assertion is that the opted-out
+     * channel's adapter is never called — not that a flag was stored somewhere.
+     * `in-app` is deliberately not opt-out-able (opting out of an in-app
+     * notification is opting out of a page), so email is the one to turn off.
+     */
+    const account = await student('optout-wire@example.test');
+    const whatsapp = fakeChannel('whatsapp', 'ok');
+    const email = fakeChannel('email', 'ok');
+
+    const stored: StoredPreferences = { optOut: ['email'] };
+    const preferences: NotifyPreferencesStore = {
+      read: () => Promise.resolve(stored),
+      write: () => Promise.resolve(),
+    };
+
+    const { module } = buildNotify({
+      channels: { whatsapp, email },
+      policy: { ...toChannelPolicy(), digest_ready: ['whatsapp', 'email'] },
+      preferences,
+    });
+
+    await module.service.send({
+      recipientUserId: account.userId,
+      kind: 'digest_ready',
+      ...MESSAGE,
+    });
+
+    // An empty plan enqueues no job at all — the opt-out removed the only
+    // remote channel `KIND_POLICY` lists for this kind.
+    await expect(claimNextDeliveryJob()).rejects.toThrow(/no delivery job/);
+    expect(email.sent).toHaveLength(0);
+    expect(whatsapp.sent).toHaveLength(0);
   });
 
   it('keeps delivering on the other channels when one of them THROWS', async () => {

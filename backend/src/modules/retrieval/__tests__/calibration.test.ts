@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_FALSE_ABSTAIN_BUDGET,
   calibrate,
   describeDistribution,
   percentile,
   suggestThreshold,
+  suggestThresholdWithinFalseAbstainBudget,
   toMeasuredThreshold,
   type ScoreSample,
 } from '../domain/calibration';
@@ -137,6 +139,100 @@ describe('placing the threshold', () => {
   });
 });
 
+describe('the false-abstain budget rule — the asymmetry, as arithmetic', () => {
+  /**
+   * ==========================================================================
+   * WHY THERE IS A SECOND PLACEMENT RULE.
+   *
+   * The 5/95 midpoint weights the two errors equally. On the real 10 August
+   * 2026 run the distributions overlapped and the midpoint cost 24.1% in-corpus
+   * false abstention — one student in four told "I do not know" about material
+   * the corpus covers — to buy 55% off-syllabus rejection. The header of
+   * `domain/calibration.ts` argues at length that those errors are NOT equal.
+   * This rule is that argument made executable, with the weighting stated as a
+   * budget somebody can disagree with in one number.
+   * ==========================================================================
+   */
+  it('spends no more than the budget, even where the midpoint would spend far more', () => {
+    const input = {
+      // Two in-corpus questions in the tail. The midpoint sacrifices both
+      // because the off-syllabus body sits high; the budget rule keeps one.
+      inCorpus: samples([0.010, 0.011, 0.029, 0.030, 0.031]),
+      offSyllabus: samples([0.030, 0.032]),
+    };
+    const report = calibrate(input, { falseAbstainBudget: 0.2 });
+
+    expect(report.budgetedInCorpusFalseAbstainRate).toBeLessThanOrEqual(0.2);
+    expect(report.inCorpusFalseAbstainRate).toBeGreaterThan(
+      report.budgetedInCorpusFalseAbstainRate,
+    );
+  });
+
+  it('is the HIGHEST value inside the budget, not merely a safe one', () => {
+    // Zero always satisfies any budget. A rule that returned it would spend
+    // nothing and reject nothing — safe, useless, and indistinguishable in the
+    // provenance block from a rule that tried.
+    const input = {
+      inCorpus: samples([0.020, 0.021, 0.022, 0.023]),
+      offSyllabus: samples([0.001]),
+    };
+
+    // Budget 0.25 permits abstaining on exactly one of the four.
+    expect(suggestThresholdWithinFalseAbstainBudget(input, 0.25)).toBeCloseTo(0.021, 12);
+    // Budget 0 permits none, so the line sits at the lowest observed score.
+    expect(suggestThresholdWithinFalseAbstainBudget(input, 0)).toBeCloseTo(0.020, 12);
+  });
+
+  it('returns ZERO rather than guessing when even the lowest score breaks the budget', () => {
+    // Every in-corpus question returned nothing, so any positive threshold
+    // abstains on all of them. Zero is the honest answer: abstain on nothing,
+    // and let the no-candidate rate carry the bad news.
+    expect(
+      suggestThresholdWithinFalseAbstainBudget(
+        { inCorpus: samples([null, null]), offSyllabus: samples([0.02]) },
+        0,
+      ),
+    ).toBe(0);
+  });
+
+  it('defaults the budget to 5%, and records which budget was spent', () => {
+    const report = calibrate({
+      inCorpus: samples([0.020, 0.021, 0.022]),
+      offSyllabus: samples([0.010]),
+    });
+
+    expect(report.falseAbstainBudget).toBe(DEFAULT_FALSE_ABSTAIN_BUDGET);
+    expect(DEFAULT_FALSE_ABSTAIN_BUDGET).toBe(0.05);
+  });
+
+  it('reports the off-syllabus rejection the budgeted value actually buys', () => {
+    // Both numbers, side by side, so the trade is visible rather than implied.
+    const report = calibrate({
+      inCorpus: samples([0.030, 0.031, 0.032]),
+      offSyllabus: samples([0.001, 0.002, 0.040]),
+    });
+
+    expect(report.budgetedOffSyllabusAbstainRate).toBeCloseTo(2 / 3, 12);
+  });
+
+  it('separates a NO-CANDIDATE in-corpus question from a false abstention', () => {
+    /**
+     * They have opposite fixes. A false abstention above zero candidates is a
+     * threshold problem; a zero-candidate in-corpus question is a retriever or
+     * a content gap that no threshold can rescue. Summed into one rate, the
+     * second reads as the first and gets tuned forever without effect — which
+     * is exactly what a 44% sparse-half abstention would have looked like.
+     */
+    const report = calibrate({
+      inCorpus: samples([null, null, 0.030, 0.031]),
+      offSyllabus: samples([0.001]),
+    });
+
+    expect(report.inCorpusNoCandidateRate).toBeCloseTo(0.5, 12);
+    expect(report.offSyllabusNoCandidateRate).toBe(0);
+  });
+});
+
 describe('turning a report into a MEASURED threshold', () => {
   const report = calibrate({
     inCorpus: samples([0.020, 0.021, 0.022]),
@@ -146,8 +242,10 @@ describe('turning a report into a MEASURED threshold', () => {
   it('carries every piece of evidence the union demands', () => {
     const threshold = toMeasuredThreshold(report, {
       measuredAt: '2026-09-01',
-      corpusChunkCount: 4686,
+      corpusChunkCount: 4403,
       embeddingModel: 'voyage-3',
+      candidateLimit: 50,
+      policy: 'five-ninetyfive-midpoint',
     });
 
     expect(threshold.provenance).toEqual({
@@ -159,9 +257,27 @@ describe('turning a report into a MEASURED threshold', () => {
       offSyllabusP95: report.offSyllabus.p95,
       offSyllabusAbstainRate: report.offSyllabusAbstainRate,
       inCorpusFalseAbstainRate: report.inCorpusFalseAbstainRate,
-      corpusChunkCount: 4686,
+      inCorpusNoCandidateRate: report.inCorpusNoCandidateRate,
+      policy: 'five-ninetyfive-midpoint',
+      falseAbstainBudget: null,
+      corpusChunkCount: 4403,
       embeddingModel: 'voyage-3',
     });
+  });
+
+  it('STAMPS THE CANDIDATE DEPTH the run was scored at', () => {
+    // Without it the value is a number with no scale attached: the bottom of
+    // the fused range is 1/(60+depth), so the same threshold means something
+    // different at depth 100 than at depth 50. The service refuses a mismatch.
+    const threshold = toMeasuredThreshold(report, {
+      measuredAt: '2026-09-01',
+      corpusChunkCount: 4403,
+      embeddingModel: 'voyage-3',
+      candidateLimit: 100,
+      policy: 'five-ninetyfive-midpoint',
+    });
+
+    expect(threshold.candidateLimit).toBe(100);
   });
 
   it('REFUSES a value that is not on the fused scale', () => {
@@ -176,8 +292,10 @@ describe('turning a report into a MEASURED threshold', () => {
     expect(() =>
       toMeasuredThreshold(wrongScale, {
         measuredAt: '2026-09-01',
-        corpusChunkCount: 4686,
+        corpusChunkCount: 4403,
         embeddingModel: 'voyage-3',
+        candidateLimit: 50,
+        policy: 'five-ninetyfive-midpoint',
       }),
     ).toThrow(RangeError);
   });

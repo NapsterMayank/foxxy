@@ -1,4 +1,8 @@
-import { assertThresholdOnFusedScale, type AbstainThreshold } from './abstain-threshold';
+import {
+  assertThresholdOnFusedScale,
+  type AbstainThreshold,
+  type ThresholdPolicy,
+} from './abstain-threshold';
 
 /**
  * THE CALIBRATION ARITHMETIC — pure, so it can be tested today against numbers
@@ -70,14 +74,50 @@ export interface Distribution {
 export interface CalibrationReport {
   readonly inCorpus: Distribution;
   readonly offSyllabus: Distribution;
-  /** The suggested value. Still has to be adopted by hand — see the header. */
+  /**
+   * The 5/95 midpoint. Still has to be adopted by hand — see the header.
+   *
+   * KEPT ALONGSIDE `budgetedThreshold` rather than replaced by it. Two numbers
+   * placed by two stated rules, printed side by side, is how a reader sees that
+   * the choice was a choice. One number is how the next person inherits a
+   * policy they cannot tell from arithmetic.
+   */
   readonly suggestedThreshold: number;
+  /** The in-corpus false-abstention budget the value below was placed under. */
+  readonly falseAbstainBudget: number;
+  /**
+   * The value the asymmetry actually justifies: the highest observed score
+   * whose in-corpus false-abstain rate stays inside the budget. This is the one
+   * that was adopted — see `suggestThresholdWithinFalseAbstainBudget`.
+   */
+  readonly budgetedThreshold: number;
+  /** Off-syllabus questions `budgetedThreshold` correctly abstains on. */
+  readonly budgetedOffSyllabusAbstainRate: number;
+  /** In-corpus questions `budgetedThreshold` wrongly abstains on. */
+  readonly budgetedInCorpusFalseAbstainRate: number;
   /** True when the two distributions do not overlap at the 5/95 edges. */
   readonly separated: boolean;
   /** Off-syllabus questions the suggested value correctly abstains on. */
   readonly offSyllabusAbstainRate: number;
   /** In-corpus questions it WRONGLY abstains on. The expensive mistake. */
   readonly inCorpusFalseAbstainRate: number;
+  /**
+   * In-corpus questions that returned NO CANDIDATES AT ALL.
+   *
+   * Reported separately from the false-abstain rate because the two have
+   * opposite fixes and are otherwise summed into one number that suggests the
+   * wrong one. A false abstention above zero candidates is a THRESHOLD
+   * problem. A zero-candidate in-corpus question is a RETRIEVER or a CONTENT
+   * problem, and no threshold — not even zero — can rescue it.
+   *
+   * This is the number that made the sparse half's AND semantics visible: 44%
+   * of the in-corpus set returned nothing at all, which would have been read
+   * off a combined rate as "the threshold is too high" and tuned downward
+   * forever without effect.
+   */
+  readonly inCorpusNoCandidateRate: number;
+  /** The same, for the off-syllabus set. Here it is a GOOD outcome. */
+  readonly offSyllabusNoCandidateRate: number;
 }
 
 /**
@@ -137,6 +177,12 @@ function abstainRate(samples: readonly ScoreSample[], threshold: number): number
   return abstained / samples.length;
 }
 
+/** The share of a sample that produced no candidates at all. */
+function noCandidateRate(samples: readonly ScoreSample[]): number {
+  if (samples.length === 0) return 0;
+  return samples.filter((sample) => sample.topFusedScore === null).length / samples.length;
+}
+
 /**
  * Where §8.4's line goes. See the header for why it is the 5/95 midpoint.
  *
@@ -150,18 +196,77 @@ export function suggestThreshold(input: CalibrationInput): number {
   return Math.max(0, (inCorpus.p5 + offSyllabus.p95) / 2);
 }
 
-export function calibrate(input: CalibrationInput): CalibrationReport {
+/**
+ * =============================================================================
+ * THE SECOND PLACEMENT RULE, ADDED 10 AUGUST 2026 BECAUSE THE FIRST ONE WAS
+ * MEASURED AND FOUND TOO EXPENSIVE.
+ *
+ * The header above argues the asymmetry at length: a false abstention is a
+ * student told "I do not know" about something the corpus covers, a false
+ * acceptance is a weak passage Foxy's grounding still has to survive, and the
+ * first is worse. The 5/95 midpoint does NOT encode that argument — it treats
+ * the two errors as equally weighted, which is fine when the distributions
+ * separate and indefensible when they overlap.
+ *
+ * They overlap. Measured on the first real run (54 in-corpus, 20 off-syllabus,
+ * voyage-3, 4,403 active chunks): in-corpus [0.028850 … 0.032787],
+ * off-syllabus [0.024448 … 0.032522]. The midpoint lands at 0.031200 and costs
+ * **24.1% in-corpus false abstention** to buy 55% off-syllabus abstention. One
+ * in four students asking a question the corpus answers would be told nothing.
+ * That is not a trade this product can make.
+ *
+ * So: STATE THE BUDGET AND SPEND IT. This rule takes the largest observed value
+ * whose in-corpus false-abstain rate stays within an explicit budget, and
+ * accepts whatever off-syllabus rejection that happens to buy. The budget is an
+ * argument someone can disagree with in one number, which is the point — the
+ * midpoint's implicit 50/50 weighting was an argument nobody could see.
+ *
+ * The candidates are OBSERVED SCORES, not interpolations, for the same reason
+ * `percentile` is nearest-rank: the line is being placed relative to questions
+ * that were actually asked.
+ * =============================================================================
+ */
+export const DEFAULT_FALSE_ABSTAIN_BUDGET = 0.05;
+
+export function suggestThresholdWithinFalseAbstainBudget(
+  input: CalibrationInput,
+  budget: number = DEFAULT_FALSE_ABSTAIN_BUDGET,
+): number {
+  // Zero always qualifies — it abstains on nothing that has a score — so the
+  // search can never come back empty-handed and fall through to a guess.
+  const candidates = [0, ...toScores(input.inCorpus)];
+  let best = 0;
+  for (const candidate of candidates) {
+    if (abstainRate(input.inCorpus, candidate) <= budget) {
+      best = Math.max(best, candidate);
+    }
+  }
+  return best;
+}
+
+export function calibrate(
+  input: CalibrationInput,
+  options: { readonly falseAbstainBudget?: number } = {},
+): CalibrationReport {
   const inCorpus = describeDistribution(input.inCorpus);
   const offSyllabus = describeDistribution(input.offSyllabus);
   const suggestedThreshold = suggestThreshold(input);
+  const falseAbstainBudget = options.falseAbstainBudget ?? DEFAULT_FALSE_ABSTAIN_BUDGET;
+  const budgetedThreshold = suggestThresholdWithinFalseAbstainBudget(input, falseAbstainBudget);
 
   return {
     inCorpus,
     offSyllabus,
     suggestedThreshold,
+    falseAbstainBudget,
+    budgetedThreshold,
+    budgetedOffSyllabusAbstainRate: abstainRate(input.offSyllabus, budgetedThreshold),
+    budgetedInCorpusFalseAbstainRate: abstainRate(input.inCorpus, budgetedThreshold),
     separated: inCorpus.p5 > offSyllabus.p95,
     offSyllabusAbstainRate: abstainRate(input.offSyllabus, suggestedThreshold),
     inCorpusFalseAbstainRate: abstainRate(input.inCorpus, suggestedThreshold),
+    inCorpusNoCandidateRate: noCandidateRate(input.inCorpus),
+    offSyllabusNoCandidateRate: noCandidateRate(input.offSyllabus),
   };
 }
 
@@ -180,12 +285,27 @@ export function toMeasuredThreshold(
     readonly measuredAt: string;
     readonly corpusChunkCount: number;
     readonly embeddingModel: string;
+    /**
+     * The candidate depth the run was scored at. REQUIRED, and it must be the
+     * depth the harness actually used — the percentiles below describe that
+     * depth and no other. See `AbstainThreshold.candidateLimit`.
+     */
+    readonly candidateLimit: number;
+    /**
+     * Which placement rule to adopt. REQUIRED — there are two, they disagree,
+     * and defaulting one of them would hide the decision inside a default.
+     */
+    readonly policy: ThresholdPolicy;
   },
 ): AbstainThreshold {
-  assertThresholdOnFusedScale(report.suggestedThreshold);
+  const budgeted = context.policy === 'in-corpus-false-abstain-budget';
+  const value = budgeted ? report.budgetedThreshold : report.suggestedThreshold;
+
+  assertThresholdOnFusedScale(value, context.candidateLimit);
 
   return {
-    value: report.suggestedThreshold,
+    value,
+    candidateLimit: context.candidateLimit,
     provenance: {
       state: 'MEASURED',
       measuredAt: context.measuredAt,
@@ -193,8 +313,18 @@ export function toMeasuredThreshold(
       offSyllabusSampleSize: report.offSyllabus.count,
       inCorpusP5: report.inCorpus.p5,
       offSyllabusP95: report.offSyllabus.p95,
-      offSyllabusAbstainRate: report.offSyllabusAbstainRate,
-      inCorpusFalseAbstainRate: report.inCorpusFalseAbstainRate,
+      // The rates OF THE ADOPTED VALUE, never of the other one. Stamping the
+      // midpoint's error rates beside the budgeted value would be a provenance
+      // block that is individually true and collectively a lie.
+      offSyllabusAbstainRate: budgeted
+        ? report.budgetedOffSyllabusAbstainRate
+        : report.offSyllabusAbstainRate,
+      inCorpusFalseAbstainRate: budgeted
+        ? report.budgetedInCorpusFalseAbstainRate
+        : report.inCorpusFalseAbstainRate,
+      inCorpusNoCandidateRate: report.inCorpusNoCandidateRate,
+      policy: context.policy,
+      falseAbstainBudget: budgeted ? report.falseAbstainBudget : null,
       corpusChunkCount: context.corpusChunkCount,
       embeddingModel: context.embeddingModel,
     },

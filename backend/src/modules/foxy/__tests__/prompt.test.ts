@@ -3,9 +3,14 @@ import { FOXY_ACTIONS, FOXY_HISTORY_TURNS, FOXY_MODES } from '@/shared/constants
 import { ACTION_SPECS } from '../domain/actions';
 import { MODE_SPECS } from '../domain/modes';
 import {
+  FOXY_MAX_TEMPERATURE,
   PromptIdentityLeak,
+  PromptSafetyViolation,
   assemblePrompt,
   assertNoIdentity,
+  renderSentPrompt,
+  toLlmRequest,
+  type AssembledPrompt,
   type PromptChunk,
   type PromptInput,
 } from '../domain/prompt';
@@ -243,5 +248,120 @@ describe('no identity ever reaches the model', () => {
     // is the cost being paid on purpose.
     const assembled = assemblePrompt(input());
     expect(assembled.system).toContain('do not know the student’s name');
+  });
+});
+
+/**
+ * ===========================================================================
+ * THE REQUEST BUILDER — the one place an assembled prompt becomes something the
+ * model can be sent.
+ *
+ * Everything above this line is a property of a PURE FUNCTION, and an audit
+ * showed exactly what that is worth on its own: replacing the request literal
+ * in `foxy.service.ts` with one that dropped the system message and set
+ * `temperature: 1.5` left all 170 tests green. The persona, the scope, the
+ * grounding rule and the age rails were all still asserted — on a value nobody
+ * was obliged to send.
+ * ===========================================================================
+ */
+describe('toLlmRequest — what is actually sent', () => {
+  it('puts the system prompt FIRST, as a system message', () => {
+    const request = toLlmRequest(assemblePrompt(input()));
+    expect(request.messages[0]?.role).toBe('system');
+    expect(request.messages[0]?.content).toContain('You are Foxy');
+    expect(request.messages[0]?.content).toContain(
+      'Answer ONLY from the reference passages given below',
+    );
+    // Exactly one. A second system message is how a later edit contradicts the
+    // rails without appearing to touch them.
+    expect(request.messages.filter((message) => message.role === 'system')).toHaveLength(1);
+  });
+
+  it('keeps the conversation in order behind it, ending with the question', () => {
+    const assembled = assemblePrompt(
+      input({ history: [{ role: 'user', content: 'earlier' }], question: 'why does light bend' }),
+    );
+    const request = toLlmRequest(assembled);
+    expect(request.messages.map((message) => message.role)).toEqual(['system', 'user', 'user']);
+    expect(request.messages.at(-1)?.content).toBe('why does light bend');
+  });
+
+  it('carries the assembled budget and temperature, unchanged', () => {
+    const assembled = assemblePrompt(input({ mode: 'practice' }));
+    const request = toLlmRequest(assembled);
+    expect(request.maxTokens).toBe(assembled.maxTokens);
+    expect(request.temperature).toBe(assembled.temperature);
+  });
+
+  it('every mode and every action ships at or under the temperature ceiling', () => {
+    for (const mode of FOXY_MODES) {
+      expect(MODE_SPECS[mode].temperature).toBeLessThanOrEqual(FOXY_MAX_TEMPERATURE);
+      expect(toLlmRequest(assemblePrompt(input({ mode }))).temperature).toBeLessThanOrEqual(
+        FOXY_MAX_TEMPERATURE,
+      );
+    }
+    for (const action of FOXY_ACTIONS) {
+      expect(ACTION_SPECS[action].temperature).toBeLessThanOrEqual(FOXY_MAX_TEMPERATURE);
+      expect(toLlmRequest(assemblePrompt(input({ action }))).temperature).toBeLessThanOrEqual(
+        FOXY_MAX_TEMPERATURE,
+      );
+    }
+  });
+
+  it('REFUSES to send a prompt with no system message', () => {
+    // Unreachable through `assemblePrompt` today, and that is the point: the
+    // guard is for the edit that makes it reachable.
+    const broken: AssembledPrompt = {
+      system: '   ',
+      messages: [{ role: 'user', content: 'why does light bend' }],
+      maxTokens: 700,
+      temperature: 0.3,
+      language: 'en',
+    };
+    expect(() => toLlmRequest(broken)).toThrow(PromptSafetyViolation);
+    try {
+      toLlmRequest(broken);
+    } catch (error) {
+      expect((error as PromptSafetyViolation).reason).toBe('no-system-message');
+      // The prompt is never in the message — a log line is not a safe place
+      // for one (P13).
+      expect((error as Error).message).not.toContain('why does light bend');
+    }
+  });
+
+  it('REFUSES a temperature above the ceiling', () => {
+    const assembled = assemblePrompt(input());
+    expect(() => toLlmRequest({ ...assembled, temperature: 1.5 })).toThrow(PromptSafetyViolation);
+    // The ceiling itself is inclusive: 0.5 is `example`'s legitimate value.
+    expect(() =>
+      toLlmRequest({ ...assembled, temperature: FOXY_MAX_TEMPERATURE }),
+    ).not.toThrow();
+  });
+
+  it('REFUSES a non-positive token budget', () => {
+    const assembled = assemblePrompt(input());
+    expect(() => toLlmRequest({ ...assembled, maxTokens: 0 })).toThrow(PromptSafetyViolation);
+  });
+});
+
+describe('renderSentPrompt — the forensic record', () => {
+  it('renders the messages it is given, role by role', () => {
+    const rendered = renderSentPrompt([
+      { role: 'system', content: 'RULES' },
+      { role: 'user', content: 'QUESTION' },
+    ]);
+    expect(rendered).toContain('system: RULES');
+    expect(rendered).toContain('user: QUESTION');
+  });
+
+  it('records the SYSTEM message, because that is what a bad answer is debugged from', () => {
+    const request = toLlmRequest(assemblePrompt(input()));
+    const rendered = renderSentPrompt(request.messages);
+    for (const message of request.messages) expect(rendered).toContain(message.content);
+    expect(rendered).toContain('Answer ONLY from the reference passages given below');
+  });
+
+  it('is empty for no messages rather than inventing a record', () => {
+    expect(renderSentPrompt([])).toBe('');
   });
 });

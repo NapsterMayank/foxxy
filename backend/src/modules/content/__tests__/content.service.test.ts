@@ -508,11 +508,160 @@ describe('content is read-only, for any authenticated actor (D-003)', () => {
   });
 
   it('denies a write attempt at the guard, if one were ever added', () => {
-    // Pinning D-003 directly, at the boundary rather than at this module: any
-    // future authoring use-case has to change the authz table deliberately,
-    // and cannot inherit permission by being written inside `content`.
+    /**
+     * PINNING D-003 AT THE BOUNDARY, AND NOTHING ABOUT THIS MODULE.
+     *
+     * READ THE CALL: it goes to `harness.container.authz` DIRECTLY, reaching
+     * PAST `content.service`. So it asserts one thing only — that the authz
+     * table refuses `write` on `kind: 'content'` — and it asserts NOTHING about
+     * whether `content.service` consults the guard at all. It stays green with
+     * `authoriseRead` gutted to a no-op.
+     *
+     * That is not a defect in this test; it is its scope, and the comment here
+     * used to claim otherwise. The assertion that `content.service` actually
+     * calls the guard is the `tenantId: ''` block below, which goes through the
+     * SERVICE for every use-case.
+     */
     expect(() => {
       harness.container.authz.assertCanAccess(actor, 'write', { kind: 'content' });
     }).toThrow(ForbiddenError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE GUARD IS REACHED — one case per use-case
+// ---------------------------------------------------------------------------
+
+describe('`authoriseRead` is CALLED, on every use-case', () => {
+  /**
+   * ==========================================================================
+   * WHY A TEST PER METHOD, WHEN THEY ALL CALL THE SAME ONE-LINE HELPER.
+   *
+   * Replacing the body of `authoriseRead` with a no-op left 50/50 passing. The
+   * guard looked installed and enforced nothing — the seventh defect of that
+   * shape found in this codebase.
+   *
+   * It survived for a specific reason: `kind: 'content'` carries no tenant (the
+   * NCERT corpus is shared curriculum, and migration 0004 gives `chapters`,
+   * `questions` and `rag_chunks` no `tenant_id` at all), so the OWNERSHIP half
+   * of the guard is vacuous here BY DESIGN, and the read rule allows every
+   * authenticated actor. Nothing an ordinary test does can tell "allowed" from
+   * "not asked".
+   *
+   * The live effect is the other half — `assertTenantMatch`'s first line, whose
+   * own comment states the rule: *an actor with no tenant is not a
+   * half-authenticated caller, it is a wiring defect, and it must not be able
+   * to reach anything at all*. With the guard gutted, an actor whose `tenantId`
+   * is `''` or whitespace reaches THE ENTIRE CURRICULUM.
+   *
+   * ==========================================================================
+   * AND ONLY TWO OF THE FIVE METHODS HAVE AN HTTP ROUTE.
+   *
+   * `listChapters` and `getChapter` are reachable over the wire, where the
+   * session plugin resolves a real tenant. `getQuestionsForChapter`,
+   * `getHeldOutQuestionsForChapter` and `getChunksByIds` are called
+   * MODULE-TO-MODULE — by `practice` and by `retrieval`, with an actor those
+   * modules assembled. For those three `authoriseRead` is the ONLY
+   * authorisation anywhere in the path, and there is no route-level check to
+   * mask its absence.
+   *
+   * So: one assertion per use-case, through the SERVICE, with an actor whose
+   * tenant is not a tenant.
+   * ==========================================================================
+   */
+
+  /** The wiring defect, in the two shapes it arrives in. */
+  const NO_TENANT: readonly { readonly label: string; readonly tenantId: string }[] = [
+    { label: 'an empty tenant', tenantId: '' },
+    // Whitespace, because `isTenant` trims — a NOT NULL column and a
+    // `?? ''`-shaped repair both produce exactly this.
+    { label: 'a whitespace tenant', tenantId: '   ' },
+  ];
+
+  for (const { label, tenantId } of NO_TENANT) {
+    describe(label, () => {
+      function tenantless(): Actor {
+        return { userId: actor.userId, role: 'student', tenantId };
+      }
+
+      it('is refused by listChapters', async () => {
+        await chapter();
+        await expect(
+          harness.content.service.listChapters(tenantless(), { limit: 100 }),
+        ).rejects.toThrow(ForbiddenError);
+      });
+
+      it('is refused by getChapter', async () => {
+        const id = await chapter();
+        await expect(harness.content.service.getChapter(tenantless(), id)).rejects.toThrow(
+          ForbiddenError,
+        );
+      });
+
+      it('is refused by getQuestionsForChapter — NO ROUTE MASKS THIS ONE', async () => {
+        const chapterId = await chapter();
+        await insertQuestion(harness.postgres.client, chapterId, makeQuestion('q-guard'));
+        await expect(
+          harness.content.service.getQuestionsForChapter(tenantless(), {
+            chapterId,
+            grade: GRADE,
+            subjectCode: SUBJECT,
+          }),
+        ).rejects.toThrow(ForbiddenError);
+      });
+
+      it('is refused by getHeldOutQuestionsForChapter — the RESERVE, and no route either', async () => {
+        // The one that cannot be undone. A held-out question that leaves the
+        // module has been spent permanently, so this is the method where "the
+        // guard was never called" costs the most and shows the least.
+        const chapterId = await chapter();
+        await insertQuestion(
+          harness.postgres.client,
+          chapterId,
+          makeQuestion('q-held', { isHeldOut: true }),
+        );
+        await expect(
+          harness.content.service.getHeldOutQuestionsForChapter(tenantless(), {
+            chapterId,
+            grade: GRADE,
+            subjectCode: SUBJECT,
+          }),
+        ).rejects.toThrow(ForbiddenError);
+      });
+
+      it('is refused by getChunksByIds — even for an EMPTY id list', async () => {
+        // Empty deliberately: the abstaining path returns `[]` without touching
+        // the database, so if the guard were skipped this would resolve rather
+        // than throw, and the refusal here can only have come from the guard.
+        await expect(harness.content.service.getChunksByIds(tenantless(), [])).rejects.toThrow(
+          ForbiddenError,
+        );
+      });
+    });
+  }
+
+  it('serves the same calls to the SAME actor once it carries a tenant — the control', async () => {
+    // Without this, every assertion above would be satisfied by a service that
+    // refuses everything, and the block would prove nothing about the guard.
+    const chapterId = await chapter();
+    await expect(
+      harness.content.service.listChapters(actor, { limit: 100 }),
+    ).resolves.toHaveLength(1);
+    await expect(harness.content.service.getChapter(actor, chapterId)).resolves.toBeDefined();
+    await expect(
+      harness.content.service.getQuestionsForChapter(actor, {
+        chapterId,
+        grade: GRADE,
+        subjectCode: SUBJECT,
+      }),
+    ).resolves.toEqual([]);
+    await expect(
+      harness.content.service.getHeldOutQuestionsForChapter(actor, {
+        chapterId,
+        grade: GRADE,
+        subjectCode: SUBJECT,
+      }),
+    ).resolves.toEqual([]);
+    await expect(harness.content.service.getChunksByIds(actor, [])).resolves.toEqual([]);
   });
 });

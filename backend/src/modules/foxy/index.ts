@@ -44,7 +44,7 @@ import type {
  * becomes a question about whatever a child happened to type.
  * ===========================================================================
  *
- * THE SIX THINGS ABOUT THIS MODULE MOST LIKELY TO BE UNDONE BY ACCIDENT.
+ * THE SEVEN THINGS ABOUT THIS MODULE MOST LIKELY TO BE UNDONE BY ACCIDENT.
  *
  * 1. ABSTENTION NEVER CALLS THE MODEL. `retrieval.search` decides, and the
  *    branch that returns the abstention is above every line that touches
@@ -76,6 +76,16 @@ import type {
  * 6. USAGE COUNTERS LIVE IN `platform/cache`, NEVER IN PROCESS MEMORY. An
  *    in-memory counter stops working the moment a second instance runs and it
  *    fails SILENTLY — the limit reads as enforced and is not.
+ *
+ * 7. THE SYSTEM PROMPT REACHES THE MODEL, AND THE TRACE RECORDS WHAT WAS SENT.
+ *    `toLlmRequest` is the only builder of the request and `renderSentPrompt`
+ *    the only renderer of the trace's `prompt` column, from that same object.
+ *    An audit once dropped the system message and set temperature 1.5 at the
+ *    call site and every test stayed green — `assemblePrompt` is tested as a
+ *    pure function, so all of it was asserted on a value nobody had to send.
+ *    Worse, the trace was re-derived from the assembler, so the forensic record
+ *    claimed a prompt the model never received. Assertions on
+ *    `recorder.requests` in `foxy.service.test.ts` are what keep this true.
  */
 
 export interface FoxyModuleDeps {
@@ -207,8 +217,20 @@ export {
 } from './domain/safety';
 export type { SafetyCategory, SafetyVerdict } from './domain/safety';
 
-/** Prompt assembly, and the identity guard that runs on every fragment of it. */
-export { PromptIdentityLeak, assemblePrompt, assertNoIdentity } from './domain/prompt';
+/**
+ * Prompt assembly, the identity guard that runs on every fragment of it, and the
+ * ONE builder of the request that is actually sent (`toLlmRequest`) plus the one
+ * renderer of what was sent for the trace (`renderSentPrompt`).
+ */
+export {
+  FOXY_MAX_TEMPERATURE,
+  PromptIdentityLeak,
+  PromptSafetyViolation,
+  assemblePrompt,
+  assertNoIdentity,
+  renderSentPrompt,
+  toLlmRequest,
+} from './domain/prompt';
 export type { AssembledPrompt, PromptChunk, PromptInput, PromptTurn } from './domain/prompt';
 
 /** The SSE wire format, shared with the frontend's streaming client (§7). */

@@ -243,6 +243,52 @@ describe('knowledge.service — getGraphCoverage', () => {
     expect(coverage.orderable).toBe(false);
   });
 
+  it('does not call a grade orderable when every one of its chapters fails findLearningPath', async () => {
+    /**
+     * THE TWO CALLS, SIDE BY SIDE, ON ONE SERVICE — which is the only place the
+     * defect was visible. `getGraphCoverage` used to project the IN-SCOPE nodes
+     * and `findLearningPath` projects ALL of them, so grade 8 mathematics
+     * reported 14/14, ratio 1.0, orderable true, cycle [] while all 14 of its
+     * chapters returned `{ ok: false, reason: 'cycle' }`.
+     *
+     * CH1 stands for a grade 8 chapter; the grade 7 pair it depends on
+     * contradicts itself, which is out of scope and therefore invisible to the
+     * scoped projection.
+     */
+    const G7_A = 'g7-a';
+    const G7_B = 'g7-b';
+    const crossGrade: readonly ConceptGraphNode[] = [
+      node('g8.concept', CH1, ['g7.fine.b']),
+      node('g7.fine.b', G7_A, ['g7.fine.a']),
+      node('g7.fine.a', G7_B),
+      node('g7.coarse.a', G7_B, ['g7.coarse.b']),
+      node('g7.coarse.b', G7_A),
+    ];
+
+    const service = createKnowledgeService({
+      repository: createFakeRepository({
+        nodes: crossGrade,
+        inScope: [descriptor(CH1, 1)],
+      }),
+      logger: createLogger(),
+    });
+
+    const path = await service.findLearningPath(CH1);
+    expect(path.ok).toBe(false);
+    expect(!path.ok && path.reason).toBe('cycle');
+
+    const coverage = await service.getGraphCoverage('8', 'mathematics');
+    expect(coverage.chaptersWithGraph).toBe(1);
+    expect(coverage.chaptersTotal).toBe(1);
+    // The report and the feature now agree. Before: orderable true, no
+    // plannable count at all.
+    expect(coverage.plannableChapters).toBe(0);
+    expect(coverage.orderable).toBe(false);
+    // And the scoped diagnostic still says the grade is internally fine, which
+    // is what points at the real cause.
+    expect(coverage.orderableWithinScope).toBe(true);
+  });
+
   it('reports an empty graph honestly rather than erroring', async () => {
     const service = createKnowledgeService({
       repository: createFakeRepository({ nodes: [] }),

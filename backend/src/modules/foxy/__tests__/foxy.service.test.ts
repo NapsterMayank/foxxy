@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ERROR_CODES, isAppError } from '@/platform/errors/index';
-import { createFakeLlm } from '@/platform/llm/index';
+import { createFakeLlm, type LlmRequest } from '@/platform/llm/index';
+import type { Grade } from '@/shared/constants/curriculum';
 import { FOXY_DAILY_MESSAGE_LIMIT } from '@/shared/constants/foxy';
 import type { OnboardingRequest } from '@/shared/contracts/learner.contract';
 import {
@@ -13,9 +14,14 @@ import {
   type HarnessAccount,
 } from '../../../../tests/helpers/app-harness';
 import { insertChapter, insertRagChunk, makeChapter, makeRagChunk } from '../../../../tests/fixtures/index';
+import { ACTION_SPECS } from '../domain/actions';
+import { MODE_SPECS } from '../domain/modes';
+import { FOXY_MAX_TEMPERATURE, renderSentPrompt } from '../domain/prompt';
 import { usageCacheKey } from '../domain/usage';
 import type { ChunkSearch, FoxyActor } from '../foxy.types';
+import type { FoxyTurn } from '../foxy.service';
 import type { FoxyFrame } from '../domain/sse';
+import { createCharStreamLlm, createCharStreamLlmFailingAt } from './char-stream-llm';
 
 /**
  * ============================================================================
@@ -87,6 +93,85 @@ async function seedChunk(text = 'Light bends when it enters a denser medium.'): 
     }),
     chapterId,
   );
+}
+
+/**
+ * Seeds one chunk anywhere in the corpus — including grades and subjects THIS
+ * student must never be shown.
+ *
+ * `seedChunk` above only ever writes grade 8 science, which is the student's
+ * own grade and subject. That made the retrieval filter pinned in one direction
+ * only: removing it was caught, but caught because retrieval then found
+ * NOTHING. Nothing proved that a chunk sitting in grade 6, or in mathematics,
+ * is unreachable.
+ */
+async function seedChunkFor(options: {
+  readonly seed: string;
+  readonly grade: Grade;
+  readonly subject: 'science' | 'mathematics';
+  readonly chapterNumber: number;
+  readonly text: string;
+}): Promise<string> {
+  const title = `Chapter ${String(options.chapterNumber)}`;
+  const chapterId = await insertChapter(
+    harness.postgres.client,
+    makeChapter(options.seed, {
+      grade: options.grade,
+      subjectCode: options.subject,
+      chapterNumber: options.chapterNumber,
+      titleEn: title,
+    }),
+  );
+  return await insertRagChunk(
+    harness.postgres.client,
+    makeRagChunk(options.seed, {
+      grade: options.grade,
+      subject: options.subject,
+      chapterNumber: options.chapterNumber,
+      chapterTitle: title,
+      chunkText: options.text,
+    }),
+    chapterId,
+  );
+}
+
+/**
+ * THE REQUEST THE MODEL ACTUALLY RECEIVED, not the prompt the service assembled.
+ *
+ * Nothing in this suite read `recorder.requests` before 2026-08: every LLM
+ * assertion was on `callCount()` alone. An audit dropped the system message,
+ * set `temperature: 1.5` and `maxTokens: 4096` at the call site, and all 170
+ * tests passed — the persona, the CBSE scope, the grounding rule, the citation
+ * instruction and the age rails are exhaustively tested in `prompt.test.ts`, as
+ * properties of a PURE FUNCTION whose output nobody was obliged to send.
+ */
+function lastRequest(): LlmRequest {
+  const request = harness.llm.recorder.requests.at(-1);
+  if (request === undefined) throw new Error('the model was never called');
+  return request;
+}
+
+function systemMessageOf(request: LlmRequest): string {
+  const systems = request.messages.filter((message) => message.role === 'system');
+  // ONE system message, and it is FIRST. A second one further down is how a
+  // later "just append a note" edit ends up able to contradict the rails.
+  expect(systems).toHaveLength(1);
+  expect(request.messages[0]?.role).toBe('system');
+  return systems[0]?.content ?? '';
+}
+
+async function retrievedIdsOnTrace(): Promise<string[]> {
+  const trace = await harness.postgres.client.query<{ retrieved: { chunkId: string }[] }>(
+    'select retrieved from retrieval_traces order by created_at desc limit 1',
+  );
+  return (trace.rows[0]?.retrieved ?? []).map((entry) => entry.chunkId);
+}
+
+async function tracePrompt(): Promise<string> {
+  const trace = await harness.postgres.client.query<{ prompt: string }>(
+    'select prompt from retrieval_traces order by created_at desc limit 1',
+  );
+  return trace.rows[0]?.prompt ?? '';
 }
 
 async function collect(frames: AsyncIterable<FoxyFrame>): Promise<FoxyFrame[]> {
@@ -286,6 +371,323 @@ describe('sendMessage — the grounded path', () => {
 });
 
 // ---------------------------------------------------------------------------
+// WHAT WAS ACTUALLY SENT TO THE MODEL
+//
+// Every assertion in this section reads `harness.llm.recorder.requests` — the
+// objects the provider received — rather than the value `assemblePrompt`
+// returned. That distinction is the whole section: the shipped abstention floor
+// catches roughly a third of off-syllabus questions and no more (the two
+// distributions overlap — see `retrieval/domain/abstain-threshold.ts`), so the
+// grounding rule in the system prompt is the ONLY thing standing between a weak
+// retrieval hit and an ungrounded answer given to a child. A grounding rule that
+// is assembled and then not sent is not a grounding rule.
+//
+// These turns run under `HARNESS_ABSTAIN_THRESHOLD` (never abstain on score),
+// because the harness embeds with a semantics-free fake and a score-based floor
+// measured on real voyage-3 vectors decides nothing here except which fixture
+// texts happen to hash high enough. Under the measured floor exactly one of
+// these tests abstained and reported "the model was never called" — a fixture
+// coin flip wearing the costume of a behaviour change. Retrieval's own
+// abstention coverage is listed at `HARNESS_ABSTAIN_THRESHOLD`.
+// ---------------------------------------------------------------------------
+
+describe('the request the model actually receives', () => {
+  it('carries a system message with the grounding rule and the citation instruction', async () => {
+    await seedChunk();
+    const student = await makeStudentAccount(harness);
+    const session = await harness.foxy.service.startSession(studentActor(student), {
+      mode: 'doubt',
+      subject: 'science',
+    });
+
+    await collect(
+      (await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+        text: 'why does light bend',
+      })).frames,
+    );
+
+    const system = systemMessageOf(lastRequest());
+
+    // 3 — grounding. The rule the whole product rests on.
+    expect(system).toContain('Answer ONLY from the reference passages given below');
+    expect(system).toContain('do not fill the gap');
+    // 4 — citation. Without this reaching the model there is nothing to verify,
+    // and `createCitationFilter` becomes a filter over an empty set.
+    expect(system).toContain('[chunk:<id>]');
+    // 1 — persona and identity. Foxy is not a human teacher.
+    expect(system).toContain('You are Foxy');
+    expect(system).toContain('not a human teacher');
+    // 5 — the age rails (P12: age-appropriate for grades 6-12).
+    expect(system).toContain('between 11 and 18 years old');
+  });
+
+  it('names the student’s grade and subject in the system message', async () => {
+    await seedChunk();
+    const student = await makeStudentAccount(harness);
+    const session = await harness.foxy.service.startSession(studentActor(student), {
+      mode: 'doubt',
+      subject: 'science',
+    });
+
+    await collect(
+      (await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+        text: 'why does light bend',
+      })).frames,
+    );
+
+    const system = systemMessageOf(lastRequest());
+    // The scope sentence, with THIS student's grade in it. `ONBOARDING` puts
+    // them in class 8 — a request that said class 6 would be a different, and
+    // wrong, curriculum.
+    expect(system).toContain('CBSE student in Class 8 with science');
+    expect(system).toContain('Stay inside the CBSE syllabus');
+  });
+
+  it('puts EVERY retrieved chunk id in the request — that is what makes the citation instruction mean anything', async () => {
+    await seedChunkFor({
+      seed: 'refraction',
+      grade: '8',
+      subject: 'science',
+      chapterNumber: 10,
+      text: 'Light bends when it enters a denser medium.',
+    });
+    await seedChunkFor({
+      seed: 'lenses',
+      grade: '8',
+      subject: 'science',
+      chapterNumber: 11,
+      text: 'A convex lens bends light rays towards its principal axis.',
+    });
+
+    const student = await makeStudentAccount(harness);
+    const session = await harness.foxy.service.startSession(studentActor(student), {
+      mode: 'doubt',
+      subject: 'science',
+    });
+
+    await collect(
+      (await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+        text: 'why does light bend',
+      })).frames,
+    );
+
+    const system = systemMessageOf(lastRequest());
+    const retrieved = await retrievedIdsOnTrace();
+
+    // The trace says these were retrieved. If one of them is not in the prompt
+    // then the model was asked to cite an id it was never shown, every citation
+    // to it would be recorded as FABRICATED, and the trace would blame the model
+    // for the assembler's omission.
+    expect(retrieved.length).toBeGreaterThan(0);
+    for (const id of retrieved) expect(system).toContain(id);
+  });
+
+  it('sends the student’s question as the last message, after the system message', async () => {
+    await seedChunk();
+    const student = await makeStudentAccount(harness);
+    const session = await harness.foxy.service.startSession(studentActor(student), {
+      mode: 'doubt',
+      subject: 'science',
+    });
+
+    await collect(
+      (await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+        text: 'why does light bend',
+      })).frames,
+    );
+
+    const request = lastRequest();
+    expect(request.messages.at(-1)).toEqual({ role: 'user', content: 'why does light bend' });
+  });
+
+  it('sends the MODE’s temperature, and never above the ceiling', async () => {
+    await seedChunk();
+    const student = await makeStudentAccount(harness);
+    const session = await harness.foxy.service.startSession(studentActor(student), {
+      mode: 'doubt',
+      subject: 'science',
+    });
+
+    await collect(
+      (await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+        text: 'why does light bend',
+      })).frames,
+    );
+
+    const request = lastRequest();
+    // "A tutor grounded in retrieved passages has no business being creative
+    // about what the passages say" — `actions.ts`.
+    expect(request.temperature).toBeLessThanOrEqual(FOXY_MAX_TEMPERATURE);
+    expect(request.temperature).toBe(MODE_SPECS.doubt.temperature);
+  });
+
+  it('sends the PER-MODE token budget, not a constant', async () => {
+    await seedChunk();
+    const student = await makeStudentAccount(harness);
+
+    for (const mode of ['doubt', 'practice'] as const) {
+      const session = await harness.foxy.service.startSession(studentActor(student), {
+        mode,
+        subject: 'science',
+      });
+      await collect(
+        (await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+          text: 'why does light bend',
+        })).frames,
+      );
+      expect(lastRequest().maxTokens).toBe(MODE_SPECS[mode].maxTokens);
+    }
+
+    // The two budgets genuinely differ, so "equals the mode's budget" is not
+    // satisfiable by any single constant. `practice` is deliberately the
+    // shortest: a generous budget on a question-asking turn is an invitation to
+    // answer the question.
+    expect(MODE_SPECS.doubt.maxTokens).not.toBe(MODE_SPECS.practice.maxTokens);
+  });
+
+  it('sends the ACTION’s budget and temperature when a button produced the turn', async () => {
+    await seedChunk();
+    const student = await makeStudentAccount(harness);
+    const session = await harness.foxy.service.startSession(studentActor(student), {
+      mode: 'explain',
+      subject: 'science',
+    });
+
+    await collect(
+      (await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+        action: 'quiz_me',
+      })).frames,
+    );
+
+    const request = lastRequest();
+    // A button is a more specific statement of intent than the mode it was
+    // pressed in, so its budget wins — 250, not `explain`'s 900.
+    expect(request.maxTokens).toBe(ACTION_SPECS.quiz_me.maxTokens);
+    expect(request.maxTokens).not.toBe(MODE_SPECS.explain.maxTokens);
+    expect(request.temperature).toBe(ACTION_SPECS.quiz_me.temperature);
+    expect(request.temperature).toBeLessThanOrEqual(FOXY_MAX_TEMPERATURE);
+    // …and the action's own instruction is in the system message it was sent in.
+    expect(systemMessageOf(request)).toContain('Ask the student exactly ONE question');
+  });
+
+  it('stores on the trace EXACTLY what was sent, not a re-derivation of it', async () => {
+    await seedChunk();
+    const student = await makeStudentAccount(harness);
+    const session = await harness.foxy.service.startSession(studentActor(student), {
+      mode: 'doubt',
+      subject: 'science',
+    });
+
+    await collect(
+      (await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+        text: 'why does light bend',
+      })).frames,
+    );
+
+    const request = lastRequest();
+    const stored = await tracePrompt();
+
+    // The trace used to be built from `prompt.system` at persistence time rather
+    // than from the object handed to `llm.stream`. Under the audit's mutation
+    // the record asserted a system prompt the model never received — a
+    // confident, self-consistent lie, and the plan calls this row "the only way
+    // a bad answer will ever be debugged".
+    expect(stored).toBe(renderSentPrompt(request.messages));
+    // Anchored to real content as well as to equality, so the pair cannot both
+    // become empty and still agree.
+    expect(stored).toContain('Answer ONLY from the reference passages given below');
+    expect(stored).toContain('why does light bend');
+    for (const message of request.messages) expect(stored).toContain(message.content);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE GRADE AND SUBJECT FILTER, PINNED IN BOTH DIRECTIONS
+// ---------------------------------------------------------------------------
+
+describe('a student is never shown another grade’s or another subject’s content', () => {
+  it('leaves grade-6 and mathematics chunks out of retrieval and out of the prompt', async () => {
+    const own = await seedChunkFor({
+      seed: 'own-grade',
+      grade: '8',
+      subject: 'science',
+      chapterNumber: 10,
+      text: 'Light bends when it enters a denser medium.',
+    });
+    const youngerGrade = await seedChunkFor({
+      seed: 'grade-six',
+      grade: '6',
+      subject: 'science',
+      chapterNumber: 12,
+      text: 'GRADESIXONLY light bends and travels in straight lines through air.',
+    });
+    const otherSubject = await seedChunkFor({
+      seed: 'maths',
+      grade: '8',
+      subject: 'mathematics',
+      chapterNumber: 13,
+      text: 'MATHSONLY light rays bend at equal angles in a triangle.',
+    });
+
+    // Deliberately worded so the off-limits chunks are STRONG lexical matches
+    // for the query. If the filter is gone they win on relevance, not by luck.
+    const student = await makeStudentAccount(harness);
+    const session = await harness.foxy.service.startSession(studentActor(student), {
+      mode: 'doubt',
+      subject: 'science',
+    });
+
+    await collect(
+      (await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+        text: 'why does light bend',
+      })).frames,
+    );
+
+    const retrieved = await retrievedIdsOnTrace();
+    expect(retrieved).toContain(own);
+    expect(retrieved).not.toContain(youngerGrade);
+    expect(retrieved).not.toContain(otherSubject);
+
+    // …and nothing about them reaches the model either, which is the assertion
+    // that survives a change to how retrieval reports itself.
+    const system = systemMessageOf(lastRequest());
+    expect(system).not.toContain('GRADESIXONLY');
+    expect(system).not.toContain('MATHSONLY');
+    expect(system).not.toContain(youngerGrade);
+    expect(system).not.toContain(otherSubject);
+  });
+
+  it('ABSTAINS rather than reaching for another grade’s chunk when its own grade has none', async () => {
+    await seedChunkFor({
+      seed: 'grade-six-only',
+      grade: '6',
+      subject: 'science',
+      chapterNumber: 12,
+      text: 'Light bends when it enters a denser medium.',
+    });
+
+    const student = await makeStudentAccount(harness);
+    const session = await harness.foxy.service.startSession(studentActor(student), {
+      mode: 'doubt',
+      subject: 'science',
+    });
+
+    const before = harness.llm.recorder.callCount();
+    const frames = await collect(
+      (await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+        text: 'why does light bend',
+      })).frames,
+    );
+
+    // The chunk that would answer this question EXISTS, word for word. It is
+    // written for eleven-year-olds and it is not this student's. Abstaining is
+    // the right answer; borrowing it is the failure.
+    expect(harness.llm.recorder.callCount()).toBe(before);
+    expect(frames[0]).toMatchObject({ type: 'abstention', reason: 'no_results' });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // CITATIONS
 // ---------------------------------------------------------------------------
 
@@ -378,6 +780,97 @@ describe('sendMessage — citations', () => {
         .filter((frame) => frame.type === 'citation')
         .map((frame) => (frame as { citation: { chunkId: string } }).citation.chunkId),
     ).toEqual([chunkId]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CITATION STRIPPING IS INCREMENTAL, AND A REAL MODEL SPLITS MARKERS
+//
+// `createFakeLlm` splits its answer on `' '`, and `[chunk:<uuid>]` contains no
+// space — so under the default fake a marker ALWAYS ARRIVES WHOLE. An audit
+// replaced the streaming filter with a post-hoc one (buffer the whole answer,
+// strip once) and only a single test went red, on an incidental token count.
+// A real model splits markers mid-token routinely, and a post-hoc filter means
+// the fragment has already been shown to the student before it is removed.
+// ---------------------------------------------------------------------------
+
+describe('a citation marker split across chunk boundaries', () => {
+  it('never lets a FRAGMENT of the marker reach the student, character by character', async () => {
+    const chunkId = await seedChunk();
+    const answer = `Light bends. [chunk:${chunkId}] Done.`;
+    const scripted = createCharStreamLlm(() => answer);
+    harness.useLlm(scripted);
+
+    const student = await makeStudentAccount(harness);
+    const session = await harness.foxy.service.startSession(studentActor(student), {
+      mode: 'doubt',
+      subject: 'science',
+    });
+
+    const turn = await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+      text: 'why does light bend',
+    });
+
+    const expected = 'Light bends.  Done.';
+    let visible = '';
+    let yieldedAtFirstToken: number | null = null;
+
+    for await (const frame of turn.frames) {
+      if (frame.type !== 'token') continue;
+      yieldedAtFirstToken ??= scripted.yielded();
+      visible += frame.text;
+      // NOT ONE CHARACTER OF THE MARKER, ever, at any point in the stream —
+      // not `[`, not `[chu`, not the id. The student's screen must never have
+      // shown it.
+      expect(visible).not.toContain('[');
+      expect(visible).not.toContain('chunk:');
+      expect(visible).not.toContain(chunkId);
+      // Everything the student has seen so far is a genuine prefix of the final
+      // answer: text is never emitted and then contradicted.
+      expect(expected.startsWith(visible)).toBe(true);
+    }
+
+    expect(visible).toBe(expected);
+
+    // THE INCREMENTALITY ASSERTION. A post-hoc filter produces the same final
+    // string, so the final string cannot distinguish them. What can: the first
+    // visible character arrived while the model was still streaming. Buffering
+    // the whole answer would put `yielded` at `total` before anything shipped.
+    expect(yieldedAtFirstToken).not.toBeNull();
+    expect(yieldedAtFirstToken).toBeLessThan(scripted.total());
+    expect(scripted.total()).toBe(answer.length);
+  });
+
+  it('drops a half-arrived marker when the model dies mid-marker, rather than releasing it', async () => {
+    const chunkId = await seedChunk();
+    const answer = `Light bends. [chunk:${chunkId}] Done.`;
+    // 17 characters is `Light bends. [chu` — the stream dies with four
+    // characters of an unresolved marker held back.
+    harness.useLlm(createCharStreamLlmFailingAt(() => answer, 17));
+
+    const student = await makeStudentAccount(harness);
+    const session = await harness.foxy.service.startSession(studentActor(student), {
+      mode: 'doubt',
+      subject: 'science',
+    });
+
+    const frames = await collect(
+      (await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+        text: 'why does light bend',
+      })).frames,
+    );
+
+    expect(textOf(frames)).toBe('Light bends. ');
+    expect(textOf(frames)).not.toContain('[');
+    expect(frames.find((frame) => frame.type === 'error')).toMatchObject({
+      code: 'model_unavailable',
+      partial: true,
+    });
+
+    // What the student saw is what was stored. The four withheld characters
+    // were never shown, so they must not appear in the transcript either.
+    const stored = await harness.foxy.service.getSession(studentActor(student), session.id);
+    expect(stored.messages[1]?.content).toBe('Light bends. ');
   });
 });
 
@@ -664,7 +1157,20 @@ describe('the daily usage limit', () => {
     });
   });
 
-  it('blocks BEFORE retrieval and before the model', async () => {
+  it('blocks BEFORE retrieval and before the model, and the turn never happens', async () => {
+    /**
+     * THIS TEST USED TO BE VACUOUS IN BOTH DIRECTIONS.
+     *
+     * It called `sendMessage(...).catch(() => undefined)` and never drained
+     * `turn.frames`. `sendMessage` returns a PROMISE OF A STREAM and the model
+     * is only reached when the stream is drained — so with the usage limit
+     * removed entirely, `sendMessage` resolved instead of rejecting, the frames
+     * were dropped on the floor, and `callCount` stayed at zero anyway. It
+     * passed while proving nothing, under a name that overclaimed.
+     *
+     * Now: the outcome is asserted (it MUST reject), and if it does not reject
+     * the stream is drained so the model call would be counted.
+     */
     await seedChunk();
     const student = await makeStudentAccount(harness);
     const session = await harness.foxy.service.startSession(studentActor(student), {
@@ -677,11 +1183,27 @@ describe('the daily usage limit', () => {
     );
 
     const before = harness.llm.recorder.callCount();
-    await harness.foxy.service
-      .sendMessage(studentActor(student), session.id, { text: 'why does light bend' })
-      .catch(() => undefined);
 
+    let turn: FoxyTurn | null = null;
+    let refusal: unknown = null;
+    try {
+      turn = await harness.foxy.service.sendMessage(studentActor(student), session.id, {
+        text: 'why does light bend',
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    // Drained if it resolved at all — that is what turns "the model was not
+    // called" from an accident of laziness into a fact about the turn.
+    if (turn !== null) await collect(turn.frames);
+
+    expect(isAppError(refusal) && refusal.code === ERROR_CODES.RATE_LIMIT).toBe(true);
+    expect(turn).toBeNull();
     expect(harness.llm.recorder.callCount()).toBe(before);
+
+    // Nothing was written either: a blocked turn is not a turn.
+    const stored = await harness.foxy.service.getSession(studentActor(student), session.id);
+    expect(stored.messages).toEqual([]);
   });
 });
 

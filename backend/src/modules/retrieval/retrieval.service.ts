@@ -6,6 +6,8 @@ import {
   ABSTAIN_THRESHOLD,
   CANDIDATE_LIMIT,
   DEFAULT_TOP_N,
+  assertThresholdMatchesCandidateDepth,
+  assertThresholdOnFusedScale,
   confidenceFrom,
   decideAbstention,
   type AbstainReason,
@@ -56,9 +58,13 @@ import type {
  *
  * §8.4 wins HERE, at this build step, and the reason is that the degradation is
  * not free: a keyword-only result is scored on a scale the abstention threshold
- * was never calibrated against — and the threshold is not calibrated against
- * ANY scale yet. Silently serving half a pipeline under a floor measured for
- * the whole one is precisely the class of failure §8.4 exists to prevent. When
+ * was never calibrated against. That argument got STRONGER on 10 August 2026,
+ * not weaker, when the threshold became measured: 0.029877 was observed against
+ * fused scores from BOTH halves, and a sparse-only turn cannot reach a fused
+ * score above 1/(60+1) = 0.016393 no matter how good the passage is. Serving
+ * half a pipeline under a floor measured for the whole one would abstain on
+ * literally everything — precisely the class of failure §8.4 exists to prevent,
+ * and now arithmetic rather than a worry. When
  * the degradation lands it will be an explicit, flagged, separately-calibrated
  * decision made by `foxy`, which is the layer that owns what a student is told
  * when the system is degraded. Not an `if` in here.
@@ -75,8 +81,13 @@ export interface RetrievalServiceDeps {
   readonly logger: Logger;
   /**
    * Overridable so the eval harness can sweep candidate values without a second
-   * code path. Defaults to the shipped constant, which is UNCALIBRATED and says
-   * so in its own type.
+   * code path, and so a TEST HARNESS embedding with a semantics-free fake can
+   * state a floor of its own rather than silently inherit one measured against
+   * real voyage-3 vectors (see `tests/helpers/app-harness.ts`).
+   *
+   * Defaults to the shipped constant — MEASURED since 10 August 2026. Whatever
+   * lands here is what `RetrievalService.threshold` reports, so the value in
+   * force is readable rather than inferred.
    */
   readonly threshold?: AbstainThreshold;
   /** Overridable for the same reason. Defaults to §8.4's 50. */
@@ -85,6 +96,24 @@ export interface RetrievalServiceDeps {
 
 export interface RetrievalService {
   search(query: string, filters: RetrievalFilters): Promise<RetrievalResult>;
+  /**
+   * THE THRESHOLD THIS SERVICE IS ACTUALLY RUNNING, after `deps.threshold ??
+   * ABSTAIN_THRESHOLD` has been resolved and both guards have passed.
+   *
+   * Exposed for ONE reason, and it is not convenience. The floor is now
+   * overridable (the eval harness sweeps it; the service-test harness replaces
+   * it because deterministic embeddings are on a different distribution), and
+   * an override is exactly the kind of thing that leaks from a test seam into
+   * the composition root without anybody noticing — the production wiring in
+   * `app/routes.ts` passes no threshold, and "passes no threshold" is invisible
+   * in a diff. Reading the resolved value back makes "production still runs the
+   * MEASURED floor" an assertion (`app/__tests__/wiring.test.ts`) rather than a
+   * belief about a line that is not there.
+   *
+   * It is read-only and carries its provenance, so nothing can consume it as a
+   * bare number without also being handed the evidence behind it.
+   */
+  readonly threshold: AbstainThreshold;
 }
 
 function toCandidateScores(rows: readonly CandidateRow[]): CandidateScore[] {
@@ -94,6 +123,32 @@ function toCandidateScores(rows: readonly CandidateRow[]): CandidateScore[] {
 export function createRetrievalService(deps: RetrievalServiceDeps): RetrievalService {
   const threshold = deps.threshold ?? ABSTAIN_THRESHOLD;
   const candidateLimit = deps.candidateLimit ?? CANDIDATE_LIMIT;
+
+  /**
+   * ==========================================================================
+   * BOTH GUARDS RUN ON THE THRESHOLD THIS SERVICE WILL ACTUALLY USE, HERE, AT
+   * CONSTRUCTION — BEFORE ANY QUERY CAN BE ISSUED.
+   *
+   * They used to run on neither. `assertThresholdOnFusedScale` was written to
+   * make §8.4's year-long silent filter impossible and was applied only to the
+   * shipped constant, which is the one value nobody could get wrong. The line
+   * above is `deps.threshold ?? ABSTAIN_THRESHOLD`, so the SUPPORTED override —
+   * the one the eval harness and every future caller uses — walked a value of
+   * any shape straight past the guard. `{ value: 0.7 }` is a perfectly sensible
+   * cosine floor, an unreachable fused one, and would have abstained on every
+   * single query while the trace reported the threshold without complaint.
+   *
+   * The depth check is the same defect in its second form: the value is only
+   * meaningful at the candidate depth it was measured at, and `candidateLimit`
+   * is overridable independently. See `assertThresholdMatchesCandidateDepth`.
+   *
+   * A throw at construction is deliberate. This is a composition-root mistake,
+   * and the failure a composition-root mistake deserves is a process that does
+   * not start — not a pipeline that runs and answers differently.
+   * ==========================================================================
+   */
+  assertThresholdOnFusedScale(threshold.value, candidateLimit);
+  assertThresholdMatchesCandidateDepth(threshold, candidateLimit);
 
   /**
    * Everything a trace needs that is not known until the end, assembled in one
@@ -151,6 +206,7 @@ export function createRetrievalService(deps: RetrievalServiceDeps): RetrievalSer
   }
 
   return {
+    threshold,
     async search(query: string, filters: RetrievalFilters): Promise<RetrievalResult> {
       const startedAtMs = deps.clock.now().getTime();
       const topN = filters.topN ?? DEFAULT_TOP_N;

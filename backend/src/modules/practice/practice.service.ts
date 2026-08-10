@@ -333,6 +333,35 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
     return [...map];
   }
 
+  /**
+   * The SCREEN POSITION a recorded answer was tapped in.
+   *
+   * The stored index is canonical (D-058) and the map that produced it is on
+   * the session, so this is exactly recoverable — and it has to be recovered
+   * rather than stored, because storing it would put a presentation index in
+   * the database, which is the one thing D-058 forbids.
+   *
+   * Anti-cheat rule 2 is about VARIETY OF BEHAVIOUR — "did this student tap the
+   * same place six times" — and the shuffle map differs per question, so the
+   * same place is a different canonical index each time. Read the canonical
+   * index there and the rule measures the authored answer key instead of the
+   * student.
+   *
+   * `assertShuffleMap` is applied against the map's own length: the map arrives
+   * from a jsonb column, and a non-permutation would make `toPresentationIndex`
+   * report a position nobody tapped.
+   */
+  function presentationIndexOf(session: SessionRecord, answer: RecordedAnswer): number {
+    const map = session.optionOrder[answer.questionId];
+    if (map === undefined) {
+      throw new NotFoundError(SESSION_NOT_FOUND, {
+        message: 'Practice session carries no shuffle map for one of its answers',
+      });
+    }
+    assertShuffleMap(map, map.length);
+    return toPresentationIndex(map, answer.selectedIndex);
+  }
+
   /** The answers of a session, in the order the questions were served. */
   function orderedAnswers(session: SessionRecord): RecordedAnswer[] {
     const answers: RecordedAnswer[] = [];
@@ -633,11 +662,28 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
       const answers = orderedAnswers(session);
       const questionCount = session.questionIds.length;
 
+      const now = clock.now();
+
+      /**
+       * THE SERVER'S OWN WINDOW, and the reason `timeSpentMs` cannot be trusted
+       * alone. Both instants come from the injected clock: `started_at` was
+       * written by `createSession`, and `now` is this submission. Six questions
+       * claiming twelve seconds each inside a two-second session used to pass.
+       *
+       * Clamped at zero rather than allowed negative: a clock that went
+       * backwards is an operational fault, not a cheat, and it must not turn
+       * into a rejection with a student's name on it.
+       */
+      const realElapsedMs = Math.max(0, now.getTime() - session.startedAt.getTime());
+
       const attempt: AttemptResponse[] = answers.map((answer) => ({
+        // CANONICAL — persisted, and what `practice_responses` will carry.
         selectedIndex: answer.selectedIndex,
+        // PRESENTATION — validation only, never written. Rule 2 reads this.
+        presentationIndex: presentationIndexOf(session, answer),
         timeSpentMs: answer.timeSpentMs,
       }));
-      const validity = validateAttempt(attempt, questionCount);
+      const validity = validateAttempt(attempt, questionCount, realElapsedMs);
 
       const correctCount = answers.filter((answer) => answer.isCorrect).length;
 
@@ -647,7 +693,6 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
       const scorePercent = validity.isValid ? calculateScore(correctCount, questionCount) : 0;
       const earned = validity.isValid ? calculateXp(correctCount, scorePercent) : 0;
 
-      const now = clock.now();
       const alreadyToday = await repository.xpSince(session.studentUserId, startOfDay(now));
       const capped = applyDailyCap(earned, alreadyToday);
 

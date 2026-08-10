@@ -89,8 +89,16 @@ export const submitAnswerRequestSchema = z.object({
    * Milliseconds on this question. CLIENT-SUPPLIED, and the anti-cheat rules
    * read it, which is worth being honest about: a client can lie. It is still
    * worth collecting — it catches the script and the bored tap-through, which
-   * is what the rules are for — and the server-side backstop is that the
-   * session's own `started_at` bounds the total.
+   * is what the rules are for.
+   *
+   * THE SERVER-SIDE BACKSTOP IS REAL AND NAMED. `submitSession` computes
+   * `now - practice_sessions.started_at` from the injected clock and passes it
+   * to `validateAttempt` as `realElapsedMs`, which CLAMPS the claimed total to
+   * it before averaging. A claim smaller than the wall clock stands (a paused
+   * tab is honest); a claim larger than it cannot buy a pass. This sentence was
+   * once a description of a guard that did not exist — six questions claiming
+   * twelve seconds each passed inside a two-second session — so if you change
+   * the service, change this too or delete it.
    */
   timeSpentMs: z.number().int().min(0).max(60 * 60 * 1000),
   hintLevelUsed: z.number().int().min(0).max(MAX_HINT_LEVEL).default(0),

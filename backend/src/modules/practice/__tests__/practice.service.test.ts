@@ -54,6 +54,67 @@ function actorOf(account: HarnessAccount, tenantId: string = TEST_TENANT_ID): {
   return { userId: account.userId, role: 'student', tenantId };
 }
 
+/**
+ * A practice module whose shuffle randomness ACTUALLY VARIES BETWEEN QUESTIONS.
+ *
+ * ===========================================================================
+ * WHY THE HARNESS DEFAULT IS NOT ENOUGH, AND WHAT IT HID.
+ *
+ * `app-harness.ts` supplies `random: () => 0.5` — a CONSTANT. It produces a map
+ * that genuinely reorders, which is why the D-058 test works, but it produces
+ * the SAME map for every question in a session. Under that source a bug in
+ * which `shuffleFor` returned the FIRST question's map for every question is
+ * invisible: an audit made exactly that change and 219 of 219 tests passed.
+ *
+ * That bug is the D-058 catastrophe in its worst form. It writes a canonical
+ * index derived from another question's permutation, so `distractor_misconceptions`
+ * — keyed by original index (D-048) — resolves to a real code for the wrong
+ * distractor. Nothing errors, the data stays plausible, and the map that would
+ * have translated it is the one that was not used.
+ *
+ * The existing D-058 test uses a ONE-QUESTION session and structurally cannot
+ * see it. Everything in `describe('the per-question shuffle map')` below runs
+ * against this source instead.
+ * ===========================================================================
+ */
+function createVaryingShufflePractice(): ReturnType<typeof createPracticeModule> {
+  let state = 20_260_810 >>> 0;
+  const random = (): number => {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+    return state / 4_294_967_296;
+  };
+
+  return createPracticeModule({
+    db: harness.container.poolFor('practice'),
+    clock: harness.clock,
+    logger: harness.logger,
+    requireSession: harness.identity.requireSession,
+    readQuestions: (actor, query) => harness.content.service.getQuestionsForChapter(actor, query),
+    readChapter: async (actor, id) => {
+      try {
+        return await harness.content.service.getChapter(actor, id);
+      } catch {
+        return null;
+      }
+    },
+    listChapters: (actor, filter) =>
+      harness.content.service.listChapters(actor, {
+        grade: filter.grade,
+        subject: filter.subjectCode,
+        limit: filter.limit,
+      }),
+    readStudentContext: async (actor, studentUserId) => {
+      const profile = await harness.learner.service.getProfile(actor, studentUserId);
+      const subjects = await harness.learner.service.getSubjects(actor, studentUserId);
+      return { grade: profile.grade, subjects };
+    },
+    readMastery: (actor, studentUserId) => harness.learner.service.getMastery(actor, studentUserId),
+    writeMastery: (actor, input) => harness.learner.service.updateMastery(actor, input),
+    readTenantOfStudent: (studentUserId) => harness.identity.service.getTenantOfUser(studentUserId),
+    random,
+  });
+}
+
 let seedCounter = 0;
 
 /** An onboarded student with one chapter of questions ready to practise. */
@@ -122,6 +183,12 @@ async function seedStudent(options: { heldOut?: boolean; questionCount?: number 
  * Deliberately does NOT reach for `correctIndex`: it finds the presented
  * position of the correct option the way a student would, by having been told
  * which one it was. That is what makes the shuffle test below meaningful.
+ *
+ * THE CLOCK IS ADVANCED BY THE TIME BEING CLAIMED, and that is not decoration.
+ * `submitSession` clamps the claimed total to `now - started_at`, so a session
+ * that claims 48 seconds of work inside a frozen instant is — correctly —
+ * `too_fast`. Every honest test here has to spend the time it says it spent;
+ * the one that deliberately does not is `answerAllWithoutSpendingTheTime`.
  */
 async function answerAll(
   account: HarnessAccount,
@@ -132,6 +199,7 @@ async function answerAll(
   const session = await harness.practice.service.getSession(actorOf(account), sessionId);
 
   for (const [index, question] of session.questions.entries()) {
+    harness.clock.advanceMs(timeSpentMs);
     // The PRESENTED position of the correct option, found the way a client
     // would: the fixture names options `"<seed> option <canonicalIndex>"` and
     // states the canonical correct index in the question text, so this is a
@@ -226,6 +294,7 @@ describe('submitSession — a valid submission writes every table', () => {
     const correctPosition = question.options.findIndex((option) => option.endsWith('option 0'));
     const otherPosition = question.options.findIndex((option) => option.endsWith('option 2'));
 
+    harness.clock.advanceMs(9_000);
     await harness.practice.service.submitAnswer(actorOf(account), started.id, {
       questionId: question.id,
       selectedIndex: correctPosition,
@@ -283,6 +352,7 @@ describe('submitAnswer — THE STORED INDEX IS THE ORIGINAL, NOT THE SHUFFLED ON
       chapterId,
       questionCount: 1,
     });
+    harness.clock.advanceMs(PASSING_TIME_MS);
 
     const { rows: sessionRows } = await harness.postgres.client.query<{
       option_order: Record<string, number[]>;
@@ -360,6 +430,130 @@ describe('submitAnswer — THE STORED INDEX IS THE ORIGINAL, NOT THE SHUFFLED ON
     // The fixture keys its codes by canonical index. A presentation-index
     // lookup would return the code belonging to a different distractor.
     expect(result.misconceptionCode).toContain('3');
+  });
+});
+
+describe('the per-question shuffle map — EACH QUESTION HAS ITS OWN, AND IT IS USED', () => {
+  it('stores an index that round-trips through THAT question’s map, not another’s', async () => {
+    /**
+     * THE MULTI-QUESTION D-058 TEST.
+     *
+     * `startSession` builds one map PER QUESTION. `shuffleFor` must return the
+     * map belonging to the question being answered. Returning the first
+     * question's map for all of them compiles, keeps every index in range, and
+     * passed 219 of 219 tests — because the harness's constant random source
+     * makes all the maps identical.
+     *
+     * Here they are genuinely different, asserted before anything else. Each
+     * answer taps a position that THIS question's map moved, and the stored
+     * index is checked against THIS question's map. Under the cross-wired bug
+     * at least one of these disagrees.
+     */
+    const { account, chapterId } = await seedStudent({ questionCount: 6 });
+    const varying = createVaryingShufflePractice();
+
+    const started = await varying.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 6,
+    });
+
+    const { rows: sessionRows } = await harness.postgres.client.query<{
+      option_order: Record<string, number[]>;
+    }>(`select option_order from practice_sessions where id = $1`, [started.id]);
+    const maps = sessionRows[0]!.option_order;
+
+    // THE PRECONDITION, IN TWO PARTS. The maps must reorder, and they must
+    // differ from each other — the harness default satisfies the first and
+    // fails the second, which is the whole gap.
+    const serialised = started.questions.map((question) => maps[question.id]!.join(''));
+    expect(serialised).not.toContain('0123');
+    expect(new Set(serialised).size).toBeGreaterThan(1);
+
+    // A position that the question's OWN map moved, chosen per question so a
+    // fixed point cannot make the assertion vacuous.
+    const tapped = new Map<string, { position: number; canonical: number }>();
+    for (const question of started.questions) {
+      const map = maps[question.id]!;
+      const position = map.findIndex((canonical, index) => canonical !== index);
+      expect(position).toBeGreaterThanOrEqual(0);
+      tapped.set(question.id, { position, canonical: map[position]! });
+
+      harness.clock.advanceMs(PASSING_TIME_MS);
+      await varying.service.submitAnswer(actorOf(account), started.id, {
+        questionId: question.id,
+        selectedIndex: position,
+        timeSpentMs: PASSING_TIME_MS,
+        hintLevelUsed: 0,
+      });
+    }
+    await varying.service.submitSession(actorOf(account), started.id);
+
+    const { rows } = await harness.postgres.client.query<{
+      question_id: string;
+      selected_index: number;
+    }>(`select question_id, selected_index from practice_responses where session_id = $1`, [
+      started.id,
+    ]);
+    expect(rows).toHaveLength(6);
+
+    for (const row of rows) {
+      const expected = tapped.get(row.question_id)!;
+      expect({
+        questionId: row.question_id,
+        stored: row.selected_index,
+      }).toEqual({ questionId: row.question_id, stored: expected.canonical });
+      // And it went through a translation rather than being echoed back.
+      expect(row.selected_index).not.toBe(expected.position);
+    }
+  });
+
+  it('resolves the misconception through THIS question’s map', async () => {
+    // The consequence, not just the mechanism. `distractor_misconceptions` is
+    // keyed by ORIGINAL index (D-048); a canonical index derived from another
+    // question's permutation names a different distractor and nothing
+    // downstream can tell.
+    const { account, chapterId } = await seedStudent({ questionCount: 6 });
+    const varying = createVaryingShufflePractice();
+
+    const started = await varying.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 6,
+    });
+
+    const { rows: sessionRows } = await harness.postgres.client.query<{
+      option_order: Record<string, number[]>;
+    }>(`select option_order from practice_sessions where id = $1`, [started.id]);
+    const maps = sessionRows[0]!.option_order;
+
+    // WRONG AND RIGHT ALTERNATE, so the wrong-answer streak never reaches
+    // `RECOVERY_WRONG_STREAK` — past that point `decideNext` correctly returns
+    // `flag_for_recovery` with no code, and the assertion would be about the
+    // wrong branch.
+    for (const [index, question] of started.questions.entries()) {
+      const canonicalCorrect = Number(/correct=(\d)/.exec(question.questionText)?.[1] ?? '0');
+      const canonicalWrong = (canonicalCorrect + 1) % 4;
+      const map = maps[question.id]!;
+      const answerWrong = index % 2 === 0;
+      const position = map.indexOf(answerWrong ? canonicalWrong : canonicalCorrect);
+
+      harness.clock.advanceMs(PASSING_TIME_MS);
+      const result = await varying.service.submitAnswer(actorOf(account), started.id, {
+        questionId: question.id,
+        selectedIndex: position,
+        timeSpentMs: PASSING_TIME_MS,
+        hintLevelUsed: 0,
+      });
+
+      expect(result.isCorrect).toBe(!answerWrong);
+      if (answerWrong) {
+        // The fixture keys its codes by canonical index, so the code has to
+        // name the distractor the student actually chose.
+        expect(result.decision).toBe('remediate_misconception');
+        expect(result.misconceptionCode).toContain(String(canonicalWrong));
+      }
+      // The overlay highlights the correct option where THIS question showed it.
+      expect(result.correctPresentationIndex).toBe(map.indexOf(canonicalCorrect));
+    }
   });
 });
 
@@ -465,6 +659,211 @@ describe('submitSession — an invalid attempt scores zero and records a reason'
       [started.id],
     );
     expect(rows[0]?.amount).toBe(0);
+  });
+});
+
+describe('submitSession — the SERVER bounds the claimed time (the contract’s backstop)', () => {
+  /**
+   * Answers every question claiming `timeSpentMs` WITHOUT letting that time
+   * pass. This is the lie the client is able to tell, written out.
+   */
+  async function answerAllWithoutSpendingTheTime(
+    account: HarnessAccount,
+    sessionId: string,
+    claimedMs: number,
+  ): Promise<void> {
+    const session = await harness.practice.service.getSession(actorOf(account), sessionId);
+    for (const question of session.questions) {
+      const canonical = /correct=(\d)/.exec(question.questionText)?.[1] ?? '0';
+      await harness.practice.service.submitAnswer(actorOf(account), sessionId, {
+        questionId: question.id,
+        selectedIndex: question.options.findIndex((option) =>
+          option.endsWith(`option ${canonical}`),
+        ),
+        timeSpentMs: claimedMs,
+        hintLevelUsed: 0,
+      });
+    }
+  }
+
+  it('REFUSES six questions claiming 12s each inside a two-second session', async () => {
+    /**
+     * The contract has always said "the session's own `started_at` bounds the
+     * total". It did not: `timeSpentMs` is client-supplied and rule 1 read
+     * nothing else, so 72 seconds of claimed work passed inside two real ones.
+     *
+     * `started_at` and `now` both come from the injected clock, so this is a
+     * measurement and not an approximation.
+     */
+    const { account, chapterId } = await seedStudent({ questionCount: 6 });
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 6,
+    });
+
+    await answerAllWithoutSpendingTheTime(account, started.id, 12_000);
+    // Two seconds of real time for six questions.
+    harness.clock.advanceMs(2_000);
+
+    const result = await harness.practice.service.submitSession(actorOf(account), started.id);
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toBe('too_fast');
+    expect(result.scorePercent).toBe(0);
+    expect(result.xpAwarded).toBe(0);
+  });
+
+  it('ACCEPTS the same claim once the session has really lasted that long', async () => {
+    // The other side of the boundary. Without this the test above passes on a
+    // rule that rejects everything.
+    const { account, chapterId } = await seedStudent({ questionCount: 6 });
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 6,
+    });
+
+    await answerAllWithoutSpendingTheTime(account, started.id, 12_000);
+    harness.clock.advanceMs(72_000);
+
+    const result = await harness.practice.service.submitSession(actorOf(account), started.id);
+    expect(result.isValid).toBe(true);
+    expect(result.scorePercent).toBe(100);
+  });
+
+  it('lets a client claim LESS than the wall clock — a paused tab is honest', async () => {
+    // The clamp is a CEILING. A student who left the tab open over lunch and
+    // reports four honest seconds a question must not be judged on the hour.
+    const { account, chapterId } = await seedStudent({ questionCount: 4 });
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 4,
+    });
+
+    await answerAllWithoutSpendingTheTime(account, started.id, 4_000);
+    harness.clock.advanceMs(60 * 60 * 1_000);
+
+    const result = await harness.practice.service.submitSession(actorOf(account), started.id);
+    expect(result.isValid).toBe(true);
+  });
+});
+
+describe('submitSession — the same-answer rule reads the SCREEN POSITION', () => {
+  it('REJECTS a student who taps the same position on every question', async () => {
+    /**
+     * THE BORED TAP-THROUGH, END TO END.
+     *
+     * The options are shuffled with a DIFFERENT map per question, so tapping
+     * position 2 six times stores six different canonical indices — which is
+     * why the rule, read canonically, fired on 0.1% of exactly this behaviour
+     * in a 20,000-trial simulation. The stored indices are asserted to differ
+     * below, because without that this test would pass against the old rule.
+     */
+    const { account, chapterId } = await seedStudent({ questionCount: 6 });
+    const varying = createVaryingShufflePractice();
+
+    const started = await varying.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 6,
+    });
+    const session = await varying.service.getSession(actorOf(account), started.id);
+
+    const TAPPED_POSITION = 2;
+    for (const question of session.questions) {
+      harness.clock.advanceMs(PASSING_TIME_MS);
+      await varying.service.submitAnswer(actorOf(account), started.id, {
+        questionId: question.id,
+        selectedIndex: TAPPED_POSITION,
+        timeSpentMs: PASSING_TIME_MS,
+        hintLevelUsed: 0,
+      });
+    }
+
+    const { rows: sessionRows } = await harness.postgres.client.query<{
+      option_order: Record<string, number[]>;
+    }>(`select option_order from practice_sessions where id = $1`, [started.id]);
+    const canonicals = session.questions.map(
+      (question) => sessionRows[0]!.option_order[question.id]![TAPPED_POSITION],
+    );
+    // THE PRECONDITION. If every map were identical this would be one value and
+    // the old rule would have caught it too, proving nothing.
+    expect(new Set(canonicals).size).toBeGreaterThan(1);
+
+    const result = await varying.service.submitSession(actorOf(account), started.id);
+    expect(result.isValid).toBe(false);
+    expect(result.invalidReason).toBe('all_same_answer');
+    expect(result.scorePercent).toBe(0);
+  });
+
+  it('ACCEPTS an honest full-marks attempt whose canonical answers are all the same', async () => {
+    /**
+     * THE INVERSE FALSE POSITIVE, which is the half that reached real students.
+     *
+     * Every question here is authored with `correct_index = 1`, which is
+     * ordinary in a real chapter. A student who gets all six right taps six
+     * different SCREEN POSITIONS and stores the index 1 six times. The
+     * canonical rule scored that attempt zero and recorded it as a cheat.
+     */
+    seedCounter += 1;
+    const account = await onboardAccount(harness, `uniform${seedCounter}@example.test`, 'student');
+    await harness.learner.service.createProfile(actorOf(account), {
+      displayName: `Uniform ${seedCounter}`,
+      grade: '8',
+      subjects: ['science'],
+    });
+    const chapterId = await insertChapter(
+      harness.postgres.client,
+      makeChapter(`uniform${seedCounter}`, {
+        grade: '8',
+        subjectCode: 'science',
+        chapterNumber: 1,
+      }),
+    );
+    for (let index = 0; index < 6; index += 1) {
+      await insertQuestion(
+        harness.postgres.client,
+        chapterId,
+        makeQuestion(`uq${seedCounter}-${index}`, {
+          correctIndex: 1,
+          questionText: `Question ${index} correct=1?`,
+          isHeldOut: false,
+        }),
+      );
+    }
+
+    const varying = createVaryingShufflePractice();
+    const started = await varying.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 6,
+    });
+    const session = await varying.service.getSession(actorOf(account), started.id);
+
+    const positions: number[] = [];
+    for (const question of session.questions) {
+      const position = question.options.findIndex((option) => option.endsWith('option 1'));
+      positions.push(position);
+      harness.clock.advanceMs(PASSING_TIME_MS);
+      await varying.service.submitAnswer(actorOf(account), started.id, {
+        questionId: question.id,
+        selectedIndex: position,
+        timeSpentMs: PASSING_TIME_MS,
+        hintLevelUsed: 0,
+      });
+    }
+    // The student really did tap different places. Without varied maps this
+    // test would say nothing.
+    expect(new Set(positions).size).toBeGreaterThan(1);
+
+    const result = await varying.service.submitSession(actorOf(account), started.id);
+    expect(result.isValid).toBe(true);
+    expect(result.invalidReason).toBeNull();
+    expect(result.scorePercent).toBe(100);
+
+    // And the stored indices are still all canonical 1 — D-058 is untouched by
+    // the rule change.
+    const { rows } = await harness.postgres.client.query<{ selected_index: number }>(
+      `select selected_index from practice_responses where session_id = $1`,
+      [started.id],
+    );
+    expect(rows.map((row) => row.selected_index)).toEqual([1, 1, 1, 1, 1, 1]);
   });
 });
 
@@ -794,6 +1193,160 @@ describe('access — cross-student and cross-tenant are denied with NO PAYLOAD',
     await expect(harness.practice.service.getProgress(foreign)).rejects.toBeInstanceOf(
       ForbiddenError,
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // THE WRITE PATHS. EVERY TEST ABOVE THIS POINT IS A READ.
+  // -------------------------------------------------------------------------
+
+  it('refuses startSession to an actor claiming another tenant', async () => {
+    /**
+     * `startSession`'s `assertCanAccess` was deletable with 219 of 219 tests
+     * still passing — there was no access test for it at all. It is the one
+     * call that CREATES a row, and it is the only place the session's tenant is
+     * decided, so a hole here files a session under an unchecked tenant and
+     * every later check on that row then passes by construction.
+     */
+    await createSecondTenant(harness);
+    const { account, chapterId } = await seedStudent();
+
+    await expect(
+      harness.practice.service.startSession(actorOf(account, OTHER_TENANT_ID), {
+        chapterId,
+        questionCount: 4,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    // And nothing was created on the way to the refusal.
+    expect(await countRows('practice_sessions', 'student_user_id = $1', [account.userId])).toBe(0);
+  });
+
+  it('refuses submitAnswer on another student’s session', async () => {
+    // Making `loadSession`'s guard conditional on `action === 'read'` also
+    // passed 219 of 219, because every access test was a read.
+    const owner = await seedStudent();
+    const started = await harness.practice.service.startSession(actorOf(owner.account), {
+      chapterId: owner.chapterId,
+      questionCount: 4,
+    });
+    const session = await harness.practice.service.getSession(
+      actorOf(owner.account),
+      started.id,
+    );
+
+    seedCounter += 1;
+    const intruder = await onboardAccount(
+      harness,
+      `writer${seedCounter}@example.test`,
+      'student',
+    );
+
+    await expect(
+      harness.practice.service.submitAnswer(actorOf(intruder), started.id, {
+        questionId: session.questions[0]!.id,
+        selectedIndex: 0,
+        timeSpentMs: PASSING_TIME_MS,
+        hintLevelUsed: 0,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    // The owner's session is untouched — no answer was recorded.
+    const { rows } = await harness.postgres.client.query<{ answers: Record<string, unknown> }>(
+      `select answers from practice_sessions where id = $1`,
+      [started.id],
+    );
+    expect(Object.keys(rows[0]!.answers)).toEqual([]);
+  });
+
+  it('refuses submitSession on another student’s session', async () => {
+    /**
+     * DEFENCE IN DEPTH, AND WORTH KNOWING WHICH LAYER IS ANSWERING. `learner`
+     * guards `getMastery` for a student who is not the actor, so this deny
+     * survives even with practice's own write guard removed. The two tests
+     * either side of it — `submitAnswer` cross-student, and both writes
+     * cross-tenant — are the ones that isolate practice's guard, and both fail
+     * the moment `loadSession` stops authorising writes.
+     */
+    const owner = await seedStudent();
+    const started = await harness.practice.service.startSession(actorOf(owner.account), {
+      chapterId: owner.chapterId,
+      questionCount: 4,
+    });
+    await answerAll(owner.account, started.id, [true, true, true, true]);
+
+    seedCounter += 1;
+    const intruder = await onboardAccount(
+      harness,
+      `submitter${seedCounter}@example.test`,
+      'student',
+    );
+
+    await expect(
+      harness.practice.service.submitSession(actorOf(intruder), started.id),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    // Nothing was scored, awarded or written on somebody else's behalf.
+    expect(
+      await countRows('practice_sessions', 'id = $1 and submitted_at is null', [started.id]),
+    ).toBe(1);
+    expect(await countRows('xp_ledger', 'source_id = $1', [started.id])).toBe(0);
+    expect(await countRows('practice_responses', 'session_id = $1', [started.id])).toBe(0);
+  });
+
+  it('refuses submitAnswer and submitSession to an actor claiming another tenant', async () => {
+    // The cross-TENANT half of the same hole, on both writes. The tenant on the
+    // session row is what is compared (D-073, D-091), so a claimed tenant that
+    // does not match the data is refused before a question is loaded.
+    await createSecondTenant(harness);
+    const { account, chapterId } = await seedStudent();
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 4,
+    });
+    const session = await harness.practice.service.getSession(actorOf(account), started.id);
+    const foreign = actorOf(account, OTHER_TENANT_ID);
+
+    await expect(
+      harness.practice.service.submitAnswer(foreign, started.id, {
+        questionId: session.questions[0]!.id,
+        selectedIndex: 0,
+        timeSpentMs: PASSING_TIME_MS,
+        hintLevelUsed: 0,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    await expect(
+      harness.practice.service.submitSession(foreign, started.id),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it('carries no session data on a WRITE deny either', async () => {
+    const owner = await seedStudent();
+    const started = await harness.practice.service.startSession(actorOf(owner.account), {
+      chapterId: owner.chapterId,
+      questionCount: 4,
+    });
+
+    seedCounter += 1;
+    const intruder = await onboardAccount(
+      harness,
+      `quiet${seedCounter}@example.test`,
+      'student',
+    );
+
+    const error = await harness.practice.service
+      .submitSession(actorOf(intruder), started.id)
+      .then(() => null)
+      .catch((thrown: unknown) => thrown as ForbiddenError);
+
+    const serialised = JSON.stringify({
+      safeMessage: error?.safeMessage,
+      details: error?.details,
+    });
+    expect(serialised).not.toContain(started.id);
+    expect(serialised).not.toContain(owner.account.userId);
+    expect(serialised).not.toContain(owner.chapterId);
+    expect(error?.safeMessage).toBe('Forbidden.');
   });
 
   it('reports an unknown session as not found, with no detail', async () => {

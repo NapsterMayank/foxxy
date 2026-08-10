@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { IdGen } from '../../platform/id-gen/index';
-import type { Logger } from '../../platform/logger/index';
+import { stripQueryString, type Logger } from '../../platform/logger/index';
 
 export const REQUEST_ID_HEADER = 'x-request-id';
 
@@ -29,7 +29,17 @@ export function registerRequestId(app: FastifyInstance, options: RequestIdOption
       typeof inbound === 'string' && inbound.length > 0 ? inbound : options.idGen.uuid();
 
     reply.header(REQUEST_ID_HEADER, requestId);
-    request.log2 = options.logger.child({ requestId, method: request.method, url: request.url });
+    // D-178: the PATH only. `request.url` carries the query string, and
+    // `GET /api/v1/auth/verify?token=…` puts a live session credential in it —
+    // which the logger's key-based redaction cannot see, because the secret is
+    // inside a value and not under a key of its own. Stripped here, at the one
+    // binding site, rather than filtered downstream: there is exactly one place
+    // a URL enters the log and this is it.
+    request.log2 = options.logger.child({
+      requestId,
+      method: request.method,
+      url: stripQueryString(request.url),
+    });
     done();
   });
 

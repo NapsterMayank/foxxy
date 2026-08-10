@@ -56,7 +56,7 @@ export interface DbPoolsConfig {
   /** §4 — how long establishing a connection may take. */
   readonly connectTimeoutMs: number;
   /**
-   * `hnsw.ef_search` for the `ai` pool — the pool vector search runs on.
+   * `hnsw.ef_search` for EVERY POOL RETRIEVAL CAN RUN ON — `ai` and `worker`.
    *
    * An HNSW index scan returns no more rows than this, and pgvector's default
    * is 40 while §8.4 asks for the top 50 (D-041). Set here, on the connection,
@@ -104,7 +104,9 @@ export interface DbPoolStats {
  * properties OF the connection rather than something that must be applied to
  * it (D-028).
  *
- * `hnsw.ef_search` is set only on the pool that runs vector search. Postgres
+ * `hnsw.ef_search` is set on every pool that runs vector search — `ai` in the
+ * API process and `worker` in the background one, because `buildModules` gives
+ * retrieval the `worker` pool there. Postgres
  * accepts a namespaced setting it does not yet recognise as a placeholder and
  * reconciles it when pgvector loads, so this works even on a connection made
  * before `create extension vector` has run — which a migration harness does.
@@ -163,11 +165,10 @@ export function createDbPools(cfg: DbPoolsConfig): DbPools {
   // search is the expensive, spiky query path (§3.1), so it is capped both in
   // how many connections it may hold and in how long it may hold one.
   //
-  // It is also the ONLY pool that gets `hnsw.ef_search`. Putting it here rather
-  // than in the retrieval module is the whole point: the setting has to be
-  // present on every connection a vector query could run on, and a module-level
-  // `SET` is one that some future second query path forgets. The other three
-  // pools never touch the HNSW index, so the setting would be noise on them.
+  // It also gets `hnsw.ef_search`. Putting it here rather than in the retrieval
+  // module is the whole point: the setting has to be present on every
+  // connection a vector query could run on, and a module-level `SET` is one
+  // that some future second query path forgets.
   const ai = createNamedPool(
     'ai',
     cfg,
@@ -175,7 +176,40 @@ export function createDbPools(cfg: DbPoolsConfig): DbPools {
     cfg.vectorStatementTimeoutMs,
     cfg.hnswEfSearch,
   );
-  const worker = createNamedPool('worker', cfg, cfg.sizes.worker, cfg.statementTimeoutMs);
+  /**
+   * ==========================================================================
+   * THE WORKER POOL CARRIES `hnsw.ef_search` TOO, AND IT IS NOT DECORATION.
+   *
+   * This setting used to be on `ai` alone, described in three separate comments
+   * as "the only pool that gets it". That description was true and the
+   * conclusion drawn from it was wrong, because `app/routes.ts` builds
+   * `retrieval` — the one module that scans the HNSW index — on
+   * `pools.worker` whenever `forWorker` is set:
+   *
+   *     db: forWorker ? container.pools.worker : container.poolFor('retrieval')
+   *
+   * So in the worker process the vector query ran on a connection where
+   * `hnsw.ef_search` had never been set, pgvector fell back to its default of
+   * 40, and a `limit 50` returned 40 rows. Not an error, not a log line, not
+   * even a wrong answer — just a top-50 that is quietly a top-40, in the one
+   * process nobody is watching a latency graph for. The symptom is a corpus
+   * that reads as slightly thin in background jobs and normal in the API, which
+   * is the hardest possible shape of bug to be handed.
+   *
+   * The general rule this restores: THE SETTING FOLLOWS THE QUERY, NOT THE
+   * POOL'S NAME. `auth` and `core` still do not get it — no vector query can
+   * reach them, and `content` reads `rag_chunks` on `core` only by primary key.
+   * If a future module runs a vector scan on either, this is the line that has
+   * to change with it.
+   * ==========================================================================
+   */
+  const worker = createNamedPool(
+    'worker',
+    cfg,
+    cfg.sizes.worker,
+    cfg.statementTimeoutMs,
+    cfg.hnswEfSearch,
+  );
 
   const pools: readonly NamedDbHandle[] = [auth, core, ai, worker];
   let closed = false;

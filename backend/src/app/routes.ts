@@ -431,9 +431,16 @@ export function buildModules(container: Container, options: BuildModulesOptions 
    *  1. THE `ai` POOL, not `core` — even though `content` owns `rag_chunks` and
    *     runs on `core`. The pool follows the CALLER's cost profile: a slow HNSW
    *     scan holding a `core` connection would put every chapter listing behind
-   *     vector search. The `ai` pool is also the only one carrying
-   *     `hnsw.ef_search = 100` (D-049); on any other pool the top-50 dense query
-   *     silently returns 40 rows and the corpus reads as thin.
+   *     vector search.
+   *
+   *     IN THE WORKER THAT POOL IS `worker`, and for a long time that was a
+   *     silent defect: `hnsw.ef_search = 100` (D-049) was set on `ai` ALONE, so
+   *     the worker's vector query ran without it, pgvector applied its default
+   *     of 40, and `limit 50` returned 40 rows — in the process with no latency
+   *     graph on it. `platform/db/pools.ts` now sets the parameter on `worker`
+   *     too, and a fast-lane test asserts it for every pool retrieval can be
+   *     built on. If this line ever names a third pool, that test is the one
+   *     that has to be extended with it.
    *
    *  2. `readChunks` IS `content.getChunksByIds`, and the service re-ranks what
    *     it returns (D-060). That query is an `IN (...)`, so its row order is

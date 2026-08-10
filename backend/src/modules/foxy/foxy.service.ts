@@ -2,7 +2,7 @@ import { createAccessGuard } from '@/platform/authz/index';
 import type { CachePort } from '@/platform/cache/index';
 import type { Clock } from '@/platform/clock/index';
 import { NotFoundError, RateLimitError, ValidationError } from '@/platform/errors/index';
-import type { LlmProvider } from '@/platform/llm/index';
+import type { LlmProvider, LlmRequest } from '@/platform/llm/index';
 import type { Logger } from '@/platform/logger/index';
 import type { Grade, LanguageCode } from '@/shared/constants/curriculum';
 import { FOXY_HISTORY_TURNS, type FoxyAction, type FoxyPlan } from '@/shared/constants/foxy';
@@ -13,7 +13,8 @@ import {
   PromptIdentityLeak,
   assemblePrompt,
   assertNoIdentity,
-  type AssembledPrompt,
+  renderSentPrompt,
+  toLlmRequest,
   type PromptChunk,
 } from './domain/prompt';
 import { classifyInput, refusalMessage } from './domain/safety';
@@ -352,10 +353,22 @@ export function createFoxyService(deps: FoxyServiceDeps): FoxyService {
     readonly rewritten: string;
     readonly retrieved: readonly RetrievedRef[];
     readonly chunks: readonly PromptChunk[];
-    readonly prompt: AssembledPrompt;
+    /**
+     * THE REQUEST ITSELF, built once by `toLlmRequest` in `sendMessage`.
+     *
+     * The assembled prompt is deliberately NOT passed in. This function must
+     * have no way to re-derive what was sent, because that is what it used to
+     * do: it built the trace's `prompt` column from `prompt.system` rather than
+     * from the object it handed to `llm.stream`, so the two could disagree and
+     * the forensic record would still look complete. If they can diverge, they
+     * eventually will.
+     */
+    readonly request: LlmRequest;
+    /** For the empty-answer sentence only. The request carries everything else. */
+    readonly language: LanguageCode;
     readonly startedAtMs: number;
   }): FoxyTurn {
-    const { session, prompt } = input;
+    const { session, request } = input;
 
     async function* iterate(): AsyncGenerator<FoxyFrame> {
       const filter = createCitationFilter(input.chunks);
@@ -364,14 +377,7 @@ export function createFoxyService(deps: FoxyServiceDeps): FoxyService {
       let modelFailed = false;
 
       try {
-        const stream = deps.llm.stream({
-          messages: [
-            { role: 'system', content: prompt.system },
-            ...prompt.messages.map((turn) => ({ role: turn.role, content: turn.content })),
-          ],
-          maxTokens: prompt.maxTokens,
-          temperature: prompt.temperature,
-        });
+        const stream = deps.llm.stream(request);
 
         for await (const chunk of stream) {
           const filtered = filter.push(chunk.text);
@@ -421,7 +427,7 @@ export function createFoxyService(deps: FoxyServiceDeps): FoxyService {
             // An empty answer would violate the content CHECK, which is right —
             // a message with no text is not a message. A stream that failed
             // before its first token stores the honest sentence instead.
-            content: answer.length > 0 ? answer : EMPTY_ANSWER_TEXT[prompt.language],
+            content: answer.length > 0 ? answer : EMPTY_ANSWER_TEXT[input.language],
             action: null,
             citations,
             abstained: false,
@@ -437,9 +443,9 @@ export function createFoxyService(deps: FoxyServiceDeps): FoxyService {
             retrieved: input.retrieved,
             citations,
             fabricatedCitations: fabricated,
-            prompt: `${prompt.system}\n\n---\n\n${prompt.messages
-              .map((turn) => `${turn.role}: ${turn.content}`)
-              .join('\n')}`,
+            // WHAT WAS SENT, rendered from the same object `llm.stream` was
+            // handed. Never re-derived from the assembler — see `request` above.
+            prompt: renderSentPrompt(request.messages),
             answer,
             abstained: false,
             abstainReason: modelFailed ? 'model_failed' : null,
@@ -656,6 +662,11 @@ export function createFoxyService(deps: FoxyServiceDeps): FoxyService {
         chunks,
       });
 
+      // The request is built HERE, once, and is the only thing handed onward.
+      // `streamedTurn` never sees the assembled prompt, so the trace cannot be
+      // written from anything other than what was sent.
+      const request = toLlmRequest(prompt);
+
       // STEPS 8-10.
       return streamedTurn({
         session,
@@ -664,7 +675,8 @@ export function createFoxyService(deps: FoxyServiceDeps): FoxyService {
         rewritten: retrieval.normalisedQuery,
         retrieved,
         chunks,
-        prompt,
+        request,
+        language: prompt.language,
         startedAtMs,
       });
     },

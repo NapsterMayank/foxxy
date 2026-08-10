@@ -106,7 +106,17 @@ async function seed(): Promise<{ account: HarnessAccount; chapterId: string }> {
   return { account, chapterId };
 }
 
-/** Answers every question of a session through the HTTP surface. */
+/** One question's worth of claimed — and, below, actually spent — time. */
+const ANSWER_TIME_MS = 12_000;
+
+/**
+ * Answers every question of a session through the HTTP surface.
+ *
+ * THE CLOCK MOVES BY THE TIME BEING CLAIMED. `submitSession` clamps the claimed
+ * total to `now - started_at` from the injected clock, so a session that claims
+ * 48 seconds of work inside a frozen instant is correctly rejected as
+ * `too_fast`. An honest HTTP session has to spend the time it reports.
+ */
 async function answerAll(
   sessionId: string,
   cookie: string,
@@ -115,9 +125,10 @@ async function answerAll(
   for (const question of questions) {
     const canonical = /correct=(\d)/.exec(question.questionText)?.[1] ?? '0';
     const position = question.options.findIndex((option) => option.endsWith(`option ${canonical}`));
+    harness.clock.advanceMs(ANSWER_TIME_MS);
     await post(
       `/api/v1/practice/sessions/${sessionId}/answers`,
-      { questionId: question.id, selectedIndex: position, timeSpentMs: 12_000 },
+      { questionId: question.id, selectedIndex: position, timeSpentMs: ANSWER_TIME_MS },
       cookie,
     );
   }

@@ -35,12 +35,19 @@ import type { ChunkReader } from './retrieval.types';
  *    from the other. An `if (mode === …)` in `retrieval.service.ts` is the
  *    regression, not a feature.
  *
- * 2. THE THRESHOLD IS UNCALIBRATED AND SAYS SO IN ITS OWN TYPE. It cannot be
- *    marked `MEASURED` without supplying the sample sizes, both percentiles and
- *    both error rates — that is a compile error, not a review comment. Read the
- *    header of `domain/abstain-threshold.ts` before touching the number: the
- *    previous system guessed a floor on the wrong scale and silently filtered
- *    every result for a year.
+ * 2. THE THRESHOLD IS MEASURED (10 August 2026) AND SAYS SO IN ITS OWN TYPE. It
+ *    cannot be marked `MEASURED` without supplying the sample sizes, both
+ *    percentiles, both error rates, the corpus, the model, the candidate depth
+ *    and the placement rule — that is a compile error, not a review comment.
+ *    Read the header of `domain/abstain-threshold.ts` before touching the
+ *    number: it carries both distributions and what the value costs.
+ *
+ *    ANYTHING THAT CHANGES THE RETRIEVER INVALIDATES IT — the sparse query, the
+ *    ranking function, `RRF_K`, `CANDIDATE_LIMIT`, the embedding model. That is
+ *    a re-run of `npm run eval:retrieval:calibrate`, not an adjustment. The
+ *    service now REFUSES TO START on a threshold that is off the fused scale or
+ *    measured at a different candidate depth, so the mismatch is a boot failure
+ *    rather than a silent change in what students are told.
  *
  * 3. DEDUPLICATION HAPPENS AFTER FUSION AND BEFORE TRUNCATION, and the order is
  *    the decision. A quarter of the corpus is exact-duplicate passages (D-108).
@@ -62,8 +69,11 @@ export interface RetrievalModuleDeps {
    * pool follows the CALLER's cost profile: a slow HNSW scan holding a `core`
    * connection puts every chapter listing behind vector search.
    *
-   * The `ai` pool is also the only one carrying `hnsw.ef_search = 100`
-   * (D-049). On any other pool the top-50 dense query silently returns 40.
+   * The pool must carry `hnsw.ef_search = 100` (D-049) or the top-50 dense
+   * query silently returns 40. `platform/db/pools.ts` sets it on `ai` AND on
+   * `worker`, which are the two pools `buildModules` can hand this module —
+   * the worker one was missing for a while and the symptom was a top-50 that
+   * was quietly a top-40 in background jobs only.
    */
   readonly db: RetrievalDbHandle;
   /** Guarded by the composition root. Never a bare adapter. */
@@ -132,6 +142,7 @@ export {
   ABSTAIN_THRESHOLD,
   CANDIDATE_LIMIT,
   DEFAULT_TOP_N,
+  assertThresholdMatchesCandidateDepth,
   assertThresholdOnFusedScale,
   confidenceFrom,
   decideAbstention,
@@ -140,14 +151,17 @@ export {
 export type {
   AbstainReason,
   AbstainThreshold,
+  ThresholdPolicy,
   ThresholdProvenance,
 } from './domain/abstain-threshold';
 
 export {
+  DEFAULT_FALSE_ABSTAIN_BUDGET,
   calibrate,
   describeDistribution,
   percentile,
   suggestThreshold,
+  suggestThresholdWithinFalseAbstainBudget,
   toMeasuredThreshold,
 } from './domain/calibration';
 export type {

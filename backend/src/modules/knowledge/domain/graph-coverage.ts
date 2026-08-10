@@ -25,6 +25,35 @@
  * cycles (see `chapter-graph.ts`). Reporting `chaptersWithGraph: 15` and stopping
  * would be true and misleading in the same sentence.
  *
+ * ===========================================================================
+ * `orderable` IS MEASURED ON THE GRAPH THE FEATURE ACTUALLY WALKS, AND IT WAS
+ * ONCE MEASURED ON A DIFFERENT ONE.
+ *
+ * `findLearningPath` projects EVERY node in the corpus, because 19 grade-8
+ * mathematics prerequisites point back into grade 7 and a path that stopped at
+ * the grade boundary would be silently incomplete. This function used to project
+ * only the nodes IN SCOPE — a different graph — and report `orderable` from that.
+ *
+ * Measured, 10 August 2026, grade 8 mathematics:
+ *
+ *     chaptersTotal 14 · chaptersWithGraph 14 · ratio 1.0
+ *     orderable true · cycle []            <- the report
+ *     findLearningPath: 14 of 14 chapters -> { ok: false, reason: 'cycle' }
+ *
+ * In isolation grade 8 is acyclic, so the scoped projection was right about the
+ * graph it was given and the graph it was given is one nobody ever walks. The
+ * report read healthiest exactly where the feature was dead. That is D-129's own
+ * argument recurring inside the instrument built to detect it.
+ *
+ * So: `orderable` and `plannableChapters` are both computed over the CORPUS
+ * projection, one `findLearningPath` per covered chapter — the same call, on
+ * the same graph, that the feature makes. `orderableWithinScope` keeps the old
+ * scoped reading as a subordinate DIAGNOSTIC, because the disagreement between
+ * the two is the finding: it separates "this grade contradicts itself"
+ * (grade 7 mathematics) from "this grade is internally fine and its
+ * out-of-grade prerequisite is not" (grade 8 mathematics). It is never the
+ * answer to "can this grade be planned".
+ *
  * Pure: every input arrives as an argument.
  */
 
@@ -69,10 +98,34 @@ export interface GraphCoverage {
    */
   readonly chaptersWithoutGraph: readonly ChapterNodeId[];
   /**
-   * False when the chapter projection contains a cycle. See the header: this is
-   * a coverage fact, not a separate diagnostic.
+   * In-scope chapters for which `findLearningPath` ACTUALLY RETURNS A PATH,
+   * over the corpus projection — the same call the feature makes.
+   *
+   * THE ONLY NUMBER ON THIS OBJECT THAT MEANS "THE FEATURE WORKS HERE".
+   * `chaptersWithGraph` counts rows; this counts answers. Grade 8 mathematics
+   * measured 14 and 0 respectively.
+   *
+   * Its denominator is `chaptersWithGraph`, not `chaptersTotal`: a chapter with
+   * no graph row was never going to be plannable and is already counted in
+   * `chaptersWithoutGraph`. Adding it here would blame the cycle for a gap it
+   * did not cause.
+   */
+  readonly plannableChapters: number;
+  /**
+   * False when any covered chapter cannot be given a learning path over the
+   * CORPUS projection. See the header: this is a coverage fact, not a separate
+   * diagnostic, and it is deliberately not the scoped reading.
    */
   readonly orderable: boolean;
+  /**
+   * The old SCOPED reading — whether the in-scope nodes alone can be ordered.
+   *
+   * A DIAGNOSTIC AND NOT A VERDICT. `orderableWithinScope: true` with
+   * `orderable: false` is the grade 8 mathematics signature: internally
+   * consistent, and every path it needs runs through a grade 7 cycle. Never
+   * show this to anybody as "can this grade be planned".
+   */
+  readonly orderableWithinScope: boolean;
   /** The cycle that made `orderable` false, closed. Empty when orderable. */
   readonly cycle: readonly ChapterNodeId[];
 }
@@ -93,12 +146,20 @@ export function coverageRatio(coverage: GraphCoverage): number {
 }
 
 /**
- * Computes coverage from the chapters in scope and the graph rows in scope.
+ * Computes coverage from the chapters in scope and EVERY graph row the caller
+ * can see.
  *
- * Nodes whose `chapterId` is not in `chaptersInScope` are IGNORED rather than
- * counted, because a caller asking about grade 8 should not have its numbers
- * moved by a grade 7 row that the query happened to return. The 19 grade-8-maths
- * edges pointing back into grade 7 are real and are the reason this matters.
+ * `nodes` IS THE WHOLE CORPUS, not a pre-filtered slice, and both readings are
+ * taken from it here:
+ *
+ *   - the COUNTS (`conceptNodes`, `chapterEdges`, `selfLoopsDropped`,
+ *     `orderableWithinScope`) are scoped, because a caller asking about grade 8
+ *     should not have its numbers moved by a grade 7 row the query happened to
+ *     return;
+ *   - `plannableChapters` and `orderable` are NOT scoped, because the feature
+ *     they describe is not. The 19 grade-8-maths edges pointing back into
+ *     grade 7 are real, `findLearningPath` follows them, and a report that
+ *     pretended otherwise said 14/14 about a grade where nothing was plannable.
  */
 export function computeGraphCoverage(input: {
   readonly grade: string;
@@ -124,7 +185,27 @@ export function computeGraphCoverage(input: {
     chapterEdges += targets.length;
   }
 
-  const order = topologicalOrder(projection);
+  const scopedOrder = topologicalOrder(projection);
+
+  // THE GRAPH THE FEATURE WALKS. One `findLearningPath` per covered chapter,
+  // over the corpus projection — the identical call `knowledge.service` makes,
+  // so a chapter counted here is a chapter that really does produce a path.
+  const corpusProjection = projectToChapterGraph(input.nodes);
+  let plannableChapters = 0;
+  let cycle: readonly ChapterNodeId[] = [];
+  for (const chapterId of [...covered].sort()) {
+    const result = findLearningPath(corpusProjection, chapterId);
+    if (result.ok) {
+      plannableChapters += 1;
+      continue;
+    }
+    // The FIRST cycle, in sorted chapter order so the report is deterministic.
+    // Reported in full rather than as a boolean: "there is a cycle" is not
+    // diagnosable and `a -> b -> c -> a` is.
+    if (result.reason === 'cycle' && cycle.length === 0) {
+      cycle = result.cycle;
+    }
+  }
 
   return {
     grade: input.grade,
@@ -136,11 +217,14 @@ export function computeGraphCoverage(input: {
     chapterEdges,
     selfLoopsDropped: projection.selfLoopsDropped,
     chaptersWithoutGraph,
-    orderable: order.ok,
-    // `topologicalOrder` cannot fail on a missing chapter — it only ever walks
-    // chapters it found itself — so its result type has exactly two cases and
-    // this needs no third branch.
-    cycle: order.ok ? [] : order.cycle,
+    plannableChapters,
+    // Every covered chapter answers, or the grade does not order. With no
+    // covered chapters this is vacuously true, which is correct: nothing is
+    // claimed about a grade the graph has never heard of, and
+    // `chaptersWithGraph: 0` is the number that says so.
+    orderable: plannableChapters === covered.size,
+    orderableWithinScope: scopedOrder.ok,
+    cycle,
   };
 }
 

@@ -3,7 +3,7 @@ import { FixedClock } from '@/platform/clock/index';
 import { createDeterministicEmbed, type EmbeddingProvider } from '@/platform/embed/index';
 import { DependencyError, ValidationError } from '@/platform/errors/index';
 import { FakeLogger } from '@/platform/logger/index';
-import type { AbstainThreshold } from '../domain/abstain-threshold';
+import { ABSTAIN_THRESHOLD, type AbstainThreshold } from '../domain/abstain-threshold';
 import { RRF_K, maxFusedScore } from '../domain/reciprocal-rank-fusion';
 import type { CandidateRow, RetrievalRepository, SearchFilter } from '../retrieval.repository';
 import { createRetrievalService, type RetrievalService } from '../retrieval.service';
@@ -81,6 +81,37 @@ beforeEach(() => {
   clock = new FixedClock();
 });
 
+/**
+ * =============================================================================
+ * THE DEFAULT THRESHOLD FOR TESTS THAT ARE NOT ABOUT THE THRESHOLD.
+ *
+ * Zero — "never abstain on score", which `assertThresholdOnFusedScale` accepts
+ * as a statable position.
+ *
+ * Before 10 August 2026 the shipped constant was the lowest achievable fused
+ * score, so it could not filter anything and every test here inherited a
+ * pipeline that never abstained. It is now a MEASURED floor at 0.0299, which is
+ * above the fused score of a chunk sitting at rank 3 of one list (1/63) — so
+ * fixtures written to exercise TRUNCATION or DEDUPLICATION started abstaining
+ * instead, and would have been "fixed" by weakening the very assertions they
+ * exist for.
+ *
+ * Making the insulation explicit is the alternative: a test about taking the
+ * top 3 states that it is not also a test about the floor. The tests that ARE
+ * about the floor pass their own threshold, and one test below pins that the
+ * SERVICE's default is the shipped constant — which is the thing this fixture
+ * would otherwise hide.
+ * =============================================================================
+ */
+const NEVER_ABSTAIN_ON_SCORE: AbstainThreshold = {
+  value: 0,
+  candidateLimit: 50,
+  provenance: {
+    state: 'UNCALIBRATED',
+    reason: 'test fixture — isolates tests that are not about the abstention floor',
+  },
+};
+
 function build(options: {
   readonly dense: CandidateRow[];
   readonly sparse: CandidateRow[];
@@ -104,7 +135,7 @@ function build(options: {
       readChunks: options.readChunks ?? reversingReader(records),
       clock,
       logger,
-      ...(options.threshold === undefined ? {} : { threshold: options.threshold }),
+      threshold: options.threshold ?? NEVER_ABSTAIN_ON_SCORE,
     }),
   };
 }
@@ -276,6 +307,7 @@ describe('abstention', () => {
   it('abstains BELOW the threshold, and says which kind of abstention it was', async () => {
     const strict: AbstainThreshold = {
       value: maxFusedScore(RRF_K),
+      candidateLimit: 50,
       provenance: { state: 'UNCALIBRATED', reason: 'test fixture — abstains on all but a perfect hit' },
     };
     const { service } = build({ dense: [row('a', 'A')], sparse: [], threshold: strict });
@@ -290,6 +322,7 @@ describe('abstention', () => {
   it('does NOT abstain at exactly the threshold', async () => {
     const atRankOneOfOneList: AbstainThreshold = {
       value: 1 / (RRF_K + 1),
+      candidateLimit: 50,
       provenance: { state: 'UNCALIBRATED', reason: 'test fixture — boundary' },
     };
     const { service } = build({
@@ -308,6 +341,7 @@ describe('abstention', () => {
     let hydrations = 0;
     const strict: AbstainThreshold = {
       value: maxFusedScore(RRF_K),
+      candidateLimit: 50,
       provenance: { state: 'UNCALIBRATED', reason: 'test fixture' },
     };
     const { service } = build({
@@ -323,6 +357,98 @@ describe('abstention', () => {
     await service.search('what is heat', GRADE_7);
 
     expect(hydrations).toBe(0);
+  });
+});
+
+describe('THE INJECTED THRESHOLD IS VALIDATED — the override is not a back door', () => {
+  /**
+   * ==========================================================================
+   * THE DEFECT THESE PIN, IN ONE SENTENCE: `assertThresholdOnFusedScale` was
+   * written to make §8.4's year-long silent filter impossible and was never
+   * called on the threshold the service uses.
+   *
+   * `retrieval.service.ts` read `deps.threshold ?? ABSTAIN_THRESHOLD`. The
+   * shipped constant was checked by its own unit test; the OVERRIDE — the
+   * supported path, the one an eval sweep and every future caller takes — was
+   * checked by nothing. So the exact historical defect could be reintroduced
+   * through the parameter provided to avoid a second code path, and the trace
+   * would report the bad threshold as though it were fine.
+   * ==========================================================================
+   */
+  function serviceWith(threshold: AbstainThreshold, candidateLimit?: number): RetrievalService {
+    return createRetrievalService({
+      repository: fakeRepository([row('a', 'A')], []),
+      embed: createDeterministicEmbed(),
+      readChunks: () => Promise.resolve([chunkRecord('a', 'A')]),
+      clock,
+      logger,
+      threshold,
+      ...(candidateLimit === undefined ? {} : { candidateLimit }),
+    });
+  }
+
+  it('REFUSES A COSINE FLOOR passed as an override, at construction', () => {
+    // 0.7 is a sensible cosine threshold and a catastrophic fused one: nothing
+    // can reach it, so every query abstains and the corpus reads as empty.
+    expect(() =>
+      serviceWith({
+        value: 0.7,
+        candidateLimit: 50,
+        provenance: { state: 'UNCALIBRATED', reason: 'the historical defect, re-applied' },
+      }),
+    ).toThrow(RangeError);
+  });
+
+  it('refuses NaN, which compares false against everything and abstains never', () => {
+    expect(() =>
+      serviceWith({
+        value: Number.NaN,
+        candidateLimit: 50,
+        provenance: { state: 'UNCALIBRATED', reason: 'test fixture' },
+      }),
+    ).toThrow(RangeError);
+  });
+
+  it('fails BEFORE any query can run, not on the first search', () => {
+    // A throw at construction is a process that does not start. A throw on the
+    // first search is a deployment that is live and answering wrongly until
+    // somebody asks it something.
+    const repository = fakeRepository([row('a', 'A')], []);
+
+    expect(() =>
+      createRetrievalService({
+        repository,
+        embed: createDeterministicEmbed(),
+        readChunks: () => Promise.resolve([]),
+        clock,
+        logger,
+        threshold: {
+          value: 0.7,
+          candidateLimit: 50,
+          provenance: { state: 'UNCALIBRATED', reason: 'test fixture' },
+        },
+      }),
+    ).toThrow(RangeError);
+    expect(repository.denseCalls).toEqual([]);
+  });
+
+  it('REFUSES A THRESHOLD MEASURED AT ANOTHER CANDIDATE DEPTH', () => {
+    /**
+     * The second half of the same defect. `ABSTAIN_THRESHOLD` is measured at
+     * depth 50 while the service reads `deps.candidateLimit ?? CANDIDATE_LIMIT`,
+     * so a caller raising the depth to 100 pushed fifty new candidates below a
+     * floor observed without them — silently, and with the measured error rates
+     * in the trace no longer describing the running pipeline.
+     */
+    expect(() => serviceWith(ABSTAIN_THRESHOLD, 100)).toThrow(RangeError);
+  });
+
+  it('accepts the shipped threshold at the depth it was measured at', () => {
+    expect(() => serviceWith(ABSTAIN_THRESHOLD, 50)).not.toThrow();
+  });
+
+  it('accepts zero — "never abstain on score" is a statable position', () => {
+    expect(() => serviceWith(NEVER_ABSTAIN_ON_SCORE)).not.toThrow();
   });
 });
 
@@ -482,11 +608,33 @@ describe('the trace — the only way a bad answer will ever be debugged', () => 
     expect(trace.normalisedQuery).toBe('spaced out');
   });
 
-  it('records that the threshold is UNCALIBRATED, on every single turn', async () => {
-    // So an abstention in a log is never mistaken for a measured judgement.
+  it('records the threshold STATE on every single turn', async () => {
+    // So an abstention in a log can be told from a measured judgement without
+    // reading the source of whatever version was deployed that day.
     const { service } = build({ dense: [row('a', 'A')], sparse: [] });
 
     expect((await service.search('q', GRADE_7)).trace.thresholdState).toBe('UNCALIBRATED');
+  });
+
+  it('records the threshold VALUE, and defaults it to the SHIPPED MEASURED one', async () => {
+    /**
+     * The fixture above insulates most tests from the floor, which would
+     * otherwise hide the wiring this asserts: a service constructed WITHOUT a
+     * threshold must use `ABSTAIN_THRESHOLD`, not zero and not a local default.
+     */
+    const repository = fakeRepository([row('a', 'A')], [row('a', 'A')]);
+    const service = createRetrievalService({
+      repository,
+      embed: createDeterministicEmbed(),
+      readChunks: () => Promise.resolve([chunkRecord('a', 'A')]),
+      clock,
+      logger,
+    });
+
+    const { trace } = await service.search('q', GRADE_7);
+
+    expect(trace.thresholdValue).toBe(ABSTAIN_THRESHOLD.value);
+    expect(trace.thresholdState).toBe('MEASURED');
   });
 
   it('records the embedding model, because a different model is a different space', async () => {
@@ -510,7 +658,10 @@ describe('the trace — the only way a bad answer will ever be debugged', () => 
   });
 
   it('is written for an ABSTAINING turn too, which is when it is most wanted', async () => {
-    const { service } = build({ dense: [], sparse: [] });
+    // The SHIPPED threshold here, not the permissive fixture: this asserts the
+    // trace records a real floor on the path where somebody will be reading it
+    // to find out why a student was told nothing.
+    const { service } = build({ dense: [], sparse: [], threshold: ABSTAIN_THRESHOLD });
 
     const { trace } = await service.search('something off-syllabus', GRADE_7);
 

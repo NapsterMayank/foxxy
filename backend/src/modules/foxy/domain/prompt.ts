@@ -1,3 +1,4 @@
+import type { LlmMessage, LlmRequest } from '@/platform/llm/index';
 import type { Grade, LanguageCode } from '@/shared/constants/curriculum';
 import { FOXY_HISTORY_TURNS, type FoxyAction, type FoxyMode } from '@/shared/constants/foxy';
 import { actionSpec } from './actions';
@@ -248,4 +249,88 @@ export function assemblePrompt(input: PromptInput): AssembledPrompt {
     temperature: action?.temperature ?? mode.temperature,
     language,
   };
+}
+
+/**
+ * THE CEILING ON CREATIVITY.
+ *
+ * "A tutor grounded in retrieved passages has no business being creative about
+ * what the passages say" — `actions.ts`. Every mode and every action ships at
+ * or under this today; the constant exists so that the day one of them does not,
+ * the request is refused rather than sent.
+ */
+export const FOXY_MAX_TEMPERATURE = 0.5;
+
+/**
+ * Refused when a turn would be sent to the model outside its safety envelope.
+ *
+ * NOT a `ValidationError`: nothing the student typed caused it and there is
+ * nothing they could type differently. It is a programming error in a spec
+ * table, and it must read like one.
+ */
+export class PromptSafetyViolation extends Error {
+  readonly reason: 'temperature' | 'max-tokens' | 'no-system-message';
+
+  constructor(reason: 'temperature' | 'max-tokens' | 'no-system-message') {
+    // The offending VALUE is not in the message: a prompt fragment must never
+    // reach a log line (P13), and the reason is what an investigator acts on.
+    super(`foxy refused to send a request: ${reason}`);
+    this.name = 'PromptSafetyViolation';
+    this.reason = reason;
+  }
+}
+
+/**
+ * Turns an assembled prompt into THE REQUEST THAT IS SENT. The only builder.
+ *
+ * ===========================================================================
+ * WHY THIS EXISTS AS A FUNCTION RATHER THAN AN OBJECT LITERAL AT THE CALL SITE.
+ *
+ * `assemblePrompt` is exhaustively tested as a pure function, and every one of
+ * those tests is a statement about a value that NOBODY HAD TO SEND. An audit
+ * replaced the literal that used to sit in `foxy.service.ts` with one that
+ * dropped the system message and raised the temperature to 1.5, and all 170
+ * tests stayed green: the persona, the CBSE scope, the grounding rule, the
+ * citation instruction and the age rails were all still asserted — on an object
+ * the model never saw.
+ *
+ * With one builder there is one place to assert on, one place to mutate, and
+ * the three invariants below are checked on the way past rather than hoped for.
+ * ===========================================================================
+ */
+export function toLlmRequest(prompt: AssembledPrompt): LlmRequest {
+  if (prompt.system.trim().length === 0) throw new PromptSafetyViolation('no-system-message');
+  if (prompt.temperature > FOXY_MAX_TEMPERATURE) throw new PromptSafetyViolation('temperature');
+  if (prompt.maxTokens <= 0) throw new PromptSafetyViolation('max-tokens');
+
+  return {
+    // THE SYSTEM MESSAGE IS FIRST AND IS NOT OPTIONAL. It carries the persona,
+    // the grade and subject scope, the grounding rule, the citation instruction
+    // and the age rails — and since the abstain threshold catches only about a
+    // third of off-syllabus questions (the measured distributions overlap; see
+    // `retrieval/domain/abstain-threshold.ts`), the grounding rule is the only
+    // thing between a weak retrieval hit and an ungrounded answer to a child.
+    messages: [
+      { role: 'system', content: prompt.system },
+      ...prompt.messages.map((turn) => ({ role: turn.role, content: turn.content })),
+    ],
+    maxTokens: prompt.maxTokens,
+    temperature: prompt.temperature,
+  };
+}
+
+/**
+ * Renders THE REQUEST THAT WAS SENT for the trace's `prompt` column.
+ *
+ * TAKES MESSAGES, NOT AN `AssembledPrompt`, and that is the entire point. The
+ * trace used to be re-derived from `prompt.system` at persistence time, so the
+ * forensic record described a request rather than recording one — under the
+ * audit's mutation the trace asserted a system prompt the model never received.
+ * A self-consistent lie is worse than a missing column: it is the artefact
+ * somebody will trust at 2am while debugging a bad answer given to a child.
+ *
+ * Feed it `request.messages` and nothing else.
+ */
+export function renderSentPrompt(messages: readonly LlmMessage[]): string {
+  return messages.map((message) => `${message.role}: ${message.content}`).join('\n\n---\n\n');
 }

@@ -242,12 +242,41 @@ beforeAll(async () => {
   });
 
   service = createRetrievalModule({
-    // §3.1 — the `ai` pool, which is the only one carrying `hnsw.ef_search`.
+    // §3.1 — the `ai` pool. `worker` carries `hnsw.ef_search` too, since
+    // `buildModules` gives retrieval that pool in the background process; this
+    // suite exercises the API-process wiring.
     db: pools.ai,
     embed: createDeterministicEmbed(),
     readChunks,
     clock: new FixedClock(),
     logger: new FakeLogger(),
+    /**
+     * "NEVER ABSTAIN ON SCORE", EXPLICITLY, AND IT IS NOT A WEAKENING.
+     *
+     * What this file tests is the SQL: the hard grade/subject filter, the
+     * language configuration, `ef_search`, the NULL-embedding rows, hydration.
+     * None of that is about the abstention floor.
+     *
+     * The shipped threshold is MEASURED (0.029877) against the real 4,403-chunk
+     * corpus with REAL voyage-3 query embeddings. This suite runs a seeded
+     * fixture with `createDeterministicEmbed`, whose vectors carry no semantics
+     * at all — so its fused scores are drawn from a completely different
+     * distribution and comparing them to that floor would make these assertions
+     * pass or fail on the arrangement of a fake. The abstention path has its own
+     * coverage: the unit suite for the decision, the golden-set harness for the
+     * distributions, and the `no-candidates` case below, which a zero threshold
+     * still exercises because it is not a score comparison.
+     */
+    threshold: {
+      value: 0,
+      candidateLimit: 50,
+      provenance: {
+        state: 'UNCALIBRATED',
+        reason:
+          'integration fixture — deterministic embeddings produce fused scores on a ' +
+          'different distribution from the measured one, so the SQL is what is under test',
+      },
+    },
   }).service;
 }, 180_000);
 
@@ -334,7 +363,8 @@ describe('ef_search is 100 — proved by a top-50 request returning 50', () => {
      * THE CONTROL, and it deliberately does NOT use retrieval's own filtered
      * query. That is a finding, not a shortcut.
      *
-     * MEASURED against the real 4,686-row corpus (10 August 2026), the
+     * MEASURED against the real corpus — 4,686 rows imported, 4,403 active —
+     * on 10 August 2026, the
      * FILTERED top-50 vector query — the one this module issues — does not use
      * the HNSW index at all. `EXPLAIN (ANALYZE)` shows a bitmap index scan on
      * `rag_chunks_grade_subject_idx` (553 rows for grade 9 science) feeding an

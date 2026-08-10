@@ -16,24 +16,25 @@ import { IN_CORPUS_QUESTIONS } from './golden/in-corpus';
  * =============================================================================
  * WHY THIS EXISTS SEPARATELY FROM `calibrate.ts`.
  *
- * Calibration is blocked on `VOYAGE_API_KEY` because half the pipeline cannot
- * run without embedding a query. THE OTHER HALF NEEDS NOTHING. Full-text
- * search over `rag_chunks.search_vector` works today, against all 4,686 real
- * chunks, and everything downstream of it — the hard grade/subject filter,
- * ranking, deduplication, truncation — can be exercised and looked at.
+ * This one needs NO API KEY. Full-text search over `rag_chunks.search_vector`
+ * runs against the 4,403 ACTIVE chunks (4,686 rows imported; the counts differ
+ * and only the active one is the population a query can return), and everything
+ * downstream of it — the hard grade/subject filter, ranking, deduplication,
+ * truncation — can be exercised and looked at without spending a token.
  *
- * "Blocked on a key" is a reason to defer the dense half. It is not a reason to
- * defer knowing whether the sparse half returns sensible rows, and "the query
- * executed" is not that knowledge. This prints the actual passages so a human
- * can read them and say whether they answer the question.
+ * It prints the actual passages, which is the point: "the query executed" is
+ * not knowledge about whether the rows answer the question, and only a human
+ * reading them can supply that. `sparse-recall.ts` is the counting companion to
+ * this file's reading — it reports how many candidates each golden question
+ * gets, before and after the AND-to-OR fix, and needs no human judgement.
  *
  * =============================================================================
  * IT ALSO MEASURES THE DEDUPLICATION EFFECT (D-108).
  *
- * 1,199 of 4,686 chunks are exact text duplicates. This reports, per query, how
- * many of the fused candidates collapsed and what the top 3 looks like with and
- * without the collapse — which is the only way "deduplication is worth doing"
- * stops being an assertion.
+ * Roughly a quarter of the imported chunks are exact text duplicates. This
+ * reports, per query, how many of the fused candidates collapsed and what the
+ * top 3 looks like with and without the collapse — which is the only way
+ * "deduplication is worth doing" stops being an assertion.
  *
  * READ-ONLY. There is no write path in this file and there must never be one:
  * the development corpus took a day to obtain.
@@ -83,7 +84,7 @@ async function main(): Promise<number> {
       `Corpus: ${totals.rows[0]?.chunks ?? '?'} active chunks, ` +
         `${totals.rows[0]?.embedded ?? '?'} embedded`,
     );
-    line('SPARSE HALF ONLY — no embeddings, no API key. The dense half is blocked.');
+    line('SPARSE HALF ONLY — no embeddings, no API key. The dense half is not exercised here.');
 
     let collapsedTotal = 0;
     let candidateTotal = 0;

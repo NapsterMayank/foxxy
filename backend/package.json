@@ -31,7 +31,8 @@
     "db:round-trip": "tsx --env-file-if-exists=.env scripts/ops/migration-round-trip.ts",
     "ops:alerts": "tsx --env-file-if-exists=.env scripts/ops/alert-evaluator-main.ts",
     "eval:retrieval:calibrate": "tsx --env-file-if-exists=.env eval/retrieval/calibrate.ts",
-    "eval:retrieval:sparse": "tsx --env-file-if-exists=.env eval/retrieval/sparse-probe.ts"
+    "eval:retrieval:sparse": "tsx --env-file-if-exists=.env eval/retrieval/sparse-probe.ts",
+    "eval:retrieval:recall": "tsx --env-file-if-exists=.env eval/retrieval/sparse-recall.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

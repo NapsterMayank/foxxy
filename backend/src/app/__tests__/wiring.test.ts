@@ -15,6 +15,7 @@ import {
 } from '@/platform/payments/index';
 import { PLATFORM_METRICS } from '@/platform/metrics/index';
 import { createRateLimiter, RATE_LIMIT_FALLBACK_METRIC } from '@/modules/identity/identity.rate-limit';
+import { ABSTAIN_THRESHOLD, CANDIDATE_LIMIT } from '@/modules/retrieval/index';
 import { createContainer, type Container } from '../container';
 import { buildModules } from '../routes';
 
@@ -301,5 +302,63 @@ describe('the container chooses a payment gateway and refuses to guess', () => {
     const modules = buildModules(built);
     expect(modules.billing.service).toBeDefined();
     expect(built.payments.name).toBe(FAKE_PROVIDER);
+  });
+});
+
+/**
+ * ===========================================================================
+ * THE PRODUCTION ABSTENTION FLOOR IS THE MEASURED ONE — ASSERTED, NOT ASSUMED.
+ *
+ * `buildModules` runs the shipped threshold by NOT passing one, and "does not
+ * pass one" is invisible: it is the absence of a line, so nothing in a diff or
+ * a review draws the eye to it. Meanwhile the override seam is real and in
+ * active use — `eval/retrieval/` sweeps it, `tests/integration/retrieval-search`
+ * zeroes it, and `tests/helpers/app-harness.ts` zeroes it for every service
+ * suite in the repo, because those all embed with `createDeterministicEmbed`
+ * and a floor measured against real voyage-3 vectors decides nothing on
+ * semantics-free hashes.
+ *
+ * Three seams zeroing the floor for good reasons is exactly the shape from
+ * which a fourth one leaks into the composition root and nobody notices for a
+ * year — which is the failure §8.4 exists to prevent, in its other direction:
+ * not a floor that abstains on everything, a floor that abstains on nothing
+ * while its provenance still says MEASURED. This test is what makes that a
+ * failing build.
+ * ===========================================================================
+ */
+describe('the composition root runs the MEASURED abstention threshold', () => {
+  it('gives retrieval the shipped threshold, provenance and all', () => {
+    const built = makeContainer();
+    const modules = buildModules(built);
+    const threshold = modules.retrieval.service.threshold;
+
+    // The provenance, first — a value alone cannot tell a reader whether it was
+    // measured or guessed, and that distinction is the whole point of the type.
+    expect(threshold.provenance.state).toBe('MEASURED');
+    // …and the value, so "MEASURED" cannot be true of some other number.
+    expect(threshold).toEqual(ABSTAIN_THRESHOLD);
+    expect(threshold.value).toBe(0.029877369007803793);
+    expect(threshold.candidateLimit).toBe(CANDIDATE_LIMIT);
+  });
+
+  it('does NOT inherit the test harness’s never-abstain-on-score override', () => {
+    // The specific leak this file is watching for. A zero floor in production
+    // abstains on nothing, forever, while every trace row still reports the
+    // threshold state as measured — indistinguishable from a healthy pipeline.
+    const built = makeContainer();
+    const modules = buildModules(built);
+    expect(modules.retrieval.service.threshold.value).toBeGreaterThan(0);
+  });
+
+  it('is the SAME threshold in the background worker as in the API process', () => {
+    // `buildModules(container, { forWorker: true })` swaps the pool, and a
+    // second construction site is a second place an override can be added to
+    // one and not the other. Foxy's answers and the worker's would then
+    // disagree about what "we do not know" means.
+    const built = makeContainer();
+    const api = buildModules(built);
+    const worker = buildModules(built, { forWorker: true });
+    expect(worker.retrieval.service.threshold).toEqual(api.retrieval.service.threshold);
+    expect(worker.retrieval.service.threshold.provenance.state).toBe('MEASURED');
   });
 });

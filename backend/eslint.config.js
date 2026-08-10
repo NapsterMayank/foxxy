@@ -65,7 +65,21 @@ const ENV_PATTERNS = [
   },
 ];
 
-/** Section 7.4 — no database access outside a repository. */
+/**
+ * Section 7.4 — no database access outside a repository.
+ *
+ * D-181 — THE MESSAGE USED TO CLAIM MORE THAN THE RULE ENFORCED. It said
+ * "*.repository.ts files only", and it was applied under `src/app/**` and
+ * `src/modules/**` and nowhere else: `src/platform/**`, `src/shared/**` and
+ * `src/worker/**` were unpoliced, and three files import `drizzle-orm` outside
+ * a repository today. A rule whose text overstates its scope is worse than a
+ * narrow rule, because everyone downstream reads the text and believes it.
+ *
+ * Both halves are now true. The scope is widened to ALL of `src/**` (see the
+ * `src/**` block below), and the two directories that genuinely cannot comply
+ * yet are named here and exempted explicitly further down, so the gap is
+ * visible in the same file as the claim rather than inferred from its absence.
+ */
 const DB_PATTERNS = [
   {
     group: [
@@ -78,7 +92,81 @@ const DB_PATTERNS = [
       'pg',
     ],
     message:
-      'Database access lives in *.repository.ts files only (plus platform/db itself). See 01-BACKEND-IMPLEMENTATION-PLAN.md, Section 7.4.',
+      'Database access lives in *.repository.ts files only, plus platform/db itself and the ' +
+      'two exemptions written down in eslint.config.js (platform/jobs, worker/ — the queue, ' +
+      'heartbeat and session sweeper, D-181). Tests are outside this rule by design. ' +
+      'See 01-BACKEND-IMPLEMENTATION-PLAN.md, Section 7.4.',
+  },
+];
+
+/**
+ * D-182 — `globalThis.process.env` needs no import, so the import rule cannot
+ * see it, and `no-restricted-properties` matches the IDENTIFIER `process`, so
+ * it cannot see it either. `globalThis.process` is a different member
+ * expression that resolves to the same object.
+ *
+ * Three shapes, all of which exited 0 before this:
+ *
+ *     globalThis.process.env.DATABASE_URL     // member expression
+ *     globalThis['process'].env.DATABASE_URL  // computed, same thing
+ *     const p = process; p.env.DATABASE_URL   // aliased through a binding
+ *
+ * The third selector also catches `const { env } = process`, which is the same
+ * evasion with destructuring instead of a property read.
+ *
+ * These are SYNTAX rules, not import rules, which means they must be repeated
+ * into every `no-restricted-syntax` declaration below — that rule does not
+ * merge across config objects, it replaces. That is why each declaration
+ * spreads these arrays instead of listing entries inline.
+ */
+const ENV_ACCESS_SYNTAX = [
+  {
+    selector: "MemberExpression[object.name='globalThis'][property.name='process']",
+    message:
+      'process.env is read only in src/platform/config, and `globalThis.process` is still ' +
+      'process. Import the frozen `config` object instead.',
+  },
+  {
+    selector: "MemberExpression[computed=true][property.value='process']",
+    message:
+      "process.env is read only in src/platform/config, and `globalThis['process']` is still " +
+      'process. Import the frozen `config` object instead.',
+  },
+  {
+    selector: "VariableDeclarator[init.type='Identifier'][init.name='process']",
+    message:
+      'Aliasing `process` to a local binding evades the process.env rule. process.env is read ' +
+      'only in src/platform/config; import the frozen `config` object instead.',
+  },
+];
+
+/**
+ * D-183 — `no-restricted-imports` inspects `ImportDeclaration` and nothing
+ * else. A dynamic `import()` is an `ImportExpression`, so this single line
+ * defeated the module boundary, the module-escape rule, the process.env rule
+ * and the database rule simultaneously:
+ *
+ *     await import('@/modules/knowledge/knowledge.service');   // exited 0
+ *
+ * There is no legitimate lazy import inside the server. The whole graph is
+ * constructed once, at boot, by the composition root; deferring a module load
+ * would buy nothing and would move a wiring failure from startup to whenever
+ * the first request happens to reach it. So the form is banned outright rather
+ * than filtered by specifier — a filter would be a SECOND list of restricted
+ * paths, drifting against the first.
+ *
+ * `scripts/` is exempted below and keeps two deliberate dynamic imports: they
+ * defer `platform/config`'s eager, process-exiting environment read until the
+ * script has decided it actually needs it.
+ */
+const DYNAMIC_IMPORT_SYNTAX = [
+  {
+    selector: 'ImportExpression',
+    message:
+      'Dynamic import() bypasses every boundary rule — no-restricted-imports only inspects ' +
+      'static ImportDeclaration nodes, so import() defeats the module surface, the module ' +
+      'escape rule, the process.env rule and the database rule at once (D-183). Use a static ' +
+      'import.',
   },
 ];
 
@@ -114,12 +202,23 @@ const DB_PATTERNS = [
  */
 const MIGRATION_LIST_PATTERNS = [
   {
-    selector: "ArrayExpression > Literal[value=/^[0-9]{4}_[a-z0-9_]+\\.sql$/]",
+    selector: "ArrayExpression > Literal[value=/^[0-9]{4}_[a-z0-9_]+(\\.down)?(\\.sql)?$/]",
     message:
       'D-075: no test may hardcode a LIST of migrations. Use applyAllMigrations() or ' +
       'listMigrations() from tests/helpers/postgres.ts, which discover them from the ' +
       "directory and cross-check drizzle's journal. Naming ONE migration is still fine — " +
       'a migration test may name its own subject.',
+  },
+  {
+    // D-180 — the same list, written with backticks. `ArrayExpression > Literal`
+    // does not match a `TemplateLiteral`, and backticks are idiomatic enough
+    // that neither prettier nor eslint pushes back on them.
+    selector:
+      "ArrayExpression > TemplateLiteral > TemplateElement[value.cooked=/^[0-9]{4}_[a-z0-9_]+(\\.down)?(\\.sql)?$/]",
+    message:
+      'D-075: no test may hardcode a LIST of migrations — backticks are still a list. Use ' +
+      'applyAllMigrations() or listMigrations() from tests/helpers/postgres.ts, which discover ' +
+      "them from the directory and cross-check drizzle's journal.",
   },
 ];
 
@@ -166,7 +265,29 @@ const MIGRATION_LIST_PATTERNS = [
  * Verified to fire on a real violation before being trusted (D-005): pointed at
  * the pre-rewrite `foundation-hooks-migration.test.ts` it reports 6.
  */
-const MIGRATION_NAME = /^([0-9]{4}_[a-z0-9_]+?)(\.down)?\.sql$/;
+/**
+ * D-180 — THE FOURTH RECURRENCE, and the third evasion of a guard whose entire
+ * detection surface was the word `Literal`.
+ *
+ * The array rule and this chain rule both matched `Literal` nodes ending in
+ * `.sql`. Three shapes walked past both, and every one of them is something an
+ * ordinary editor writes without thinking:
+ *
+ *     run(readDownMigration(`0008_tenant_not_null.down.sql`, 'superseded'));  // backticks
+ *     ['0009_a', '0010_b'].map((s) => `${s}.sql`);                            // suffix added later
+ *     readMigration('0013_e' + EXT);                                          // suffix concatenated
+ *
+ * Two changes close all three. The visitor now reads static `TemplateLiteral`
+ * quasis as well as `Literal` strings, and `.sql` is OPTIONAL in the pattern —
+ * because in the last two shapes the extension is not in the string at all. A
+ * bare `0013_e` is already a complete migration identity; the extension is
+ * decoration that the defect had learned to hide behind.
+ *
+ * The cost of making `.sql` optional is that a string which merely LOOKS like a
+ * migration stem now counts. That shape is `0000_lower_snake` and nothing else,
+ * and three of them in one file is the thing being banned anyway.
+ */
+const MIGRATION_NAME = /^([0-9]{4}_[a-z0-9_]+?)(\.down)?(\.sql)?$/;
 const MAX_MIGRATIONS_NAMED_PER_FILE = 2;
 
 const migrationChainPlugin = {
@@ -188,13 +309,29 @@ const migrationChainPlugin = {
       create(context) {
         /** @type {Map<string, import('estree').Node>} */
         const seen = new Map();
+        /**
+         * @param {string} value
+         * @param {import('estree').Node} node
+         */
+        const consider = (value, node) => {
+          const match = MIGRATION_NAME.exec(value);
+          if (match === null) return;
+          const stem = match[1];
+          if (!seen.has(stem)) seen.set(stem, node);
+        };
         return {
           Literal(node) {
             if (typeof node.value !== 'string') return;
-            const match = MIGRATION_NAME.exec(node.value);
-            if (match === null) return;
-            const stem = match[1];
-            if (!seen.has(stem)) seen.set(stem, node);
+            consider(node.value, node);
+          },
+          // D-180: backticks. Every static piece of a template literal is
+          // considered, so both `0008_x.down.sql` (one quasi, no expressions)
+          // and `${stem}.sql` (whose stem arrives as a Literal elsewhere and is
+          // counted there) are covered.
+          TemplateElement(node) {
+            const cooked = node.value.cooked;
+            if (typeof cooked !== 'string') return;
+            consider(cooked, node);
           },
           'Program:exit'(node) {
             if (seen.size <= MAX_MIGRATIONS_NAMED_PER_FILE) return;
@@ -283,10 +420,36 @@ export default tseslint.config(
         'error',
         { patterns: [...MODULE_BOUNDARY_PATTERNS, ...ENV_PATTERNS] },
       ],
+      // D-182 / D-183 — the two ways past the rules above that inspect only
+      // imports and only the identifier `process`.
+      'no-restricted-syntax': ['error', ...ENV_ACCESS_SYNTAX, ...DYNAMIC_IMPORT_SYNTAX],
+    },
+  },
+  {
+    // `scripts/` keeps two deliberate dynamic imports (D-183): they defer
+    // platform/config's eager, process-exiting environment read until the
+    // script has decided it needs it. The env-access selectors still apply.
+    files: ['scripts/**/*.ts'],
+    rules: {
+      'no-restricted-syntax': ['error', ...ENV_ACCESS_SYNTAX],
     },
   },
 
   // --- Boundary rule 3: db client only in repositories ---------------
+  {
+    // D-181 — ALL of src/, not just app/ and modules/. The rule's own message
+    // always said "repositories only"; until now it was applied to two
+    // subtrees out of five, so platform/, shared/ and worker/ could import
+    // drizzle freely while reading a rule that said they could not. The two
+    // directories that cannot comply today are exempted by name below.
+    files: ['src/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        { patterns: [...MODULE_BOUNDARY_PATTERNS, ...ENV_PATTERNS, ...DB_PATTERNS] },
+      ],
+    },
+  },
   {
     files: ['src/app/**/*.ts'],
     rules: {
@@ -345,11 +508,36 @@ export default tseslint.config(
     rules: {
       'no-restricted-properties': 'off',
       'no-restricted-imports': ['error', { patterns: MODULE_BOUNDARY_PATTERNS }],
+      // The env-access selectors come off with the property rule, for the same
+      // reason. The dynamic-import ban does not: it is unrelated to config.
+      'no-restricted-syntax': ['error', ...DYNAMIC_IMPORT_SYNTAX],
     },
   },
   {
     // platform/db *is* the database port; it necessarily imports drizzle and pg.
     files: ['src/platform/db/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        { patterns: [...MODULE_BOUNDARY_PATTERNS, ...ENV_PATTERNS] },
+      ],
+    },
+  },
+  {
+    // D-181, THE NAMED GAP. Widening the database rule to all of `src/**`
+    // caught three files that import `drizzle-orm` outside a repository and
+    // predate the widening:
+    //
+    //   src/platform/jobs/postgres-queue.ts          the job queue IS storage
+    //   src/platform/jobs/heartbeat.ts               ditto
+    //   src/worker/jobs/expired-session-sweeper.ts   a background DELETE
+    //
+    // They are exempted rather than rewritten because rewriting them is a
+    // separate change with its own review. This block is the whole point of
+    // the D-181 fix: the exemption is WRITTEN DOWN, next to the rule, so the
+    // rule's message and the rule's reach agree. Deleting these three
+    // directories from this list is the follow-up; adding a fourth is not.
+    files: ['src/platform/jobs/**/*.ts', 'src/worker/**/*.ts'],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -364,6 +552,7 @@ export default tseslint.config(
       'no-restricted-exports': 'off',
       'no-restricted-properties': 'off',
       'no-restricted-imports': 'off',
+      'no-restricted-syntax': 'off',
     },
   },
   {
@@ -376,8 +565,20 @@ export default tseslint.config(
       '@typescript-eslint/no-non-null-assertion': 'off',
       '@typescript-eslint/no-unsafe-assignment': 'off',
       // D-075 — see MIGRATION_LIST_PATTERNS at the top of this file. Catches
-      // the list written HORIZONTALLY, as an array literal.
-      'no-restricted-syntax': ['error', ...MIGRATION_LIST_PATTERNS],
+      // the list written HORIZONTALLY, as an array literal (quotes or
+      // backticks, D-180).
+      //
+      // The env and dynamic-import selectors are RESPREAD here on purpose:
+      // `no-restricted-syntax` replaces across config objects rather than
+      // merging, so a declaration that lists only the migration patterns
+      // silently switches the other two off for every test file — which is
+      // most of the repository.
+      'no-restricted-syntax': [
+        'error',
+        ...MIGRATION_LIST_PATTERNS,
+        ...ENV_ACCESS_SYNTAX,
+        ...DYNAMIC_IMPORT_SYNTAX,
+      ],
       // D-075 strengthened — catches the same list written VERTICALLY, as a
       // sequence of calls. See `migrationChainPlugin` at the top of this file.
       'migrations/no-migration-chain': 'error',

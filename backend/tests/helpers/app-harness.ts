@@ -11,7 +11,12 @@ import { createServer } from '../../src/app/server';
 import { createFakeLlm, type FakeLlm, type LlmProvider } from '@/platform/llm/index';
 import { createContentModule, type ContentModule } from '../../src/modules/content/index';
 import { createFoxyModule, type ChunkSearch, type FoxyModule } from '../../src/modules/foxy/index';
-import { createRetrievalModule, type RetrievalModule } from '../../src/modules/retrieval/index';
+import {
+  CANDIDATE_LIMIT,
+  createRetrievalModule,
+  type AbstainThreshold,
+  type RetrievalModule,
+} from '../../src/modules/retrieval/index';
 import { createIdentityModule, type IdentityModule } from '../../src/modules/identity/index';
 import { createLearnerModule, type LearnerModule } from '../../src/modules/learner/index';
 import { createParentModule, type ParentModule } from '../../src/modules/parent/index';
@@ -91,9 +96,10 @@ export interface AppHarness {
   /**
    * Swaps retrieval for THIS test. `null` restores the real pipeline.
    *
-   * Needed for exactly one case — `below-threshold` — which the real pipeline
-   * cannot produce while `ABSTAIN_THRESHOLD` ships UNCALIBRATED and INERT. See
-   * `AppHarnessOptions.search`.
+   * Needed for exactly one case — `below-threshold` — which this harness cannot
+   * provoke, because it runs `HARNESS_ABSTAIN_THRESHOLD` (zero, never abstain on
+   * score) rather than the shipped measured floor. See `AppHarnessOptions.search`
+   * and `HARNESS_ABSTAIN_THRESHOLD`.
    */
   useSearch(next: ChunkSearch | null): void;
   readonly clock: FixedClock;
@@ -166,6 +172,69 @@ const TABLES = [
 
 export const HARNESS_ORIGIN = 'http://app.test';
 export const HARNESS_START = '2026-06-01T09:00:00.000Z';
+
+/**
+ * =============================================================================
+ * "NEVER ABSTAIN ON SCORE", EXPLICITLY, IN THE HARNESS ONLY — AND IT IS NOT A
+ * WEAKENING OF ANYTHING.
+ * =============================================================================
+ *
+ * The shipped floor is MEASURED (0.029877369007803793, 10 August 2026) against
+ * the real 4,403-chunk corpus with REAL voyage-3 query embeddings, at a stated
+ * 5% in-corpus false-abstention budget. It is a good number and production
+ * keeps it — `app/routes.ts` passes no override and therefore runs it, which
+ * `app/__tests__/wiring.test.ts` now asserts rather than assumes.
+ *
+ * THIS HARNESS EMBEDS WITH `createDeterministicEmbed`. Its vectors are
+ * reproducible hashes of the input text; they carry NO SEMANTICS. A fused score
+ * computed from a meaningless vector is a meaningless number, and comparing a
+ * meaningless number against a floor measured on meaningful ones does not test
+ * the floor — it makes every unrelated assertion in every suite built on this
+ * harness contingent on the arrangement of a fake.
+ *
+ * That is not hypothetical. Inheriting the measured floor turned exactly one
+ * foxy test — `sends the ACTION's budget and temperature when a button produced
+ * the turn` — into an abstention, so `llm.stream` was never called and the test
+ * failed with "the model was never called". The test was right and the wiring
+ * was wrong: the turn had a perfectly good seeded chunk, and the only reason it
+ * abstained was that a hash landed a hair too low. Every other test in that
+ * describe block passed, which is the worst version of this — the failure is a
+ * coin flip on text, so the suite's colour tracks the fixtures rather than the
+ * behaviour.
+ *
+ * WHAT THIS DOES NOT COST US. Abstention keeps its coverage, all of it:
+ *   - `no-candidates` — seed no chunks for the grade. It is not a score
+ *     comparison, so a zero floor exercises it in full, through the real
+ *     pipeline (`foxy.service.test.ts`, "abstains when nothing was retrieved").
+ *   - `below-threshold` — injected through `AppHarnessOptions.search` /
+ *     `useSearch`, which returns the abstention directly (`foxy.service.test.ts`,
+ *     "abstains BELOW THE THRESHOLD without calling the model either").
+ *   - the safety refusals — upstream of retrieval entirely.
+ *   - the decision itself — `retrieval/__tests__/abstain-threshold.test.ts`.
+ *   - the distributions — the golden-set harness in `eval/retrieval/`.
+ *
+ * A test that genuinely wants the SCORE-BASED path should pass its own
+ * `AppHarnessOptions.threshold` and say why, rather than lean on whatever this
+ * default happens to be. That is the whole point of naming the value here: an
+ * inherited floor is invisible, a stated one is arguable.
+ *
+ * `assertThresholdOnFusedScale` permits zero deliberately — "never abstain on
+ * score" is a statable position, and this is a place that states it.
+ */
+export const HARNESS_ABSTAIN_THRESHOLD: AbstainThreshold = Object.freeze({
+  value: 0,
+  candidateLimit: CANDIDATE_LIMIT,
+  provenance: Object.freeze({
+    state: 'UNCALIBRATED',
+    reason:
+      'service-test harness — retrieval runs over `createDeterministicEmbed`, whose ' +
+      'vectors are semantics-free hashes, so its fused scores come from a different ' +
+      'distribution than the measured floor was observed on. Comparing them would ' +
+      'turn unrelated tests into abstentions on the arrangement of a fake. ' +
+      'Abstention is covered by `no-candidates` (no score comparison), by an ' +
+      'injected below-threshold search, and by the unit and golden-set suites.',
+  }),
+});
 export { TEST_COOKIE_NAME, TEST_TENANT_ID, OTHER_TENANT_ID, createSecondTenant, sessionCookieFrom };
 
 /**
@@ -209,13 +278,26 @@ export interface AppHarnessOptions {
    * `no-candidates` abstention through the production path, which is a far
    * better test than a stub returning `shouldAbstain: true`.
    *
-   * The override exists for the ONE case the real pipeline cannot currently
-   * produce: `below-threshold`. `ABSTAIN_THRESHOLD` ships UNCALIBRATED and
-   * INERT (it filters nothing, deliberately — see the header of
-   * `retrieval/domain/abstain-threshold.ts`), so no real query can fall under
-   * it until the calibration harness has run against `VOYAGE_API_KEY`.
+   * The override exists for the ONE case this harness cannot produce through
+   * the real pipeline: `below-threshold`. The shipped floor IS measured now
+   * (10 August 2026), but the harness deliberately does not run it — see
+   * `HARNESS_ABSTAIN_THRESHOLD` for why deterministic embeddings make a
+   * score-based floor meaningless here — so a below-threshold abstention has to
+   * be stated rather than provoked.
    */
   readonly search?: ChunkSearch;
+  /**
+   * The abstention floor retrieval runs under, for THIS harness instance.
+   *
+   * Defaults to `HARNESS_ABSTAIN_THRESHOLD` — zero, "never abstain on score",
+   * reasoned at its declaration. Supply this (with a reason) if a test wants to
+   * exercise the score comparison itself; do not change the default to suit one
+   * test, because the default is what every other suite silently inherits.
+   *
+   * Production passes nothing here and nothing like it: `app/routes.ts` runs
+   * the shipped MEASURED threshold, asserted in `app/__tests__/wiring.test.ts`.
+   */
+  readonly threshold?: AbstainThreshold;
 }
 
 export async function startAppHarness(options: AppHarnessOptions = {}): Promise<AppHarness> {
@@ -392,6 +474,11 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
       ),
     clock,
     logger,
+    /**
+     * THE ONE PLACE THIS HARNESS DELIBERATELY DIVERGES FROM `app/routes.ts`,
+     * and it is stated rather than inherited. See `HARNESS_ABSTAIN_THRESHOLD`.
+     */
+    threshold: options.threshold ?? HARNESS_ABSTAIN_THRESHOLD,
   });
 
   const defaultLlm = options.llm ?? createFakeLlm();

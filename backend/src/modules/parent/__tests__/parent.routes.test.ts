@@ -12,8 +12,10 @@ import {
 } from '@/shared/contracts/parent.contract';
 import {
   HARNESS_ORIGIN,
+  OTHER_TENANT_ID,
   TEST_COOKIE_NAME,
   TEST_TENANT_ID,
+  createSecondTenant,
   onboardAccount,
   startAppHarness,
   type AppHarness,
@@ -55,6 +57,10 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await harness.reset();
+  // The second tenant is a REAL row: `users.tenant_id` carries a foreign key to
+  // `tenants`, so a test that moved an account to an invented tenant would fail
+  // on the constraint rather than on the rule it was written to check.
+  await createSecondTenant(harness);
 });
 
 const ONBOARDING: OnboardingRequest = {
@@ -195,20 +201,36 @@ describe('the six endpoints answer the contract', () => {
 // THE ORACLE TEST
 // ---------------------------------------------------------------------------
 
-describe('the four deny paths are BYTE-IDENTICAL on the wire', () => {
+describe('the deny paths are BYTE-IDENTICAL on the wire', () => {
   it('answers the same status, body and content-type for every refusal reason', async () => {
     /**
-     * FIVE REASONS, ONE RESPONSE:
+     * SIX REASONS, ONE RESPONSE:
      *
-     *   pending link      the parent typed a code the child has not approved
-     *   revoked link      access existed and was withdrawn
-     *   no link at all    a real student this parent has never been linked to
-     *   no such child     a well-formed uuid belonging to nobody
-     *   another tenant    an approved link across a tenant boundary
+     *   pending link       the parent typed a code the child has not approved
+     *   revoked link       access existed and was withdrawn
+     *   no link at all     a real student this parent has never been linked to
+     *   no such child      a well-formed uuid belonging to nobody
+     *   somebody else's    an approved child, requested by a DIFFERENT parent
+     *   another tenant     an APPROVED link whose child sits in another tenant
      *
-     * The last is the one that separates this from a formality: it needs
-     * `readTenantOfStudent` to actually read `users`, and it is the assertion
-     * that goes red if somebody echoes `actor.tenantId` back (D-091).
+     * ========================================================================
+     * THE LAST ROW USED TO BE A CLAIM RATHER THAN A CASE.
+     *
+     * This docstring described its fifth entry as "another tenant — an approved
+     * link across a tenant boundary". The fifth entry was "a child linked to
+     * somebody ELSE", and NO TENANT BOUNDARY WAS CROSSED ANYWHERE IN THIS FILE.
+     * Both are legitimate refusals, but they are refused by DIFFERENT rules —
+     * consent and tenancy — and only the consent one was pinned. The property
+     * held; the coverage the comment asserted did not exist.
+     *
+     * The cross-tenant case is the one that separates this test from a
+     * formality: it needs `readTenantOfStudent` to actually read `users`, and
+     * it is the entry that goes red if somebody echoes `actor.tenantId` back
+     * (D-091). It is built by moving the CHILD's row to the second tenant while
+     * the parent's session keeps its own — which is what a mis-provisioned
+     * account transfer looks like, and it leaves the approved link intact so
+     * every consent rule still says yes.
+     * ========================================================================
      *
      * Compared as RAW PAYLOAD STRINGS, not parsed objects. A difference in key
      * ORDER is a difference an attacker can see, and `toEqual` on parsed JSON
@@ -222,6 +244,13 @@ describe('the four deny paths are BYTE-IDENTICAL on the wire', () => {
       { userId: stranger.userId, role: 'student', tenantId: TEST_TENANT_ID },
       ONBOARDING,
     );
+
+    // An APPROVED pair whose child has since been moved to another tenant.
+    const foreign = await makePair('approved');
+    await harness.postgres.client.query(`update users set tenant_id = $1 where id = $2`, [
+      OTHER_TENANT_ID,
+      foreign.child.userId,
+    ]);
 
     const attempts: readonly { readonly reason: string; readonly url: string; readonly cookie: string }[] = [
       {
@@ -248,6 +277,14 @@ describe('the four deny paths are BYTE-IDENTICAL on the wire', () => {
         reason: 'a child linked to somebody ELSE',
         url: `/api/v1/parent/children/${approved.child.userId}/snapshot`,
         cookie: pending.parent.cookie,
+      },
+      {
+        // THE TENANT BOUNDARY, genuinely crossed. Every consent rule says yes
+        // here — the link is approved and it is this parent's own child — and
+        // the answer is still, byte for byte, the same refusal.
+        reason: 'an approved link across a TENANT boundary',
+        url: `/api/v1/parent/children/${foreign.child.userId}/snapshot`,
+        cookie: foreign.parent.cookie,
       },
     ];
 
