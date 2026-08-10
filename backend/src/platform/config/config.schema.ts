@@ -198,6 +198,24 @@ export const envSchema = z.object({
     .string()
     .uuid('DEFAULT_TENANT_ID must be a UUID')
     .default('11111111-1111-4111-8111-111111111111'),
+
+  /**
+   * THE EMBEDDING KEY — optional here, REQUIRED IN PRODUCTION.
+   *
+   * Optional in the schema because development and every test run on the
+   * deterministic provider (`platform/embed/fake-embed.ts`), which needs no key
+   * and no network. Required in production by an explicit check in the
+   * composition root, NOT by making the variable mandatory here: a mandatory
+   * variable would force every test fixture to invent a fake key, and a fake
+   * key that parses is exactly the thing that would then reach Voyage.
+   *
+   * The failure this closes is silent and total. With no key and no boot check,
+   * production would fall back to the deterministic provider, every query would
+   * embed to a vector unrelated to the corpus's `voyage-3` space, and retrieval
+   * would return fifty confident, wrong chunks — no error, no timeout, no
+   * metric. See the header of `platform/embed/voyage-embed.ts`.
+   */
+  VOYAGE_API_KEY: z.string().min(1).optional(),
 })
   /**
    * WRITE IS A SUBSET OF READ. See the note on `CORS_READ_ORIGINS`.
@@ -315,6 +333,18 @@ export interface Config {
   readonly tenancy: {
     readonly defaultTenantId: string;
   };
+  /**
+   * The AI vendor credentials.
+   *
+   * `null` rather than `undefined` when absent, deliberately: `undefined` on a
+   * readonly property is indistinguishable from a property nobody thought to
+   * set, and this one has a boot-time consequence (see `VOYAGE_API_KEY`). A
+   * null says "this deployment has no key" as a fact rather than as an
+   * omission.
+   */
+  readonly ai: {
+    readonly voyageApiKey: string | null;
+  };
 }
 
 /** Maps validated environment values into the nested, frozen shape. */
@@ -360,5 +390,6 @@ export function toConfig(env: Env): Config {
       workerTimeoutMs: env.SHUTDOWN_WORKER_TIMEOUT_MS,
     }),
     tenancy: Object.freeze({ defaultTenantId: env.DEFAULT_TENANT_ID }),
+    ai: Object.freeze({ voyageApiKey: env.VOYAGE_API_KEY ?? null }),
   });
 }

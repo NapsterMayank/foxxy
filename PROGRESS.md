@@ -18,55 +18,43 @@ Last updated: **10 August 2026**
 | Corpus | **IMPORTED.** 137 chapters · 4,686 chunks · 2,741 questions · 639 concepts · 176 edges · 57 misconception patterns |
 | Architecture | Modular backend + isolated product frontend + marketing/CMS deployable |
 | Team | 1 engineer |
-| Backend modules | **5 of 11 built** (identity, learner, content, notify, **practice**). The `practice` response log is no longer schema-only — it is written on every submission |
+| Backend modules | **7 of 11 built** (identity, learner, content, notify, practice, **parent**, **retrieval**). Both new ones are now CONSTRUCTED in `app/routes.ts` — `parent` registers six endpoints, `retrieval` registers none by design (D-122) |
 | Backend processes | **2** — `api` and `worker`. The worker exists and runs one real job |
 | Frontend | **scaffolded** - 81 source files under `frontend/src`, committed. Build-order step 0 (the five foundation gaps) not yet closed |
 | Marketing site | **scaffolded** - 32 files under `website/`, committed. Per `06-FRONTEND-SEPARATION-PLAN.md` |
-| Tests | **1,684 passing**, 91 files |
-| Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice`. `npm run db:generate` on a clean tree emits nothing, and `db:check` passes |
-| Gates | type-check · lint · build · test · coverage — all green. `platform/authz` 100%, `practice/domain` 100%, `practice.service` 93.9%, global 93.6% |
-| Estimated remaining | **~108 days ≈ 22 weeks solo** |
-| Git | **3 commits**, latest `94464be`. Working tree clean. No remote configured |
+| Tests | **1,970 passing**, 109 files |
+| Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice` + `0003_parent`. Every one of them now has a rollback test, because the round-trip is asserted over the DISCOVERED set rather than per file (D-126) |
+| Gates | type-check · lint · build · test · coverage — all green. `platform/authz` 100%, `parent/domain` 100%, `parent.service` 94.0%, `retrieval` 99.1%, `practice/domain` 100% |
+| Estimated remaining | **~92 days ≈ 19 weeks solo** |
+| Git | **4 commits**, latest `45241c7`. Working tree has the `parent` + `retrieval` wiring STAGED, uncommitted. No remote configured |
 
 ---
 
 ## 2. THE NEXT ACTION
 
-> **Build the `embed` and `llm` real adapters (build step 7).** Unchanged by the
-> `practice` work, and now the only thing on the critical path: the corpus is
-> imported and step 11 is closed, so retrieval (step 8) and `foxy` (step 10) are
-> blocked on nothing else. A query has to be embedded before it can be compared
-> to 4,666 stored vectors.
+> **Build `foxy` (build step 10).** `retrieval` is complete and wired, `parent`
+> is complete and wired, and the `embed` adapter now exists — so `foxy` is the
+> only remaining module on the critical path to the product's core capability.
 
-Two things it unblocks immediately, both of which have been waiting:
+Two things that are now unblocked and were not before:
 
-1. **Re-embed the 20 NULL-embedding chunks** (D-078). They are in the database, reachable by full-text search, invisible to vector search. Their ids are in `.corpus-extract/reports/chunks-without-embedding.txt`.
-2. **Threshold calibration by measurement, never by guess.** 50 known-good plus 20 off-syllabus questions, both distributions plotted, the threshold placed between them, and the measurement recorded beside the constant. **Do it against ~3,487 DISTINCT chunks, not 4,686** — see D-108.
+1. **Threshold calibration by measurement, never by guess.** The harness exists
+   (`eval/retrieval/calibrate.ts`, `npm run eval:retrieval:calibrate`) and is
+   blocked ONLY on `VOYAGE_API_KEY`. Until it runs, `ABSTAIN_THRESHOLD` ships
+   marked `UNCALIBRATED` in its own type and set to the minimum achievable fused
+   score, so it is INERT — it filters nothing rather than filtering everything,
+   which is the failure the previous system had for a year. A test asserts both
+   the marking and the inertness. **Calibrate against ~3,487 DISTINCT chunks, not
+   4,686** — see D-108.
+2. **Re-embed the 20 NULL-embedding chunks** (D-078). In the database, reachable
+   by full-text search, invisible to vector search. Ids in
+   `.corpus-extract/reports/chunks-without-embedding.txt`.
 
-### Corpus import: COMPLETE, verified, and re-runnable
-
-`npm run db:migrate && npm run db:import-corpus`. Idempotent — the second run was proved identical by content digest, not asserted.
-
-| Table | Rows | Against the source |
-|---|---|---|
-| `chapters` | **137** | derived from all four sources; 9 carry a placeholder title |
-| `rag_chunks` | **4,686** | every line of the file; **20 with a NULL embedding, none fabricated** |
-| `questions` | **2,741** | of 3,791 — 1,050 excluded, every id and reason in a report file |
-| `chapter_concepts` | **639** | all |
-| `concept_graph` | **176** | all |
-| `misconception_patterns` | **57** | all; 37 flagged `is_orphan` |
-| held out | **773** | ~30% of each of the 81 chapters that can afford a reserve; none below it |
-
-**Chapter quality bars:** **81** chapters have chunks AND concepts AND ≥15 valid questions (reserve-ready). **57** clear ≥20 questions, ≥20 chunks and ≥3 concepts (demo-ready). Both were predicted and both came out exactly.
-
-**Both retrieval paths were run by hand against a real question and returned sensible rows** — the vector path returned Grade 10 Science chapter 10 passages on eye lens, myopia and accommodation at cosine distances 0.014-0.24 for a "least distance of distinct vision" probe; the full-text path returned 4 rows from the same chapter. Not "the query executed" — the results are topically right.
-
-### Four findings from the import that contradicted what was written down
-
-1. **Four of the five source shapes were wrong, three silently** (D-098). `concept_name` is `title`, `misconception_code` is `pattern_code`, `description_en` is `description`, and `difficulty` is an INTEGER. Under the old shapes all 639 concepts and all 57 patterns would have imported as **zero**, reported as rejections.
-2. **2,741 questions, not 2,746** (D-101). 3 have four non-distinct options, 2 have a non-Bloom level. All five are in the exclusion report.
-3. **`analyze` had to be accepted** (D-100). The existing test asserted it was rejected; that rule would have dropped 735 questions over a spelling.
-4. **1,199 of 4,686 chunks are exact duplicates** (D-108) — the same passages ingested twice under two `chapter_title` conventions. Imported and reported, **not** deduplicated: that is a retrieval-quality decision for step 8, where it can be measured.
+`npm run eval:retrieval:sparse` needs no key at all and measures the sparse half
+against the real corpus today. Both scripts are read-only and both are now
+declared in `package.json` — they were documented in the harness headers and
+missing from the manifest, so the commands the comments told you to run did not
+exist.
 
 ---
 
@@ -346,12 +334,12 @@ Build order from `docs/01-BACKEND-IMPLEMENTATION-PLAN.md` section 10.
 | ✅ 1-5 | Foundation, platform, identity, authz | — | — |
 | ✅ — | Resilience hardening | — | — |
 | ✅ 6 | **Corpus migration + `content` module** — module, migration `0001`, import script, all imported and verified | — | — |
-| 🟡 7 | `embed` and `llm` real adapters (interfaces exist) | 2 | API keys — **now the critical path** |
-| ⬜ 8 | `retrieval` + **threshold calibration from measurement** | 8 | step 7 (a query must be embedded before it can be compared) |
+| 🟡 7 | `embed` **real adapter DONE** (Voyage, guarded, boot-checked — D-123); `llm` adapter still an interface | 1 | `VOYAGE_API_KEY` for calibration; LLM key for `foxy` |
+| ✅ 8 | **`retrieval`** — module built, wired on the `ai` pool, no HTTP surface by design. Threshold ships `UNCALIBRATED` and INERT; the calibration harness is written | 0.5 | calibration blocked on `VOYAGE_API_KEY` only |
 | ✅ 9 | `learner` | — | — |
-| ⬜ 10 | `foxy` | 10 | steps 7, 8 |
+| ⬜ 10 | `foxy` | 10 | LLM key — **now the critical path** |
 | ✅ 11 | **`practice`** — module, migration `0002`, 231 tests, atomic submission across two modules | — | — |
-| ⬜ 12 | `parent` | 8 | step 10 (`practice` is now done) |
+| ✅ 12 | **`parent`** — module, migration `0003_parent`, six endpoints, the weekly digest seam filled into `notify`. Transcript reads return `not_yet_available` until `foxy` lands | — | — |
 | ⬜ 13 | `billing` | 6 | Razorpay account |
 | ⬜ 14 | `notify` | 3 | Resend key |
 | ⬜ 15 | Integration suite + deployment | 5 | all |
@@ -360,7 +348,7 @@ Build order from `docs/01-BACKEND-IMPLEMENTATION-PLAN.md` section 10.
 | ⬜ + | Feature-flag module (kill switches per resilience plan section 9) | 2 | — |
 | ✅ + | **Wave 1 — half-done foundations closed** (tenancy, snapshot chain, three hardening items) | — | — |
 | ⬜ + | Open items — see section 7 | 0.5 | — |
-| | **Subtotal** | **~62.5** | |
+| | **Subtotal** | **~47** | |
 
 ## 5. Remaining — frontend
 
@@ -539,6 +527,7 @@ per-chapter counts are in `.corpus-extract/reports/chapter-readiness.ndjson`.
 | 10 Aug 2026 | **Initial commit** `0545689` - 441 files. Repository had survived two near-losses of `PROGRESS.md` with zero commits | 1,453 |
 | 10 Aug 2026 | **`practice` — the session engine.** Migration `0002_practice` (3 tables + D-057's rename of `question_responses` to `practice_responses`, forward/rollback/re-apply proven); 28 module files; 10 pure domain modules at 100% coverage; `platform/tx`'s opaque `TransactionToken`, which lets one transaction span `practice` and `learner` without letting either service run a statement (D-056 executed at last). Held-out questions unreachable by construction; every persisted index canonical, proved with a shuffle that moves things; a partial-failure test that injects at the cross-module seam and asserts nothing lands. **Two findings only a real submission surfaced** — an honest perfect score can trip the all-same-index rule, and a reordering shuffle can still leave position 0 in place, so both tests were measuring less than they claimed (D-121). D-110..D-121 | 1,684 |
 | 10 Aug 2026 | **`practice` session engine** - six of nine client steps: mission with a stated reason, concept explanation, guided practice, mastery check, evidence-based decision, spaced retention. Migration `0002_practice`. Canonical option indexes, per-chapter held-out reserve honoured, one-transaction submission via an opaque `TransactionToken` (D-056 was unimplementable as written). Three defects caught by tests: an honest perfect score tripped anti-cheat; drizzle-kit silently kept a renamed PK; the canonical-index test was measuring nothing. D-110..D-121 | 1,684 |
+| 10 Aug 2026 | **`parent` + `retrieval` wired, and three test-suite defects closed.** Both modules were BUILT and NEITHER was constructed — `parent` half-wired (import landed, construction missing), `retrieval` not at all. Both now in `Modules`, which is total; `retrieval` deliberately registers no routes (D-122). `platform/embed` reached the container: Voyage when keyed, deterministic fake otherwise, and a BOOT FAILURE in production without a key, because the degraded mode has no symptom (D-123). **`parent` service + route tests written from nothing** — 37 + 15 + 10 across allow, four indistinguishable denies, immediate revocation, digest idempotence, quiet-week grace, audit PII. **Two real defects found:** `db.execute()` hands back timestamp WIRE STRINGS, so `DigestRecord.generatedAt` was a string typed `Date` (D-124); and `authoriseSelf` was an unenforced guard — mutating it left the whole suite green (D-125). The three failing migration tests were fixed at the CLASS level: no peeling, properties over the discovered set, two fiction-asserting tests DELETED with reasons, one generic round-trip test in their place, and the D-075 lint rule strengthened to count migration names rather than only array literals (D-126). D-122..D-126 | 1,970 |
 
 ---
 

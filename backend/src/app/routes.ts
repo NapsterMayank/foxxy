@@ -3,7 +3,9 @@ import type { LinkStatus } from '../platform/authz/index';
 import { createContentModule, type ContentModule } from '../modules/content/index';
 import { createIdentityModule, type IdentityModule } from '../modules/identity/index';
 import { createLearnerModule, type LearnerModule } from '../modules/learner/index';
+import { createParentModule, type ParentModule } from '../modules/parent/index';
 import { createPracticeModule, type PracticeModule } from '../modules/practice/index';
+import { createRetrievalModule, type RetrievalModule } from '../modules/retrieval/index';
 import {
   createNotifyModule,
   type DigestSource,
@@ -29,7 +31,21 @@ export interface Modules {
   readonly learner: LearnerModule;
   readonly content: ContentModule;
   readonly practice: PracticeModule;
+  readonly parent: ParentModule;
   readonly notify: NotifyModule;
+  /**
+   * NO HTTP SURFACE, AND THAT IS NOT AN OVERSIGHT.
+   *
+   * `retrieval` is built here and never registered in `registerRoutes` below,
+   * because a retrieval endpoint would be an unauthenticated way to page
+   * through the corpus and a caller who chose the filters could choose a grade
+   * the student is not in. It is reached in-process by `foxy`.
+   *
+   * It is nonetheless a member of `Modules` rather than a local: the type is
+   * total, so the day `foxy` lands it cannot be handed a retrieval service that
+   * was never constructed, and the `ai`-pool assignment below stays greppable.
+   */
+  readonly retrieval: RetrievalModule;
 }
 
 export interface BuildModulesOptions {
@@ -50,12 +66,17 @@ export interface BuildModulesOptions {
    */
   readonly forWorker?: boolean;
   /**
-   * The weekly-digest content seam (§8.7), supplied once the `parent` module
-   * exists.
+   * The weekly-digest content seam (§8.7).
    *
-   * Absent today, and its absence is load-bearing: with no source the worker
-   * registers no digest handlers, so a stray digest job is refused loudly
-   * instead of succeeding without doing the work (PROGRESS.md §7).
+   * NO LONGER OPTIONAL IN PRACTICE. It used to be absent, and that absence was
+   * load-bearing: with no source the worker registered no digest handlers, so a
+   * stray digest job was refused loudly instead of succeeding without doing the
+   * work (PROGRESS.md §7). `parent` now fills the seam, so `buildModules`
+   * supplies `parent.digestSource` and the digest handlers ARE registered.
+   *
+   * This override remains for tests that want to observe what notify asks for
+   * without building a real digest. Production never passes it — a test asserts
+   * that the source reaching notify is the parent module's own.
    */
   readonly digest?: DigestSource;
 }
@@ -273,6 +294,130 @@ export function buildModules(container: Container, options: BuildModulesOptions 
       identity.service.getTenantOfUser(studentUserId),
   });
 
+  /**
+   * ==========================================================================
+   * parent — THE ONLY CROSS-USER DATA PATH IN THE PRODUCT.
+   *
+   * Five injected edges, to two modules, all visible here and none of them an
+   * import: the link status and the account tenant from `identity`, the child's
+   * profile from `learner`, and the link revocation back to `identity` because
+   * `parent_child_links` is not this module's table.
+   *
+   * THE MOST IMPORTANT LINE BELOW IS `readTenantOfStudent`. It reads
+   * `users.tenant_id` for the CHILD. Passing `actor.tenantId` instead would
+   * type-check perfectly and turn `assertTenantMatch` into a comparison of a
+   * value with itself — a check that always passes, wearing the shape of a
+   * check that sometimes fails. That is not hypothetical: `notify` shipped
+   * exactly that mistake (D-091), in a file with a comment explaining why the
+   * check mattered.
+   * ==========================================================================
+   */
+  const parent = createParentModule({
+    // §3.1: ordinary request traffic, so the `core` pool.
+    db: forWorker ? container.pools.worker : container.poolFor('parent'),
+    clock: container.clock,
+    logger: container.logger,
+    requireSession: identity.requireSession,
+
+    // The SAME collapsing to `'approved' | null` the learner and practice
+    // modules get, and for the same reason: telling `pending` from `revoked`
+    // from "no link at all" in a 403 is a child-existence oracle.
+    readLinkStatus,
+    // D-091 — read from the DATA, never echoed off the actor. See above.
+    readTenantOfStudent: (studentUserId: string): Promise<string | null> =>
+      identity.service.getTenantOfUser(studentUserId),
+    listLinkedChildren: (actor) => identity.service.getLinkedChildren(actor),
+    readChildProfile: async (actor, studentUserId) => {
+      // `learner.getProfile` re-runs the guard on its own, so this is a second
+      // independent check rather than a trusted call. The narrowing to three
+      // fields is deliberate: a parent screen has no use for `board` or the
+      // timestamps, and a wider shape is a wider thing to leak later.
+      const profile = await learner.service.getProfile(actor, studentUserId);
+      return {
+        displayName: profile.displayName,
+        grade: profile.grade,
+        preferredLanguage: profile.preferredLanguage,
+      };
+    },
+    revokeLink: async (actor, linkId): Promise<void> => {
+      await identity.service.revokeLink(actor, linkId);
+    },
+
+    // Consent changes and transcript reads are audited. Wired here rather than
+    // defaulted inside the module, for the same reason identity's is: the
+    // module's own default is a no-op, and a silently-unwired audit log is
+    // indistinguishable from one that is working and has nothing to say.
+    audit: container.audit,
+  });
+
+  /**
+   * ==========================================================================
+   * retrieval — CONSTRUCTED HERE, REGISTERED NOWHERE.
+   *
+   * It has no routes by design (see `Modules.retrieval`), so it appears in
+   * `buildModules` and not in `registerRoutes`. Two things about this block are
+   * load-bearing:
+   *
+   *  1. THE `ai` POOL, not `core` — even though `content` owns `rag_chunks` and
+   *     runs on `core`. The pool follows the CALLER's cost profile: a slow HNSW
+   *     scan holding a `core` connection would put every chapter listing behind
+   *     vector search. The `ai` pool is also the only one carrying
+   *     `hnsw.ef_search = 100` (D-049); on any other pool the top-50 dense query
+   *     silently returns 40 rows and the corpus reads as thin.
+   *
+   *  2. `readChunks` IS `content.getChunksByIds`, and the service re-ranks what
+   *     it returns (D-060). That query is an `IN (...)`, so its row order is
+   *     whatever the plan produced — trusting it would scramble the ranking
+   *     while returning perfectly valid chunks, which errors nowhere and quietly
+   *     stops putting the best passage first.
+   * ==========================================================================
+   */
+  /**
+   * The actor retrieval hydrates chunks as. See `readChunks` below.
+   *
+   * `student` because `platform/authz` IGNORES ROLE for `kind: 'content'` — the
+   * rule is tenant + read — so this is the least-privileged role that can be
+   * named, and naming a wider one would imply a capability that does not exist
+   * and would become real the day content grows a role-sensitive rule.
+   *
+   * The id is not a user. It is deliberately not a UUID, so that if it ever
+   * reaches a query that joins to `users` the join fails loudly instead of
+   * matching nothing quietly.
+   */
+  const RETRIEVAL_ACTOR = Object.freeze({
+    userId: 'system:retrieval',
+    role: 'student',
+    tenantId: config.tenancy.defaultTenantId,
+  } as const);
+
+  const retrieval = createRetrievalModule({
+    db: forWorker ? container.pools.worker : container.poolFor('retrieval'),
+    // Already behind its bulkhead, breaker and 5s timeout — the composition
+    // root never hands out a bare adapter.
+    embed: container.embed,
+    /**
+     * `ChunkReader` TAKES IDS AND NO ACTOR, so the actor is supplied here.
+     *
+     * That is not a bypass, and the reason it is not is worth stating rather
+     * than assuming. `content` is the ONE resource kind in `platform/authz`
+     * that is not tenant-scoped and not owned: the rule is "any authenticated
+     * actor may read, nobody may write". So the actor below grants exactly what
+     * every logged-in student already has, and nothing else — there is no
+     * privilege here to escalate to.
+     *
+     * The reason retrieval does not carry the real caller instead: the actor
+     * would be decorative. Hydration is a primary-key lookup of ids that
+     * retrieval's own SQL already hard-filtered by grade and subject, and an
+     * actor threaded through only to satisfy a check that cannot fail reads as
+     * a boundary while being none. The authorisation that MATTERS for a
+     * retrieval — which student, in which grade, may ask this — belongs to
+     * `foxy`, which is the module with a request and a session.
+     */
+    readChunks: (ids) => content.service.getChunksByIds(RETRIEVAL_ACTOR, ids),
+    clock: container.clock,
+    logger: container.logger,
+  });
+
   const notify = createNotifyModule({
     // §3.1: notify's HTTP surface is ordinary request traffic, so `core`. In
     // the worker it is background work and gets `worker` — the delivery job
@@ -313,10 +458,22 @@ export function buildModules(container: Container, options: BuildModulesOptions 
      */
     readRecipient: (userId: string): Promise<NotifyRecipient | null> =>
       identity.service.getNotificationRecipient(userId),
-    ...(options.digest === undefined ? {} : { digest: options.digest }),
+    /**
+     * THE WEEKLY-DIGEST SEAM, NOW FILLED — §8.7 into §8.9.
+     *
+     * `parent.digestSource` satisfies notify's `DigestSource` structurally, and
+     * the two interfaces are deliberately NOT the same declaration: `parent`
+     * importing a type from `@/modules/notify` would be the cross-module import
+     * this file exists to prevent (D-051). The compiler checks the shapes agree
+     * at exactly this line, which is the only place that should care.
+     *
+     * The override is for tests that want to observe what notify asks for
+     * without building a real digest. Production never passes it.
+     */
+    digest: options.digest ?? parent.digestSource,
   });
 
-  return { identity, learner, content, practice, notify };
+  return { identity, learner, content, practice, parent, notify, retrieval };
 }
 
 /**
@@ -344,5 +501,8 @@ export async function registerRoutes(
   modules.learner?.registerRoutes(app);
   modules.content?.registerRoutes(app);
   modules.practice?.registerRoutes(app);
+  modules.parent?.registerRoutes(app);
   modules.notify?.registerRoutes(app);
+  // `retrieval` is deliberately absent. It has no HTTP surface — see the note
+  // on `Modules.retrieval`. Adding a line for it here is the regression.
 }

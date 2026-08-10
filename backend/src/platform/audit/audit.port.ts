@@ -92,6 +92,27 @@ export const AUDIT_ACTIONS = {
   LINK_APPROVED: 'identity.link_approved',
   /** §6.8 step 7 — either party revoked it. */
   LINK_REVOKED: 'identity.link_revoked',
+  /**
+   * §8.7 — a PARENT withdrew their own access, through the parent portal.
+   *
+   * Deliberately distinct from `LINK_REVOKED`, which identity also writes for
+   * the same revocation. The identity row records that a link changed state, by
+   * either party; this one answers "did the parent give this up themselves",
+   * which is a different question and is the one a school or a regulator asks.
+   * Answering it from `LINK_REVOKED` alone would mean joining to the role of an
+   * actor who may have changed role since.
+   */
+  PARENT_CONSENT_REVOKED: 'parent.consent_revoked',
+  /**
+   * §8.7 — a parent read a child's Foxy transcript.
+   *
+   * A READ, in a log that otherwise records only state changes — and the one
+   * exception is deliberate. A parent reading a child's conversations is the
+   * most privacy-sensitive capability in the product; the child is told it can
+   * happen, and this row is what makes "when did it happen" answerable rather
+   * than reconstructed. Metadata is counts only: never a message, never a name.
+   */
+  PARENT_TRANSCRIPT_VIEWED: 'parent.transcript_viewed',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

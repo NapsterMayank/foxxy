@@ -32,6 +32,14 @@
   box-sizing: border-box;
 }
 
+a,
+button,
+input,
+select,
+summary {
+  touch-action: manipulation;
+}
+
 html {
   background: rgb(var(--canvas));
   text-rendering: optimizeLegibility;
@@ -78,5 +86,13 @@ body {
 @media (prefers-contrast: more) {
   :root {
     --line: 91 91 112;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  header,
+  .mobile-product-nav {
+    background: rgb(var(--surface));
+    backdrop-filter: none;
   }
 }

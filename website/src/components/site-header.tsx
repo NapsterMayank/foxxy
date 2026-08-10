@@ -34,3 +34,12 @@ export function SiteHeader() {
     </header>
   );
 }
+
+export function MobileCta() {
+  return (
+    <nav aria-label="Quick account actions" className="mobile-cta">
+      <a className="mobile-cta__login" href={`${appUrl}/login`}>Log in</a>
+      <a className="button button--primary" href={`${appUrl}/signup`}>Start learning</a>
+    </nav>
+  );
+}

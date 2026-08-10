@@ -11,6 +11,7 @@ import { createServer } from '../../src/app/server';
 import { createContentModule, type ContentModule } from '../../src/modules/content/index';
 import { createIdentityModule, type IdentityModule } from '../../src/modules/identity/index';
 import { createLearnerModule, type LearnerModule } from '../../src/modules/learner/index';
+import { createParentModule, type ParentModule } from '../../src/modules/parent/index';
 import { createPracticeModule, type PracticeModule } from '../../src/modules/practice/index';
 import {
   createNotifyModule,
@@ -53,6 +54,7 @@ export interface AppHarness {
   readonly learner: LearnerModule;
   readonly content: ContentModule;
   readonly practice: PracticeModule;
+  readonly parent: ParentModule;
   readonly notify: NotifyModule;
   readonly clock: FixedClock;
   readonly cache: MemoryCache;
@@ -84,6 +86,12 @@ const TABLES = [
   // ownership, so it is a DBA operation in production and available here.
   'audit_log',
   'notifications',
+  // `weekly_digests` is the ONE table `parent` writes. It carries a unique
+  // constraint on (parent, child, week) — which is what makes digest generation
+  // idempotent — so a row surviving into the next test would make a fresh
+  // generation report `created: false` and look like the idempotence it is
+  // meant to be proving.
+  'weekly_digests',
   // The queue. `notify.send` enqueues a delivery job, and `(kind,
   // idempotency_key)` is UNIQUE — so a row left behind by one test makes the
   // next test's enqueue report `created: false` and look like a duplicate,
@@ -258,6 +266,43 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     random: options.random ?? ((): number => 0.5),
   });
 
+  /**
+   * THE SAME WIRING AS `app/routes.ts`, and it has to be the same.
+   *
+   * `parent` is the only cross-user data path in the product, and every one of
+   * its five edges is an injected function — so a test that built it with
+   * convenient stand-ins would be testing a module that production never
+   * assembles. In particular `readTenantOfStudent` reads `users.tenant_id`
+   * through identity rather than echoing `actor.tenantId`, which is the D-091
+   * mistake and the one `parent.authz-mutation.test.ts` installs deliberately.
+   */
+  const parent = createParentModule({
+    db: container.poolFor('parent'),
+    clock,
+    logger,
+    requireSession: identity.requireSession,
+    readLinkStatus: async (parentUserId, studentUserId) =>
+      (await identity.service.isLinkApproved(parentUserId, studentUserId)) ? 'approved' : null,
+    readTenantOfStudent: (studentUserId) => identity.service.getTenantOfUser(studentUserId),
+    listLinkedChildren: (actor) => identity.service.getLinkedChildren(actor),
+    readChildProfile: async (actor, studentUserId) => {
+      const profile = await learner.service.getProfile(actor, studentUserId);
+      return {
+        displayName: profile.displayName,
+        grade: profile.grade,
+        preferredLanguage: profile.preferredLanguage,
+      };
+    },
+    revokeLink: async (actor, linkId) => {
+      await identity.service.revokeLink(actor, linkId);
+    },
+    // The REAL Postgres audit port, same object identity gets. The transcript
+    // read and the consent revocation both write `audit_log`, and the
+    // properties worth asserting — that the row lands, and that it carries no
+    // PII — are properties of the row in the database.
+    audit,
+  });
+
   const notify = createNotifyModule({
     db: container.poolFor('notify'),
     clock,
@@ -272,11 +317,14 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     queue: container.jobQueue,
     requireSession: identity.requireSession,
     readRecipient: (userId) => identity.service.getNotificationRecipient(userId),
+    // `app/routes.ts` defaults this to `parent.digestSource`. The harness keeps
+    // the override-or-absent shape so a digest test can observe what notify asks
+    // for without building a real digest — see `AppHarnessOptions.digest`.
     ...(options.digest === undefined ? {} : { digest: options.digest }),
   });
 
   const app = await createServer(container, {
-    modules: { identity, learner, content, practice, notify },
+    modules: { identity, learner, content, practice, parent, notify },
   });
   await app.ready();
 
@@ -288,6 +336,7 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     learner,
     content,
     practice,
+    parent,
     notify,
     clock,
     cache,

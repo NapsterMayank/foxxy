@@ -9,6 +9,8 @@ describe('onboarding presentation', () => {
     render(<OnboardingForm role="student" />);
 
     expect(screen.getByLabelText('Grade')).toBeRequired();
+    expect(screen.getByRole('option', { name: 'Grade 10' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Grade 11' })).not.toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Preferred language' })).toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Subjects to begin with' })).toBeInTheDocument();
   });

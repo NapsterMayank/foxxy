@@ -14,7 +14,7 @@ export default function HomePage() {
         <section className="home-hero">
           <div className="shell home-hero__grid">
             <div className="home-hero__copy">
-              <span className="eyebrow">India’s AI tutor for CBSE learners</span>
+              <span className="eyebrow">CBSE learning for Classes 6–10</span>
               <h1>Learn smarter.<br />Achieve <em>greater.</em></h1>
               <p>Clear explanations, aligned practice and honest progress signals—in one calm place for every learner.</p>
               <div className="button-row">

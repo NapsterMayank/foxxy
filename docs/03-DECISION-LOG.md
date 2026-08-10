@@ -1430,7 +1430,7 @@ is this layer's decision. "3 days overdue" is the same fact in both languages an
 in every timezone the product ships to.
 
 ### D-120 · The three legacy migration tests PEEL 0002 off before they run
-**Status:** Active — the D-106 rule, one migration later
+**Status:** SUPERSEDED by D-126 — the peel was the defect, not the fix
 
 `foundation-hooks-migration`, `tenant-not-null-migration` and
 `learner-content-migration` apply the CURRENT set and then exercise the
@@ -1461,3 +1461,161 @@ that taps position 0 proves the translation exists exactly as well as no
 translation does. The test now finds a position the map actually MOVED and
 asserts on that; the precondition is asserted first, so the test fails loudly if
 the map ever becomes the identity rather than passing vacuously.
+
+### D-122 · `retrieval` and `parent` are constructed in `app/routes.ts`; only one of them registers routes
+**Status:** Active
+
+Both modules were built and neither was wired. `parent` had its import landed and
+its construction missing — the type error that surfaced it was `Modules.parent`
+being required and absent. `retrieval` had nothing at all.
+
+Both are now members of `Modules`, which is total, so neither can be dropped from
+a real deployment without a compile error. **`retrieval` is deliberately absent
+from `registerRoutes`.** It has no HTTP surface: a retrieval endpoint is an
+unauthenticated way to page through the corpus, and a caller who chose the
+filters could choose a grade the student is not in. It is reached in-process by
+`foxy`. `routes.test.ts` states that in a comment beside the exhaustive module
+list, because "built but not registered" reads exactly like an oversight.
+
+Pools follow §3.1: `parent` on `core`, `retrieval` on `ai` — not `core`, even
+though `content` owns `rag_chunks` and runs there. The pool follows the CALLER's
+cost profile, and the `ai` pool is the only one carrying `hnsw.ef_search = 100`
+(D-049).
+
+`retrieval`'s `ChunkReader` takes ids and no actor, so `app/routes.ts` supplies a
+named `RETRIEVAL_ACTOR`. That is not a bypass: `content` is the one resource kind
+in `platform/authz` that is neither tenant-scoped nor owned — any authenticated
+actor may read, nobody may write — so the actor grants exactly what every
+logged-in student already has. Threading the real caller through would be
+decorative: hydration is a primary-key lookup of ids retrieval's own SQL already
+hard-filtered by grade and subject, and an actor passed only to satisfy a check
+that cannot fail reads as a boundary while being none. The authorisation that
+matters for a retrieval belongs to `foxy`, which has a request and a session.
+
+### D-123 · The embedding adapter is a BOOT FAILURE in production without a key, not a warning
+**Status:** Active
+
+`retrieval` needs an `EmbeddingProvider` and the container had none, so one was
+added: Voyage when `VOYAGE_API_KEY` is set, the deterministic fake otherwise.
+
+The variable is OPTIONAL in `config.schema.ts` and REQUIRED by an explicit check
+in `createContainer`. Making it mandatory in the schema would force every test
+fixture to invent a fake key, and a fake key that parses is exactly the thing that
+would then reach Voyage.
+
+The check throws rather than warns because the degraded mode has NO SYMPTOM. The
+corpus's 4,686 chunks were embedded by `voyage-3`; a query embedded by the fake
+lands in an unrelated vector space where cosine distance is arithmetic that still
+succeeds and no longer means anything. Every answer would be grounded in fifty
+confident, wrong passages — no error, no timeout, no metric. A warn line in a log
+nobody reads is not a defence against that.
+
+### D-124 · Drizzle's `db.execute()` returns timestamps as WIRE STRINGS, and `parent` shipped a `Date` that was not one
+**Status:** Active — check this in every repository that uses raw `sql`
+
+`parent.repository` declared `generated_at: Date` on its row type and passed the
+value straight to `DigestRecord.generatedAt`, also typed `Date`. It was the string
+`'2026-08-10 14:01:20.396047+00'`. Measured: node-postgres's own client parses
+`timestamptz` and `date` into `Date`, but drizzle's `db.execute()` runs raw SQL
+and does its column mapping in the query builder instead, so a raw execute yields
+the wire text.
+
+**Nothing was going to catch it.** `db.execute<Row>` is an unchecked CLAIM about
+the row shape, so the compiler believed `Date` all the way out to the module's
+public type, and the value serialises to JSON perfectly well — as a subtly
+different string from the ISO timestamp every other endpoint emits. It fails only
+when somebody calls a `Date` method, and the first caller to do so was this
+module's own new test.
+
+Two traps in the repair, both hit before being fixed. `new Date(s.replace(' ','T'))`
+still returns `Invalid Date`, because Postgres writes a two-digit offset (`+00`,
+not `+00:00`) — and `Invalid Date` is WORSE than the string it replaced, because it
+satisfies `instanceof Date`. And the naive fix for the sibling `date` column,
+`String(value).slice(0, 10)`, turns a `Date` into `'Mon Jun 0'`: still a string,
+still ten characters. The tests assert `Number.isNaN(getTime())` and a
+`YYYY-MM-DD` regex for exactly these two.
+
+The transcript path carries the same widening even though `chat_sessions` does not
+exist yet, so the defect does not reappear on the day `foxy` ships.
+
+### D-125 · `authoriseSelf` was an unenforced guard, found by mutation and now pinned
+**Status:** Active — the fifth "installed and enforcing nothing" finding
+
+Each of `parent`'s guards was deliberately broken, one at a time, in the source,
+and the suite re-run:
+
+| Mutation | Caught? |
+|---|---|
+| `authoriseChild` resource tenant echoed off the actor (D-091) | YES — 4 tests failed |
+| link status hardcoded to `'approved'` | YES — 12 tests failed |
+| worker's cross-tenant `if` removed | YES — 2 tests failed |
+| **`authoriseSelf` resource tenant echoed off the actor** | **NO — the suite stayed green** |
+
+`getChildren` is the only caller of `authoriseSelf`. Its resource is
+`{ kind: 'account', ownerUserId: actor.userId }`, so the OWNERSHIP rule is
+trivially true for a self-check — which means the tenant comparison was the only
+thing the function did, and echoing the actor's tenant turned the whole method
+into a no-op wearing the shape of a boundary. Precisely D-091, in the one method
+with no test standing behind it.
+
+**What isolating it required.** A parent WITH a child masks the mutation:
+`readChildProfile` calls learner's `getProfile`, which runs its own independent
+tenant check and refuses. Defence in depth doing its job — and hiding which layer
+was load-bearing. The pinning test therefore uses a CHILDLESS parent, for whom the
+second layer is never reached, plus a same-tenant control so the assertion is
+about the tenant rather than about having no children.
+
+The mutations are institutionalised in
+`src/modules/parent/__tests__/parent.authz-mutation.test.ts`, which builds the
+module with each guard broken and asserts the break is OBSERVABLE. A green suite
+proves the allow path works; it says nothing about whether the deny path is
+reached. This file is what answers the second question.
+
+### D-126 · Migration tests assert schema PROPERTIES against the discovered set; they never name a chain
+**Status:** Active — supersedes D-120, and is the D-075 rule applied to its own guard
+
+D-075 banned an ARRAY LITERAL of migration filenames. Two tests evaded it by
+writing the same list VERTICALLY — ten `readDownMigration('0007_…')` calls in
+sequence — and were then patched by hand twice each, most recently by D-120's
+peel. `0003_parent` broke them again. Ten hand-ordered names IS a list; writing it
+downward does not change what it claims.
+
+**Three changes.**
+
+1. `foundation-hooks-migration` and `learner-content-migration` no longer peel
+   anything. They apply `applyAllMigrations()` whole and assert PROPERTIES of the
+   result: tenancy is real and defaulted, the role CHECK is wide while signup is
+   narrow, the evidence columns are documented and constrained, notifications
+   require both languages, jobs deduplicate. Correct for any number of migrations.
+   The responses table is named `practice_responses`, because that is what the
+   product ships (D-057); the superseded SQL that spells it `question_responses`
+   is still exercised verbatim by `baseline-collapse.test.ts`, which is the only
+   job those files still have.
+
+2. **Two tests DELETED, not repaired.** `every foundation migration rolls back and
+   re-applies` and `0002_learner_content — rollback` rolled the superseded chain
+   backwards by name. Those migrations no longer exist as discrete steps — the
+   deployed history is `0000_baseline` — so nothing will ever run those down files
+   against a real database. A test whose subject cannot occur asserts a fiction and
+   can only cost maintenance. Both deletions carry their reason at the bottom of
+   their own file. The PROPERTY they were reaching for now lives, generalised, in
+   `tests/integration/migration-round-trip.test.ts`: apply the discovered set,
+   reverse it, assert `public` holds ZERO tables, re-apply, and diff the catalogue
+   against the first apply. It needed no edit for `0003_parent` — which had had no
+   rollback test at all — and will need none for the next migration.
+
+3. The `tableNames()` `toEqual([…25 strings])` assertion is gone too; it was the
+   same defect in a table-shaped costume. It now compares the applied schema
+   against the tables the Drizzle barrel DECLARES, via `getTableName`. Those are
+   two independent declarations of the schema that agree exactly when somebody
+   remembered to run `db:generate` — a real drift check instead of a paste target.
+
+**The lint rule was strengthened, since the old one demonstrably could not see
+this.** `migrations/no-migration-chain` counts DISTINCT migrations named per file
+(`0002_practice.sql` and `0002_practice.down.sql` count as one) and errors above
+two. Two is a migration test naming its SUBJECT plus a PREREQUISITE, which
+`pedagogy-migration` and `practice-migration` both legitimately do. Three is a
+chain, and a chain is a claim about which migrations exist. Verified to fire on a
+real violation before being trusted (D-005): pointed at the pre-rewrite
+`foundation-hooks-migration` it reports 6.
+

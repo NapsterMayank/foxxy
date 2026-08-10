@@ -26,7 +26,9 @@
     "db:seed": "tsx --env-file-if-exists=.env scripts/seed-dev.ts",
     "db:studio": "node --env-file-if-exists=.env node_modules/drizzle-kit/bin.cjs studio",
     "db:clear-content": "tsx --env-file-if-exists=.env scripts/clear-content.ts",
-    "db:import-corpus": "tsx --env-file-if-exists=.env scripts/import-corpus.ts"
+    "db:import-corpus": "tsx --env-file-if-exists=.env scripts/import-corpus.ts",
+    "eval:retrieval:calibrate": "tsx --env-file-if-exists=.env eval/retrieval/calibrate.ts",
+    "eval:retrieval:sparse": "tsx --env-file-if-exists=.env eval/retrieval/sparse-probe.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

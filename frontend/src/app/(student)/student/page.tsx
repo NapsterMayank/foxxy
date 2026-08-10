@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { ProgressSummary, type SubjectProgressItem } from '@/features/progress/components/progress-summary';
 
 export const metadata: Metadata = {
@@ -33,6 +34,23 @@ export default function StudentDashboardPage() {
           <p className="mt-3 text-base leading-7 text-white">
             Your next activity is ready. Pick up where you left off or review your recent learning evidence.
           </p>
+          <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+            <Link
+              className="inline-flex min-h-control items-center justify-center rounded-full bg-white px-5 py-3 text-sm font-bold text-brand-strong shadow-raised transition-surface duration-150 hover:shadow-overlay focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-white/60 active:scale-press"
+              data-motion="press"
+              href="#next-up"
+            >
+              See next activity
+              <span aria-hidden="true" className="ml-2">↓</span>
+            </Link>
+            <Link
+              className="inline-flex min-h-control items-center justify-center rounded-full border border-white/60 px-5 py-3 text-sm font-bold text-white transition-surface duration-150 hover:bg-white/10 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-white/60 active:scale-press"
+              data-motion="press"
+              href="#progress"
+            >
+              Review my progress
+            </Link>
+          </div>
         </div>
       </section>
 

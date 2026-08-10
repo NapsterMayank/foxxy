@@ -1,0 +1,24 @@
+-- Rollback for drizzle/migrations/0003_parent.sql
+--
+-- Drizzle does not generate down migrations, so each one is written by hand and
+-- lives here under the same number. Plan §4, rule 4: every migration must run
+-- forward AND backward against a copy of the schema in CI.
+--
+-- ===========================================================================
+-- THIS IS THE CHEAPEST ROLLBACK IN THE REPOSITORY, AND IT IS WORTH SAYING WHY.
+--
+-- `weekly_digests` holds nothing that cannot be rebuilt. Every row is derived
+-- from `practice_sessions`, `practice_responses`, `chapters` and
+-- `misconception_patterns` by a deterministic composer — re-running
+-- `generateDigest` for a week reproduces the same five lines byte for byte.
+--
+-- The one thing that IS lost is the historical record of what a parent was
+-- actually told: if the composer changes, a rebuilt digest for last May is what
+-- we would say TODAY, not what we said in May. That matters for a support
+-- conversation and for nothing else, which is why this rollback is safe to run
+-- and is still not something to run casually.
+--
+-- Nothing else in the schema references this table, so the drop is a single
+-- statement with no ordering to get right.
+-- ===========================================================================
+DROP TABLE IF EXISTS "weekly_digests";

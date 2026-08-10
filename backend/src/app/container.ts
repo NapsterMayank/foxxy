@@ -17,6 +17,12 @@ import {
   type ModuleName,
   type NamedDbHandle,
 } from '../platform/db/index';
+import {
+  createDeterministicEmbed,
+  createGuardedEmbed,
+  createVoyageEmbed,
+  type EmbeddingProvider,
+} from '../platform/embed/index';
 import { createHttpClient, type HttpClient } from '../platform/http/index';
 import { createUuidGen, type IdGen } from '../platform/id-gen/index';
 import { createPostgresJobQueue, type JobQueue } from '../platform/jobs/index';
@@ -89,6 +95,22 @@ export interface Container {
   readonly cache: CachePort;
   readonly http: HttpClient;
   readonly mail: MailPort;
+  /**
+   * THE QUERY-EMBEDDING PORT — plan §8.4, and the one adapter choice in this
+   * file that can be wrong without anything failing.
+   *
+   * Voyage when a key is configured, the deterministic fake otherwise, and
+   * `createContainer` REFUSES TO BOOT in production without a key rather than
+   * quietly taking the fake. The two providers are interchangeable to the type
+   * system and produce vectors in completely unrelated spaces: the corpus's
+   * 4,666 chunks were embedded by `voyage-3`, so a query embedded by the fake
+   * lands nowhere near them and cosine distance becomes arithmetic that still
+   * succeeds and no longer means anything. Every search would return confident,
+   * wrong chunks — with no error, no timeout and no metric to notice it by.
+   *
+   * Always guarded, so no caller can hold a bare adapter (§3.3, §4, §5).
+   */
+  readonly embed: EmbeddingProvider;
   readonly authz: AccessGuard;
   readonly resilience: ResilienceRegistry;
   readonly databaseProbe: DatabaseProbe;
@@ -135,6 +157,15 @@ export interface ContainerOverrides {
   readonly cache?: CachePort;
   readonly mail?: MailPort;
   readonly audit?: AuditPort;
+  /**
+   * Substitute embedding provider.
+   *
+   * An integration test that wants stable, reproducible rankings supplies the
+   * deterministic provider explicitly rather than relying on the absence of a
+   * key — "no key was set" and "this test wants the fake" are different facts,
+   * and only one of them should survive somebody adding a key to their shell.
+   */
+  readonly embed?: EmbeddingProvider;
   /**
    * Channel routing by message kind.
    *
@@ -236,6 +267,31 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
   // the dev adapter prints to stdout, so signup works with no API key.
   const mail = createGuardedMail(overrides.mail ?? createConsoleMail(), resilience.guard('mail'));
 
+  /**
+   * THE EMBEDDING ADAPTER CHOICE — see `Container.embed`.
+   *
+   * The production check is a BOOT FAILURE rather than a warning on purpose.
+   * The degraded mode it prevents is not "slower" or "fewer results"; it is
+   * "every answer is grounded in passages selected at random, and looks
+   * exactly like an answer that was grounded properly". A warn line in a log
+   * nobody reads is not a defence against a failure with no symptom.
+   */
+  if (config.isProduction && overrides.embed === undefined && config.ai.voyageApiKey === null) {
+    throw new Error(
+      'VOYAGE_API_KEY is required in production. Without it the deterministic ' +
+        'embedding fake would be used, and every retrieval query would be embedded ' +
+        'into a vector space unrelated to the corpus — returning confident, wrong ' +
+        'chunks with no error. Set VOYAGE_API_KEY, or run with NODE_ENV=development.',
+    );
+  }
+  const embed = createGuardedEmbed(
+    overrides.embed ??
+      (config.ai.voyageApiKey === null
+        ? createDeterministicEmbed()
+        : createVoyageEmbed({ http, apiKey: config.ai.voyageApiKey })),
+    resilience.guard('embed'),
+  );
+
   // The link reader is wired to the identity repository in build step 4.
   // Until that module exists the guard denies every parent-child read, which
   // is the correct posture for a boundary that has no data source yet.
@@ -315,6 +371,7 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
     cache,
     http,
     mail,
+    embed,
     authz,
     resilience,
     metrics,

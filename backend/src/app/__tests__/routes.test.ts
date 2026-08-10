@@ -54,16 +54,23 @@ afterEach(async () => {
 describe('buildModules', () => {
   it('builds every module the application has', () => {
     // The list is EXHAUSTIVE and asserted with `toEqual` rather than
-    // `toContain`, so a module that is built but never registered — or one
-    // deleted from the graph — fails here. Adding `notify` to `buildModules`
-    // without adding it to this line is the failure this assertion is for.
+    // `toContain`, so a module dropped from the graph — or one added to
+    // `buildModules` and to nothing else — fails here.
+    //
+    // `retrieval` IS on this list and is deliberately NOT registered in
+    // `registerRoutes`: it has no HTTP surface, because a retrieval endpoint
+    // would be an unauthenticated way to page the corpus and a caller who chose
+    // the filters could choose a grade the student is not in. Built, not
+    // exposed, is the intended state — see the note on `Modules.retrieval`.
     const modules = buildModules(makeContainer());
     expect(Object.keys(modules).sort()).toEqual([
       'content',
       'identity',
       'learner',
       'notify',
+      'parent',
       'practice',
+      'retrieval',
     ]);
   });
 
@@ -107,11 +114,19 @@ describe('buildModules', () => {
     expect(modules.learner.service).toBeDefined();
     expect(modules.content.service).toBeDefined();
     expect(modules.identity.requireSession).toBeTypeOf('function');
-    // notify's edge to identity is `readRecipient`, injected the same way. With
-    // no `parent` module yet there is no digest source, and that absence is
-    // load-bearing: the worker registers no digest handlers, so a stray digest
-    // job is refused loudly rather than succeeding without doing the work.
+    // notify's edge to identity is `readRecipient`, injected the same way.
     expect(modules.notify.service).toBeDefined();
-    expect(modules.notify.hasDigestSource).toBe(false);
+    // THE DIGEST SEAM IS NOW FILLED, and this assertion has flipped. It used to
+    // read `false`, and that absence was load-bearing while `parent` did not
+    // exist: with no source the worker registered no digest handlers, so a
+    // stray digest job was refused loudly instead of succeeding without doing
+    // the work. `parent.digestSource` now supplies it, so the handlers ARE
+    // registered — and a regression back to `false` means the weekly digest
+    // silently stops being sent, which is invisible from the outside.
+    expect(modules.notify.hasDigestSource).toBe(true);
+    // parent's four edges, injected rather than imported, same as the rest.
+    expect(modules.parent.service).toBeDefined();
+    // retrieval holds `content.getChunksByIds` the same way.
+    expect(modules.retrieval.service).toBeDefined();
   });
 });

@@ -32,6 +32,6 @@
     "declaration": false,
     "sourceMap": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts", "*.ts"],
+  "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts", "eval/**/*.ts", "*.ts"],
   "exclude": ["node_modules", "dist", "coverage"]
 }

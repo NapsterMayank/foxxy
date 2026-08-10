@@ -123,6 +123,96 @@ const MIGRATION_LIST_PATTERNS = [
   },
 ];
 
+/**
+ * D-075, STRENGTHENED — the array rule above was evaded, twice, for two years.
+ *
+ * ===========================================================================
+ * WHAT THE ARRAY RULE MISSED.
+ *
+ * It bans an array literal of migration filenames, because that is the shape
+ * every occurrence of the defect had taken. `foundation-hooks-migration.test.ts`
+ * and `learner-content-migration.test.ts` had the same defect written
+ * VERTICALLY instead:
+ *
+ *     await run(readDownMigration('0008_tenant_not_null.down.sql', 'superseded'));
+ *     await run(readDownMigration('0007_notify_metrics_jobs.down.sql', 'superseded'));
+ *     await run(readDownMigration('0006_evidence_capture.down.sql', 'superseded'));
+ *     ...
+ *
+ * Ten hand-ordered migration names, maintained by hand, broken by every new
+ * migration — and not one array literal in sight, so the rule that exists to
+ * catch exactly this reported nothing. Both files were patched by adding one
+ * more name, twice each, which is the D-075 loop running inside the guard
+ * against D-075.
+ *
+ * ===========================================================================
+ * WHERE THE LINE IS, AND WHY IT IS THERE.
+ *
+ * The distinction the original rule draws is still the right one: one name is a
+ * REFERENCE to a specific migration, a list is a CLAIM ABOUT WHICH MIGRATIONS
+ * EXIST. So this rule counts DISTINCT migrations per file, where
+ * `0002_practice.sql` and `0002_practice.down.sql` count as one — a migration's
+ * own test must be able to name its subject in both directions.
+ *
+ * TWO are allowed. A migration test legitimately needs a PREREQUISITE (usually
+ * the baseline) plus its SUBJECT, and `pedagogy-migration.test.ts` and
+ * `practice-migration.test.ts` are both written that way, correctly.
+ *
+ * THREE is a chain. There is no honest reason to name three migrations: at that
+ * point the file is reconstructing the applied set by hand, and
+ * `applyAllMigrations()` — which discovers the set and cross-checks Drizzle's
+ * journal — is what it actually wants.
+ *
+ * Verified to fire on a real violation before being trusted (D-005): pointed at
+ * the pre-rewrite `foundation-hooks-migration.test.ts` it reports 6.
+ */
+const MIGRATION_NAME = /^([0-9]{4}_[a-z0-9_]+?)(\.down)?\.sql$/;
+const MAX_MIGRATIONS_NAMED_PER_FILE = 2;
+
+const migrationChainPlugin = {
+  rules: {
+    'no-migration-chain': {
+      meta: {
+        type: 'problem',
+        schema: [],
+        messages: {
+          chain:
+            'D-075: this file names {{count}} different migrations ({{names}}). More than ' +
+            `${MAX_MIGRATIONS_NAMED_PER_FILE} is not a reference, it is a hand-maintained LIST of which ` +
+            'migrations exist — a second source of truth that breaks on every new one. ' +
+            'Use applyAllMigrations() or listMigrations() from tests/helpers/postgres.ts, ' +
+            'which discover the set from the directory and cross-check drizzle\'s journal. ' +
+            'A migration test may still name its own subject plus one prerequisite.',
+        },
+      },
+      create(context) {
+        /** @type {Map<string, import('estree').Node>} */
+        const seen = new Map();
+        return {
+          Literal(node) {
+            if (typeof node.value !== 'string') return;
+            const match = MIGRATION_NAME.exec(node.value);
+            if (match === null) return;
+            const stem = match[1];
+            if (!seen.has(stem)) seen.set(stem, node);
+          },
+          'Program:exit'(node) {
+            if (seen.size <= MAX_MIGRATIONS_NAMED_PER_FILE) return;
+            context.report({
+              node,
+              messageId: 'chain',
+              data: {
+                count: String(seen.size),
+                names: [...seen.keys()].sort().join(', '),
+              },
+            });
+          },
+        };
+      },
+    },
+  },
+};
+
 export default tseslint.config(
   {
     ignores: ['dist/**', 'coverage/**', 'node_modules/**', 'drizzle/**', 'eslint.config.js'],
@@ -269,12 +359,17 @@ export default tseslint.config(
     // Tests may reach into a module's internals of the module they test,
     // and may talk to a real database.
     files: ['**/__tests__/**/*.ts', '**/*.test.ts', 'tests/**/*.ts'],
+    plugins: { migrations: migrationChainPlugin },
     rules: {
       'no-restricted-imports': ['error', { patterns: [...ENV_PATTERNS] }],
       '@typescript-eslint/no-non-null-assertion': 'off',
       '@typescript-eslint/no-unsafe-assignment': 'off',
-      // D-075 — see MIGRATION_LIST_PATTERNS at the top of this file.
+      // D-075 — see MIGRATION_LIST_PATTERNS at the top of this file. Catches
+      // the list written HORIZONTALLY, as an array literal.
       'no-restricted-syntax': ['error', ...MIGRATION_LIST_PATTERNS],
+      // D-075 strengthened — catches the same list written VERTICALLY, as a
+      // sequence of calls. See `migrationChainPlugin` at the top of this file.
+      'migrations/no-migration-chain': 'error',
     },
   },
 

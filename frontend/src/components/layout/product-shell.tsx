@@ -1,8 +1,10 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
+import { cx } from '@/lib/utils/cx';
 
 export interface ProductNavigationItem {
   href: string;
+  isCurrent?: boolean;
   label: string;
   marker: string;
 }
@@ -14,10 +16,15 @@ interface ProductShellProps {
   userName: string;
 }
 
-function NavigationLink({ href, label, marker }: ProductNavigationItem) {
+function NavigationLink({ href, isCurrent = false, label, marker }: ProductNavigationItem) {
   return (
     <Link
-      className="group flex min-h-control items-center gap-3 rounded-xl px-3 py-2 text-sm font-semibold text-muted transition-surface duration-150 hover:bg-brand-subtle hover:text-brand-strong focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25"
+      aria-current={isCurrent ? 'page' : undefined}
+      className={cx(
+        'group flex min-h-control items-center gap-3 rounded-xl px-3 py-2 text-sm font-semibold transition-surface duration-150 hover:bg-brand-subtle hover:text-brand-strong focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press',
+        isCurrent ? 'bg-brand-subtle text-brand-strong' : 'text-muted',
+      )}
+      data-motion="press"
       href={href}
     >
       <span
@@ -89,7 +96,12 @@ export function ProductShell({ children, navigation, roleLabel, userName }: Prod
       >
         {navigation.map((item) => (
           <Link
-            className="flex min-h-control flex-col items-center justify-center gap-1 rounded-xl px-2 py-1 text-center text-xs font-semibold text-muted hover:bg-brand-subtle hover:text-brand-strong focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25"
+            aria-current={item.isCurrent ? 'page' : undefined}
+            className={cx(
+              'flex min-h-control flex-col items-center justify-center gap-1 rounded-xl px-2 py-1 text-center text-xs font-semibold transition-surface duration-150 hover:bg-brand-subtle hover:text-brand-strong focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press',
+              item.isCurrent ? 'bg-brand-subtle text-brand-strong' : 'text-muted',
+            )}
+            data-motion="press"
             href={item.href}
             key={item.href}
           >

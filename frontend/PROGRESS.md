@@ -11,6 +11,7 @@
 - Independent Next.js 16 App Router application with React 19, strict TypeScript and Tailwind CSS 3.
 - Responsive role selection plus `/login`, `/signup`, `/verify`, `/forgot-password`, `/reset-password` and `/onboarding` presentation flows.
 - Responsive `/student` and `/parent` preview dashboards with desktop side navigation and mobile bottom navigation.
+- Mobile-first student UX for Classes 6–10: 44 px touch targets, primary actions above the fold, press feedback, current-location navigation, safe-area support and concise learning language without childish decoration or fake gamification.
 - Explicit sample/preview labels; no API calls, fake database, mock service worker or invented backend wire contracts.
 - Shared four-value learning-evidence type: `Strong evidence`, `Developing`, `Needs another session`, `Not assessed yet`.
 - Product-wide `noindex` metadata, crawler-blocking `robots.txt`, `X-Robots-Tag` and baseline response-security headers.
@@ -22,6 +23,7 @@
 
 - Separate npm application under `website/`; marketing deployments cannot import, rebuild or restart the product application.
 - Responsive static routes: `/`, `/features`, `/for-parents`, `/for-schools`, `/pricing` and `/about`.
+- Persistent mobile account CTA with safe-area spacing; the main marketing message now explicitly targets Classes 6–10.
 - Shared static Server Components for navigation, footer, audience sections, pricing, calls to action and code-native placeholder art.
 - Indexable metadata, canonical URLs, `robots.txt`, sitemap and baseline response-security headers.
 - Every published route is statically prerendered. A product API, product database or future CMS outage does not take down published marketing pages.

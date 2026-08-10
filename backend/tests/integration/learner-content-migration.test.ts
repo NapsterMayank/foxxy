@@ -1,12 +1,11 @@
 import { readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { Table, getTableName, is } from 'drizzle-orm';
+import * as schema from '@/platform/db/schema/index';
 import {
   applyAllMigrations,
   listMigrations,
-  readDownMigration,
-  readMigration,
-  splitStatements,
   startTestPostgres,
   type TestPostgres,
 } from '../helpers/postgres';
@@ -26,28 +25,45 @@ import {
 } from '../fixtures/index';
 
 /**
- * Migration 0002 — the `learner` and `content` schemas.
+ * THE `learner` AND `content` SCHEMAS — as properties of the applied database,
+ * not as assertions about migration `0002_learner_content`.
  *
- * Two things are proven here, and they are different things.
+ * ===========================================================================
+ * WHAT IS PROVEN HERE: THE CONSTRAINTS ACTUALLY REJECT BAD DATA.
  *
- * FIRST, plan §4 rule 4: the migration applies, rolls back, and re-applies.
- * That is the bottom describe block.
+ * A CHECK constraint that was never fired against a violation is
+ * indistinguishable from a comment. Every one of these was written because the
+ * value it rejects would otherwise have reached a student — a grade stored as
+ * an integer that silently matches nothing, a question with three options that
+ * renders a broken quiz, a mastery of 1.5 in a parent report.
  *
- * SECOND, and the larger half: THE CONSTRAINTS ACTUALLY REJECT BAD DATA. A
- * CHECK constraint that was never fired against a violation is indistinguishable
- * from a comment. Every one of these was written because the value it rejects
- * would otherwise have reached a student — a grade stored as an integer that
- * silently matches nothing, a question with three options that renders a broken
- * quiz, a mastery of 1.5 in a parent report.
+ * ===========================================================================
+ * WHAT WAS REMOVED, AND WHY (D-075, fifth occurrence).
+ *
+ * This file used to apply the current set and then PEEL THE NEWEST MIGRATION
+ * BACK OFF, so that the superseded `0002_learner_content` down file could be
+ * run against the world it was written for. Its rollback test then named four
+ * migrations in order. Both halves broke on every new migration, and both
+ * previous repairs were the same repair: add one more name.
+ *
+ * The peel is gone. Everything below now runs against whatever
+ * `applyAllMigrations()` produces — discovered from the directory,
+ * cross-checked against Drizzle's journal — so a migration added tomorrow needs
+ * no edit here, and a migration that breaks one of these properties fails here.
+ *
+ * Rule 4 (apply, reverse, re-apply) moved to `migration-round-trip.test.ts`,
+ * generalised over the discovered set. See the note at the bottom of this file.
+ *
+ * ===========================================================================
+ * THE RESPONSES TABLE IS `practice_responses`.
+ *
+ * `0002_practice` renamed it from `question_responses` and gave it a NOT NULL
+ * `session_id` (D-057). The behavioural assertions below therefore open a real
+ * practice session first. That is not ceremony — a response with no session is
+ * exactly what the merge exists to make impossible.
  */
 
 let postgres: TestPostgres;
-
-async function run(sql: string): Promise<void> {
-  for (const statement of splitStatements(sql)) {
-    await postgres.client.query(statement);
-  }
-}
 
 async function tableNames(): Promise<string[]> {
   const result = await postgres.client.query<{ table_name: string }>(
@@ -57,6 +73,29 @@ async function tableNames(): Promise<string[]> {
   return result.rows.map((row) => row.table_name);
 }
 
+/**
+ * Every table the Drizzle schema barrel declares, sorted.
+ *
+ * READ OUT OF THE SCHEMA OBJECTS THEMSELVES rather than from a list, via
+ * Drizzle's own `getTableName`. The barrel exports tables, relations, enums and
+ * helper types side by side, so `is(value, Table)` is what separates them —
+ * a `typeof value === 'object'` check would count relations too and the two
+ * sets would never match for a reason that had nothing to do with drift.
+ */
+function declaredTableNames(): string[] {
+  const names: string[] = [];
+  for (const value of Object.values(schema)) {
+    // `is()` narrows to Drizzle's generic `Table`, which the concrete
+    // `PgTableWithColumns<…>` of each export is not assignable BACK to under
+    // `exactOptionalPropertyTypes` — hence the statement form rather than a
+    // `.filter()` with a type predicate.
+    if (is(value, Table)) {
+      names.push(getTableName(value));
+    }
+  }
+  return names.sort();
+}
+
 let emailCounter = 0;
 async function freshStudent(grade: '6' | '7' | '8' | '9' | '10' | '11' | '12' = '8'): Promise<string> {
   emailCounter += 1;
@@ -64,24 +103,32 @@ async function freshStudent(grade: '6' | '7' | '8' | '9' | '10' | '11' | '12' = 
   return insertStudent(postgres.client, userId, makeStudent(`s${emailCounter}`, { grade }));
 }
 
+/** The responses table, post-D-057 rename. One name, used everywhere below. */
+const RESPONSES = 'practice_responses';
+
+/**
+ * Opens a practice session so a response has something to belong to.
+ *
+ * `practice_responses.session_id` is NOT NULL with no default, which is the
+ * entire point of the D-057 merge: a response that exists outside a session is
+ * an observation nobody can score, and the database refuses to hold one.
+ */
+async function openSession(studentUserId: string, chapterId: string, questionId: string): Promise<string> {
+  const result = await postgres.client.query<{ id: string }>(
+    `insert into practice_sessions (student_user_id, chapter_id, question_ids, started_at)
+     values ($1, $2, array[$3::uuid], now())
+     returning id`,
+    [studentUserId, chapterId, questionId],
+  );
+  return result.rows[0]?.id ?? '';
+}
+
 beforeAll(async () => {
   postgres = await startTestPostgres();
+  // THE WHOLE SET, AND NOTHING PEELED OFF IT. `applyAllMigrations` discovers
+  // the migrations from the directory and cross-checks Drizzle's journal, so
+  // this line is already correct for every migration that will ever be added.
   await applyAllMigrations(postgres.client);
-/**
- * `0002_practice` COMES OFF FIRST — the D-106 rule, one migration later.
- *
- * This harness applies the CURRENT migration set, whose newest member renames
- * `question_responses` to `practice_responses` (D-057). Everything below is
- * about the world BEFORE that rename — it exercises the superseded 0004-0008
- * chain, which names the old table throughout and which cannot be edited.
- *
- * Peeling the newer migration off is what a real rollback does, in the order a
- * real rollback does it. The alternatives are both worse: rewriting these
- * assertions to the new name would make them claim to test SQL that does not
- * mention it, and editing the superseded files would destroy the oracle
- * `baseline-collapse.test.ts` diffs the baseline against.
- */
-  await run(readDownMigration('0002_practice.down.sql'));
 }, 180_000);
 
 afterAll(async () => {
@@ -154,44 +201,49 @@ describe('the migration list is discovered, never hardcoded', () => {
   });
 });
 
-describe('0002_learner_content — forward', () => {
-  it('creates the seven new tables alongside the six identity ones', async () => {
-    // The foundation-hook migrations (0004-0007) add nine more: `tenants`, the
-    // `schools`/`classes`/`class_enrolments` stub, `audit_log`,
-    // `notifications`, `metrics_events`, `worker_heartbeats` and `jobs`, and
-    // `0001_pedagogy` adds three: `chapter_concepts`, `concept_graph`,
-    // `misconception_patterns`. They are asserted here rather than only in
-    // their own suites because this is the one place that reads the WHOLE
-    // applied schema, and a table that appears without anybody noticing is how
-    // a stub becomes drift.
-    expect(await tableNames()).toEqual([
-      'audit_log',
-      'chapter_concepts',
-      'chapter_mastery',
-      'chapters',
-      'class_enrolments',
-      'classes',
-      'concept_graph',
-      'email_verification_tokens',
-      'jobs',
-      'link_codes',
-      'metrics_events',
-      'misconception_patterns',
-      'notifications',
-      'parent_child_links',
-      'password_reset_tokens',
-      'question_responses',
-      'questions',
-      'rag_chunks',
-      'schools',
-      'sessions',
-      'student_subjects',
-      'students',
-      'tenants',
-      'users',
-      'worker_heartbeats',
-    ]);
+describe('the applied schema and the TypeScript schema declare the same tables', () => {
+  /**
+   * THIS ASSERTION USED TO BE A HARDCODED LIST OF TWENTY-FIVE TABLE NAMES, and
+   * it was the D-075 defect wearing its other costume.
+   *
+   * The intent was sound — "this is the one place that reads the WHOLE applied
+   * schema, and a table that appears without anybody noticing is how a stub
+   * becomes drift". The mechanism was not. A literal list has to be edited by
+   * every migration that adds a table, the edit is always "paste one more
+   * string", and the test therefore only ever detects that somebody added a
+   * table — never that they added it in the wrong place, and never anything at
+   * all once the paste becomes reflex. It broke on `0003_parent`, exactly as it
+   * had broken on `0001_pedagogy` and `0002_practice` before it.
+   *
+   * The PROPERTY that was actually wanted is drift between the two independent
+   * declarations of the schema that this codebase maintains:
+   *
+   *   the SQL   — `drizzle/migrations/`, what a database is actually built from
+   *   the TS    — `platform/db/schema/`, what every repository queries through
+   *
+   * They are generated from one another by `db:generate`, which means they
+   * agree exactly when somebody remembered to run it. When they do not, nothing
+   * fails at build time: Drizzle happily emits SQL for a table the database
+   * does not have, and the error surfaces at runtime in a repository, several
+   * layers from its cause (D-072, and the reason `.returning()` was so
+   * confusing that time).
+   *
+   * Comparing the two sets holds for any number of migrations and fails for the
+   * right reason — a table declared in one place and not the other.
+   */
+  it('has no table in the database that the schema barrel does not declare', async () => {
+    expect(await tableNames()).toEqual(declaredTableNames());
   });
+
+  it('declares more than a handful, so the comparison has a subject', () => {
+    // A guard on the guard: two empty sets are equal. If the schema barrel ever
+    // stopped exporting tables — a moved file, a renamed export — the assertion
+    // above would pass while comparing nothing.
+    expect(declaredTableNames().length).toBeGreaterThan(20);
+  });
+});
+
+describe('the learner and content tables', () => {
 
   it('stores every grade column as text, never as an integer', async () => {
     const result = await postgres.client.query<{ table_name: string; data_type: string }>(
@@ -509,32 +561,34 @@ describe('the one-way doors', () => {
     // deleting it destroys the evidence of how hard it really was.
     const studentId = await freshStudent();
     const questionId = await insertQuestion(postgres.client, chapterId, makeQuestion('resp'));
+    const sessionId = await openSession(studentId, chapterId, questionId);
     await postgres.client.query(
-      `insert into question_responses
-         (student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty)
-       values ($1, $2, 1, false, 4200, 'medium')`,
-      [studentId, questionId],
+      `insert into ${RESPONSES}
+         (session_id, student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty)
+       values ($1, $2, $3, 1, false, 4200, 'medium')`,
+      [sessionId, studentId, questionId],
     );
 
     await expect(
       postgres.client.query(`delete from questions where id = $1`, [questionId]),
-    ).rejects.toThrow(/question_responses_question_id_questions_id_fk/);
+    ).rejects.toThrow(new RegExp(`${RESPONSES}_question_id_questions_id_fk`));
   });
 
   it('takes a student’s responses with them when the account is deleted', async () => {
     const studentId = await freshStudent();
     const questionId = await insertQuestion(postgres.client, chapterId, makeQuestion('priv'));
+    const sessionId = await openSession(studentId, chapterId, questionId);
     await postgres.client.query(
-      `insert into question_responses
-         (student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty)
-       values ($1, $2, 0, true, 5000, 'easy')`,
-      [studentId, questionId],
+      `insert into ${RESPONSES}
+         (session_id, student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty)
+       values ($1, $2, $3, 0, true, 5000, 'easy')`,
+      [sessionId, studentId, questionId],
     );
 
     await postgres.client.query(`delete from users where id = $1`, [studentId]);
 
     const remaining = await postgres.client.query(
-      `select 1 from question_responses where student_user_id = $1`,
+      `select 1 from ${RESPONSES} where student_user_id = $1`,
       [studentId],
     );
     expect(remaining.rowCount).toBe(0);
@@ -543,14 +597,15 @@ describe('the one-way doors', () => {
   it('rejects a selected_index of 4 on a response', async () => {
     const studentId = await freshStudent();
     const questionId = await insertQuestion(postgres.client, chapterId, makeQuestion('sel'));
+    const sessionId = await openSession(studentId, chapterId, questionId);
     await expect(
       postgres.client.query(
-        `insert into question_responses
-           (student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty)
-         values ($1, $2, 4, false, 1000, 'easy')`,
-        [studentId, questionId],
+        `insert into ${RESPONSES}
+           (session_id, student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty)
+         values ($1, $2, $3, 4, false, 1000, 'easy')`,
+        [sessionId, studentId, questionId],
       ),
-    ).rejects.toThrow(/question_responses_selected_index_check/);
+    ).rejects.toThrow(new RegExp(`${RESPONSES}_selected_index_check`));
   });
 });
 
@@ -789,57 +844,29 @@ describe('rag_chunks — both halves of the hybrid retrieval pipeline', () => {
   });
 });
 
-describe('0002_learner_content — rollback', () => {
-  it('drops every new table and re-applies cleanly', async () => {
-    /**
-     * `0001_pedagogy` COMES OFF FIRST, and that ordering is the point.
-     *
-     * This harness applies the CURRENT migration set, which now ends with
-     * `0001_pedagogy` — three tables whose `chapter_id` references `chapters`.
-     * 0002's own down migration therefore cannot drop `chapters`: Postgres
-     * refuses with "other objects depend on it", which is exactly right and is
-     * the reason a rollback is exercised at all.
-     *
-     * The tempting repair is `drop ... cascade` in 0002's down file. That would
-     * silently delete a LATER migration's tables from inside an EARLIER
-     * migration's rollback, and would keep doing so for every migration added
-     * after it — the failure would move from a loud error here to no error
-     * anywhere. Peeling the newer migration off first is what a real rollback
-     * does, in the order a real rollback does it.
-     */
-    await run(readDownMigration('0001_pedagogy.down.sql'));
-    await run(readDownMigration('0002_learner_content.down.sql', 'superseded'));
-
-    const afterRollback = await tableNames();
-    for (const table of [
-      'students',
-      'student_subjects',
-      'chapter_mastery',
-      'chapters',
-      'questions',
-      'rag_chunks',
-      'question_responses',
-    ]) {
-      expect(afterRollback).not.toContain(table);
-    }
-    // The identity tables are untouched — a rollback that takes out migration
-    // 0000 with it is not a rollback.
-    expect(afterRollback).toContain('users');
-    expect(afterRollback).toContain('link_codes');
-
-    // Forward again on the rolled-back schema: a rollback that cannot be
-    // followed by a re-apply is not a rollback.
-    //
-    // BOTH migrations, in order. 0002's down drops `questions` outright, so it
-    // takes 0003's constraint with it and needs no separate rollback — but
-    // re-applying only 0002 would leave this database holding the SUPERSEDED
-    // positional-array constraint, which is a quietly wrong schema for
-    // anything that runs afterwards.
-    await run(readMigration('0002_learner_content.sql', 'superseded'));
-    await run(readMigration('0003_misconception_object.sql', 'superseded'));
-    // And 0001 back on top, in the order it came off.
-    await run(readMigration('0001_pedagogy.sql'));
-    expect(await tableNames()).toContain('rag_chunks');
-    expect(await tableNames()).toContain('chapter_concepts');
-  }, 120_000);
-});
+// ---------------------------------------------------------------------------
+// DELETED: `0002_learner_content — rollback`
+//
+// It peeled `0001_pedagogy` off the applied schema, ran the SUPERSEDED
+// `0002_learner_content` down file, then re-applied three migrations by name.
+// Three reasons it is gone rather than repaired:
+//
+//  1. IT ASSERTED A FICTION. `0002_learner_content` no longer exists as a
+//     discrete step. The deployed history is `0000_baseline`, collapsed out of
+//     the 0000-0008 chain (D-091), and the table it dropped —
+//     `question_responses` — no longer exists under that name either (D-057).
+//     Nothing will ever run that down file against a real database.
+//
+//  2. IT WAS THE D-075 SHAPE, written as four statements so the lint rule
+//     could not see the list. Four hand-ordered migration names IS a list. The
+//     rule has since been strengthened to count them (see `eslint.config.js`).
+//
+//  3. THE PROPERTY IT WAS REACHING FOR IS BETTER TESTED GENERICALLY. Plan §4
+//     rule 4 now lives in `migration-round-trip.test.ts`, driven by
+//     `listMigrations()` over the CURRENT set — the only set anyone can
+//     actually roll back — and it needs no edit when a migration is added.
+//
+// The superseded chain is still exercised, verbatim and in full, by
+// `baseline-collapse.test.ts`, which diffs the catalogue it produces against
+// the baseline's. That is the oracle, and it is the only job those files have.
+// ---------------------------------------------------------------------------

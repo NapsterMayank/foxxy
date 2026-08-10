@@ -1,40 +1,52 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PLATFORM_ROLES, SIGNUP_ROLES } from '@/shared/constants/roles';
-import {
-  applyAllMigrations,
-  readDownMigration,
-  readMigration,
-  splitStatements,
-  startTestPostgres,
-  type TestPostgres,
-} from '../helpers/postgres';
+import { applyAllMigrations, startTestPostgres, type TestPostgres } from '../helpers/postgres';
 
 /**
- * Migrations 0004-0007 — the foundation hooks from 05-ROADMAP.md §8.
+ * THE FOUNDATION HOOKS — 05-ROADMAP.md §8 — AS PROPERTIES OF THE APPLIED
+ * SCHEMA, not as assertions about particular migration files.
  *
- * Two things are proven here, and they are different things.
+ * ===========================================================================
+ * WHY THIS FILE WAS REWRITTEN, AND WHAT THE DEFECT ACTUALLY WAS (D-075, fifth
+ * occurrence).
  *
- * FIRST, plan §4 rule 4: each migration applies, rolls back and re-applies.
- * That is the bottom describe block, and it is run in reverse order because
- * that is how a real rollback goes.
+ * It used to be called "migrations 0004-0007". It applied the current set, then
+ * PEELED THE NEWEST MIGRATION BACK OFF in `beforeAll` to reach the world those
+ * superseded files described, and its last test rolled the superseded 0004-0008
+ * chain backwards by name. Every new migration broke it, and every previous
+ * repair was the same repair: add one more `readDownMigration(...)` line. It
+ * had been patched that way for `0002_practice` (D-106) and it broke again the
+ * moment `0003_parent` landed.
  *
- * SECOND, and the larger half: THE COLUMNS AND CONSTRAINTS DO WHAT THE HEADERS
- * CLAIM. A `tenant_id` that silently defaults to null buys nothing. A widened
- * role CHECK that also widened signup is a privilege-escalation hole. An
- * evidence column with no CHECK is a column that will hold a shuffled index.
- * Every assertion below exists because the thing it checks would otherwise fail
- * quietly.
+ * The peel was never the point. Everything below is a property of the schema
+ * this product actually ships — tenancy is real and defaulted, the role CHECK
+ * is wide while signup is narrow, the evidence columns are documented and
+ * constrained, notifications require both languages, jobs deduplicate. Those
+ * properties are asserted here against WHATEVER `applyAllMigrations()`
+ * produces, discovered from the directory and cross-checked against Drizzle's
+ * journal. A migration added tomorrow needs no edit to this file; a migration
+ * that BREAKS one of these properties fails here, which is the only thing this
+ * file was ever for.
+ *
+ * The rollback half moved to `migration-round-trip.test.ts`, generalised. See
+ * the note at the bottom of this file for what was deleted and why.
+ *
+ * ===========================================================================
+ * THE TABLE IS `practice_responses`, NOT `question_responses`.
+ *
+ * `0002_practice` renamed it (D-057), carrying every evidence column, comment
+ * and CHECK across. The old name is the pre-rename world, and this file no
+ * longer pretends to live there — the superseded SQL that spells it
+ * `question_responses` is still exercised verbatim, as an oracle, by
+ * `baseline-collapse.test.ts`.
  */
 
 let postgres: TestPostgres;
 
 const DEFAULT_TENANT = '11111111-1111-4111-8111-111111111111';
 
-async function run(sql: string): Promise<void> {
-  for (const statement of splitStatements(sql)) {
-    await postgres.client.query(statement);
-  }
-}
+/** The evidence table, post-rename. One name, used everywhere below. */
+const RESPONSES = 'practice_responses';
 
 async function tableNames(): Promise<string[]> {
   const result = await postgres.client.query<{ table_name: string }>(
@@ -55,22 +67,10 @@ async function columnNames(table: string): Promise<string[]> {
 
 beforeAll(async () => {
   postgres = await startTestPostgres();
+  // THE WHOLE SET, AND NOTHING PEELED OFF IT. `applyAllMigrations` discovers
+  // the migrations from the directory and cross-checks Drizzle's journal, so
+  // this line is already correct for every migration that will ever be added.
   await applyAllMigrations(postgres.client);
-/**
- * `0002_practice` COMES OFF FIRST — the D-106 rule, one migration later.
- *
- * This harness applies the CURRENT migration set, whose newest member renames
- * `question_responses` to `practice_responses` (D-057). Everything below is
- * about the world BEFORE that rename — it exercises the superseded 0004-0008
- * chain, which names the old table throughout and which cannot be edited.
- *
- * Peeling the newer migration off is what a real rollback does, in the order a
- * real rollback does it. The alternatives are both worse: rewriting these
- * assertions to the new name would make them claim to test SQL that does not
- * mention it, and editing the superseded files would destroy the oracle
- * `baseline-collapse.test.ts` diffs the baseline against.
- */
-  await run(readDownMigration('0002_practice.down.sql'));
 }, 180_000);
 
 afterAll(async () => {
@@ -78,7 +78,7 @@ afterAll(async () => {
 }, 60_000);
 
 // ---------------------------------------------------------------------------
-// 0004_tenancy
+// Tenancy
 // ---------------------------------------------------------------------------
 
 const TENANTED_TABLES = [
@@ -87,10 +87,10 @@ const TENANTED_TABLES = [
   'students',
   'student_subjects',
   'chapter_mastery',
-  'question_responses',
+  RESPONSES,
 ] as const;
 
-describe('0004_tenancy — the sharpest hook on the roadmap', () => {
+describe('tenancy — the sharpest hook on the roadmap', () => {
   it('seeds exactly ONE tenant, at the fixed id the code expects', async () => {
     // A literal rather than a lookup, written identically in the migration, in
     // `schema/tenants.ts` and here. The alternative is a runtime "find the
@@ -160,10 +160,10 @@ describe('0004_tenancy — the sharpest hook on the roadmap', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 0005_roles_schools_audit
+// Roles, schools and audit
 // ---------------------------------------------------------------------------
 
-describe('0005 — the role CHECK widens to ten values', () => {
+describe('the role CHECK carries ten values', () => {
   it('accepts every PLATFORM_ROLE', async () => {
     // Widening a CHECK takes an ACCESS EXCLUSIVE lock and a full validation
     // scan. On a few dozen development accounts that is imperceptible; on the
@@ -202,7 +202,7 @@ describe('0005 — the role CHECK widens to ten values', () => {
   });
 });
 
-describe('0005 — the schools/classes stub', () => {
+describe('the schools/classes stub', () => {
   it('creates all three tables', async () => {
     const names = await tableNames();
     expect(names).toContain('schools');
@@ -284,12 +284,12 @@ describe('0005 — the schools/classes stub', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 0006_evidence_capture
+// Evidence capture
 // ---------------------------------------------------------------------------
 
-describe('0006 — evidence capture, the unrecoverable hook', () => {
-  it('adds all five columns', async () => {
-    const columns = await columnNames('question_responses');
+describe('evidence capture — the unrecoverable hook', () => {
+  it('carries all five columns', async () => {
+    const columns = await columnNames(RESPONSES);
     for (const column of [
       'first_selected_index',
       'answer_changed',
@@ -306,11 +306,12 @@ describe('0006 — evidence capture, the unrecoverable hook', () => {
     // a duplicate of `selected_index`; `confidence` reads like a model output.
     // The person who writes the Phase 1 teacher screen is not the person who
     // wrote this migration, and the names alone will actively mislead them. A
-    // `\d+ question_responses` has to be enough.
+    // `\d+ practice_responses` has to be enough.
     const result = await postgres.client.query<{ column_name: string; description: string }>(
       `select a.attname as column_name, col_description(a.attrelid, a.attnum) as description
          from pg_attribute a
-        where a.attrelid = 'question_responses'::regclass and a.attnum > 0 and not a.attisdropped`,
+        where a.attrelid = $1::regclass and a.attnum > 0 and not a.attisdropped`,
+      [RESPONSES],
     );
     const described = new Map(result.rows.map((row) => [row.column_name, row.description]));
     for (const column of [
@@ -332,7 +333,8 @@ describe('0006 — evidence capture, the unrecoverable hook', () => {
     // column serves.
     const result = await postgres.client.query<{ is_nullable: string; column_default: string }>(
       `select is_nullable, column_default from information_schema.columns
-        where table_name = 'question_responses' and column_name = 'hint_level_used'`,
+        where table_name = $1 and column_name = 'hint_level_used'`,
+      [RESPONSES],
     );
     expect(result.rows[0]?.is_nullable).toBe('NO');
     expect(result.rows[0]?.column_default).toBe('0');
@@ -347,7 +349,8 @@ describe('0006 — evidence capture, the unrecoverable hook', () => {
 
     const check = await postgres.client.query<{ definition: string }>(
       `select pg_get_constraintdef(oid) as definition from pg_constraint
-        where conname = 'question_responses_confidence_check'`,
+        where conname = $1`,
+      [`${RESPONSES}_confidence_check`],
     );
     expect(check.rows[0]?.definition).toContain('unsure_ish');
   });
@@ -359,8 +362,9 @@ describe('0006 — evidence capture, the unrecoverable hook', () => {
     // an unexpected value costs a report line rather than a wrong answer.
     const check = await postgres.client.query<{ count: string }>(
       `select count(*)::text from pg_constraint
-        where conrelid = 'question_responses'::regclass
+        where conrelid = $1::regclass
           and pg_get_constraintdef(oid) ilike '%explanation_format_used%'`,
+      [RESPONSES],
     );
     expect(check.rows[0]?.count).toBe('0');
   });
@@ -371,7 +375,8 @@ describe('0006 — evidence capture, the unrecoverable hook', () => {
     // because both values are individually plausible.
     const check = await postgres.client.query<{ definition: string }>(
       `select pg_get_constraintdef(oid) as definition from pg_constraint
-        where conname = 'question_responses_answer_changed_check'`,
+        where conname = $1`,
+      [`${RESPONSES}_answer_changed_check`],
     );
     expect(check.rows[0]?.definition).toContain('answer_changed');
     expect(check.rows[0]?.definition).toContain('first_selected_index');
@@ -379,10 +384,10 @@ describe('0006 — evidence capture, the unrecoverable hook', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 0007_notify_metrics_jobs
+// Notifications, jobs and metrics
 // ---------------------------------------------------------------------------
 
-describe('0007 — notifications require BOTH languages', () => {
+describe('notifications require BOTH languages', () => {
   it('rejects a notification with an empty Hindi body', async () => {
     // P7, enforced at the database as well as in the type system. Types do not
     // survive a raw INSERT, and NOT NULL alone does not stop `hi = ''` being
@@ -411,7 +416,7 @@ describe('0007 — notifications require BOTH languages', () => {
   });
 });
 
-describe('0007 — the jobs table', () => {
+describe('the jobs table', () => {
   it('makes (kind, idempotency_key) UNIQUE', async () => {
     // The constraint that makes "enqueue twice, run once" a property of
     // Postgres rather than of a check-then-insert two instances can both pass.
@@ -434,7 +439,7 @@ describe('0007 — the jobs table', () => {
   });
 });
 
-describe('0007 — metrics_events', () => {
+describe('metrics_events', () => {
   it('accepts only the three instrument kinds', async () => {
     await expect(
       postgres.client.query(
@@ -453,73 +458,31 @@ describe('0007 — metrics_events', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Rollback — plan §4, rule 4
+// DELETED: `every foundation migration rolls back and re-applies`
+//
+// It rolled the SUPERSEDED 0004-0008 chain backwards by name and forwards
+// again. Three reasons it is gone rather than repaired:
+//
+//  1. IT ASSERTED A FICTION. Those five migrations no longer exist as discrete
+//     steps. The deployed history is `0000_baseline`, which was collapsed out
+//     of them (D-091). Nothing will ever roll 0007 back to 0006 again, in any
+//     environment, so "that sequence still works" is not a fact about this
+//     product — and a test whose subject cannot occur is a test that can only
+//     ever cost maintenance.
+//
+//  2. IT WAS THE D-075 SHAPE, expressed as ten statements instead of an array
+//     so the lint rule could not see it. Ten hand-ordered migration names IS a
+//     list; writing it vertically does not change what it claims. The rule has
+//     since been strengthened to count them (see `eslint.config.js`).
+//
+//  3. THE PROPERTY IT WAS REACHING FOR IS BETTER TESTED GENERICALLY. Plan §4
+//     rule 4 — every migration applies, reverses and re-applies — now lives in
+//     `migration-round-trip.test.ts`, driven by `listMigrations()`. It covers
+//     the CURRENT set, which is the set anyone can actually roll back, and it
+//     covers `0003_parent` and everything after it with no edit.
+//
+// The superseded chain is not abandoned: `baseline-collapse.test.ts` still
+// applies all nine of those files verbatim and diffs the resulting catalogue
+// against the baseline's. That is the oracle, and it is the only job those
+// files still have.
 // ---------------------------------------------------------------------------
-
-describe('every foundation migration rolls back and re-applies', () => {
-  it('reverses 0007 → 0004 in order, then re-applies cleanly', async () => {
-    // In REVERSE, which is how a real rollback goes and is also the only order
-    // that works: `schools.tenant_id` references `tenants`, so 0005 has to come
-    // off before 0004 can.
-    //
-    // The `users` rows created above are all `student` or `parent`, EXCEPT the
-    // ones the role-widening test inserted — so 0005's rollback, which narrows
-    // the CHECK back to two values, would abort. That is the correct behaviour
-    // and is documented in the down file; here the widened rows are removed
-    // first so the rest of the rollback can be exercised.
-    await postgres.client.query(
-      `delete from users where role not in ('student', 'parent')`,
-    );
-    // `notifications` and `class_enrolments` cascade from `users`; the audit
-    // rows do not, and DELETE on `audit_log` is refused by design.
-    await postgres.client.query('truncate table audit_log');
-
-    // 0008 first: it constrains columns 0004 created, so it comes off before
-    // the migration that owns them. (Dropping a column would take its NOT NULL
-    // with it either way — the order is stated because a rollback sequence that
-    // works by accident is one nobody can extend.)
-    await run(readDownMigration('0008_tenant_not_null.down.sql', 'superseded'));
-    await run(readDownMigration('0007_notify_metrics_jobs.down.sql', 'superseded'));
-    await run(readDownMigration('0006_evidence_capture.down.sql', 'superseded'));
-    await run(readDownMigration('0005_roles_schools_audit.down.sql', 'superseded'));
-    await run(readDownMigration('0004_tenancy.down.sql', 'superseded'));
-
-    const afterRollback = await tableNames();
-    for (const table of [
-      'tenants',
-      'schools',
-      'classes',
-      'class_enrolments',
-      'audit_log',
-      'notifications',
-      'metrics_events',
-      'worker_heartbeats',
-      'jobs',
-    ]) {
-      expect(afterRollback).not.toContain(table);
-    }
-    // Migrations 0000-0003 are untouched. A rollback that takes an earlier
-    // migration with it is not a rollback.
-    expect(afterRollback).toContain('users');
-    expect(afterRollback).toContain('question_responses');
-    expect(await columnNames('users')).not.toContain('tenant_id');
-    expect(await columnNames('question_responses')).not.toContain('confidence');
-
-    // Forward again on the rolled-back schema. A rollback that cannot be
-    // followed by a re-apply is not a rollback.
-    await run(readMigration('0004_tenancy.sql', 'superseded'));
-    await run(readMigration('0005_roles_schools_audit.sql', 'superseded'));
-    await run(readMigration('0006_evidence_capture.sql', 'superseded'));
-    await run(readMigration('0007_notify_metrics_jobs.sql', 'superseded'));
-    await run(readMigration('0008_tenant_not_null.sql', 'superseded'));
-
-    expect(await tableNames()).toContain('tenants');
-    expect(await columnNames('users')).toContain('tenant_id');
-    expect(await columnNames('question_responses')).toContain('confidence');
-
-    // And the seeded tenant is back, at the same fixed id — the re-apply is
-    // genuinely idempotent rather than merely non-erroring.
-    const tenants = await postgres.client.query<{ id: string }>('select id from tenants');
-    expect(tenants.rows).toEqual([{ id: DEFAULT_TENANT }]);
-  }, 120_000);
-});
