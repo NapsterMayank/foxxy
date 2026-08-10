@@ -15,6 +15,7 @@ Last updated: **10 August 2026**
 | Project | Alfanumrik platform · Foxy AI tutor · Foxxy repository |
 | Flows | Student · Parent |
 | Core capability | Foxy — NCERT-grounded RAG tutor with citations |
+| Retrieval | **CALIBRATED.** Sparse half rewritten to OR + `ts_rank_cd`: zero-candidate rate **44.4% to 0.0%**, mean candidates 3.87 to 49.19. Abstain threshold is now **MEASURED** (0.029877) against real voyage-3 distributions, on a 5% false-abstain budget rather than the midpoint, which would have wrongly refused 24% of answerable questions (D-216) |
 | Corpus | **IMPORTED.** 137 chapters · 4,686 chunks · 2,741 questions · 639 concepts · 176 edges · 57 misconception patterns |
 | Architecture | Modular backend + isolated product frontend + marketing/CMS deployable |
 | Team | 1 engineer |
@@ -23,7 +24,7 @@ Last updated: **10 August 2026**
 | Backend processes | **2** — `api` and `worker`. The worker exists and runs one real job |
 | Frontend | **scaffolded** - 81 source files under `frontend/src`, committed. Build-order step 0 (the five foundation gaps) not yet closed |
 | Marketing site | **scaffolded** - 32 files under `website/`, committed. Per `06-FRONTEND-SEPARATION-PLAN.md` |
-| Tests | **2,510 passing**, 137 files. The integration pass added 16: eight in `tests/integration/migration-journal-order.test.ts` (the journal-ordering rule, D-174), six in `src/app/__tests__/wiring.test.ts` (the payments boot refusal, D-176) and two in `routes.test.ts` (which modules register routes, and the `signals`←`practice` anti-cheat edge) |
+| Tests | **2,654 passing**, 142 files. The mutation audit added 144: request-inspection and split-marker tests in `foxy`, fast-lane query-builder and pool-startup tests in `retrieval`, shuffle-map and write-path tests in `practice`, `identity.authz-mutation.test.ts` (the module that owns the boundary was the last without one), service-level tenant tests in `content`, wire-level channel and Devanagari tests in `notify`, and the database half of digest idempotency in `parent` |
 | Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice` + `0003_parent` + **`0004_billing`** + **`0005_foxy`**. Every one has a rollback test, because the round-trip is asserted over the DISCOVERED set rather than per file (D-126) — neither `0004` nor `0005` needed an edit to that test. **Neither has been applied to the development database**, deliberately, for the same reason `0002` has not: see open item 16. ✅ **`0004_billing`'s journal `when` is FIXED** — it was 1786374108357, below `0003_parent`'s 1786700000000, which is the exact D-109 hazard: drizzle selects by `when` and not by `idx`, so on any database already past `0003` it printed "Migrations applied." and applied nothing. **Reproduced on a scratch database before the fix** (`subscriptions` and `payment_events` absent, `0005` applied over the hole, exit code zero), corrected to **1786750000000**, and re-verified both from empty and from a ledger primed to `0003`. The rule is now enforced by `tests/integration/migration-journal-order.test.ts`, which was itself proved to fire by reverting the value. The round-trip test could not have caught this and never could: it applies by `idx` and never reads `when` (D-173, D-174) |
 | Gates | type-check · lint · build · test — all green. `platform/authz` stays **100%**; `billing/domain` 98.5% statements / 96.2% branches / 100% functions, `billing.service` 99.2% / 95.1% / 90%, `platform/payments` 100% statements. `parent/domain` 100%, `parent.service` 94.0%, `retrieval` 99.1%, `practice/domain` 100%. **`modules/foxy` 96.3% statements / 90.4% branches / 94.6% functions**, with `foxy/domain` at 100%/99.0%/100% and `platform/llm` at 98.5% — the real LLM adapter is fully covered and never called |
 | Deployment | **BUILT, 10 August.** `docker/compose.prod.yml` — postgres+pgvector · valkey · api · worker · alert evaluator · frontend · website · Caddy · backup. Three multi-stage non-root Dockerfiles, resource limits on EVERY service, an `internal: true` data network with no published ports, and volume names (`foxxy_prod_*`) that cannot collide with the development ones holding the corpus (D-140). Validated with `docker compose config` |
@@ -31,42 +32,30 @@ Last updated: **10 August 2026**
 | Backups | **BUILT AND DRILLED, 10 August.** Continuous WAL archiving plus a nightly base backup to a SECOND volume; `restore.sh`, `restore-drill.sh` and `drill-selftest.sh`. The drill was EXECUTED against a scratch database: PASS on a good backup, FAIL on a tampered one. Two real defects were found by running it (D-149) |
 | Alerting | **BUILT, 10 August.** `backend/scripts/ops/` — 11 rules over 9 signals read from `metrics_events`, split explicitly into what PAGES a human and what files a TICKET, delivered through the existing `notify-channel` port rather than a second notification path (D-147) |
 | Estimated remaining | **~92 days ≈ 19 weeks solo** |
-| Git | **4 commits**, latest `45241c7`. Working tree has the `parent` + `retrieval` wiring STAGED, uncommitted. No remote configured |
+| Git | **6 commits**, latest `73d407b`. Working tree clean. No remote configured - **CI has therefore never executed** |
 
 ---
 
 ## 2. THE NEXT ACTION
 
-> **`foxy` IS BUILT (build step 10, 10 August).** The core capability exists:
-> a guided NCERT-grounded tutor with verified citations, first-class abstention,
-> a safety classifier that runs before the model, per-plan usage limits and a
-> trace row for every turn. Five endpoints, one of them SSE.
->
-> **The next action is now the two items below, both of which gate QUALITY
-> rather than existence, plus obtaining the LLM key.** Nothing in `foxy` can be
-> judged good or bad until the abstention threshold is calibrated and a real
-> model is behind the port — today it runs against a scripted fake, which proves
-> the plumbing and says nothing about the answers.
+> **Three things only you can supply. Everything else is unblocked.**
 
-Two things that are unblocked and still unmeasured:
+1. **`LLM_API_KEY` in `backend/.env`.** Foxy runs entirely on a scripted fake that does not read the prompt, so **answer quality is completely unmeasured**. This also gates content generation - hint ladders, misconception tags and Hindi questions are all still at zero.
+2. **A git remote.** Four CI workflows exist and every gate was proven to fail locally, but **GitHub Actions has never executed a single job**. Path-scoping, service containers and the secret scanner are unverified in their real environment. This is the largest untested thing in the project.
+3. **The plan-to-Foxy-limit mapping.** `app/routes.ts` still passes `readPlan: () => null`, so **a paying customer receives the free-tier message cap**. `foxy`'s `PlanReader` takes no actor; `billing.getEntitlements` requires one. Wiring them needs a decision on mapping `free|monthly|yearly` onto Foxy's plans - guessing silently is how someone pays and gets nothing.
 
-1. **Threshold calibration by measurement, never by guess.** The harness exists
-   (`eval/retrieval/calibrate.ts`, `npm run eval:retrieval:calibrate`) and is
-   blocked ONLY on `VOYAGE_API_KEY`. Until it runs, `ABSTAIN_THRESHOLD` ships
-   marked `UNCALIBRATED` in its own type and set to the minimum achievable fused
-   score, so it is INERT — it filters nothing rather than filtering everything,
-   which is the failure the previous system had for a year. A test asserts both
-   the marking and the inertness. **Calibrate against ~3,487 DISTINCT chunks, not
-   4,686** — see D-108.
-2. **Re-embed the 20 NULL-embedding chunks** (D-078). In the database, reachable
-   by full-text search, invisible to vector search. Ids in
-   `.corpus-extract/reports/chunks-without-embedding.txt`.
+### Unblocked and ready
 
-`npm run eval:retrieval:sparse` needs no key at all and measures the sparse half
-against the real corpus today. Both scripts are read-only and both are now
-declared in `package.json` — they were documented in the harness headers and
-missing from the manifest, so the commands the comments told you to run did not
-exist.
+| | Days |
+|---|---|
+| Integration suite - the two golden journeys | 3 |
+| Apply migrations to the dev database (still on `0001`) | 0.25 |
+| Remaining open items in section 7 | 3 |
+| Frontend build-order step 0 - the five foundation gaps, still not closed | 4 |
+
+### What the audit changed about how this codebase is verified
+
+**A guard is not enforced until a mutation of it has been shown to turn a named test red.** Nine defects of one shape have now been found - enforcement that looks installed and enforces nothing - and every one was found by deliberate breakage rather than by review, coverage, or a passing suite. Seven modules now carry an `*.authz-mutation.test.ts`; that is the pattern to copy for anything new. See D-214.
 
 ---
 
@@ -737,6 +726,7 @@ per-chapter counts are in `.corpus-extract/reports/chapter-readiness.ndjson`.
 
 | 10 Aug 2026 | **`foxy` — the core capability.** Migration `0005_foxy` (`chat_sessions`, `chat_messages`, `retrieval_traces`, forward/rollback proven); 15 module files; 8 domain modules at 100% coverage; five endpoints, one of them SSE. **Guided interface, not open chat** — 3 modes × 6 fixed actions, both TOTAL `Record`s so a new value cannot reach the prompt assembler without a label, an instruction, a budget and a translation (D-163). **Abstention never calls the model** and arrives as a successful 200 with its own frame, its own stored message and its own trace (D-165). **Citations are verified INCREMENTALLY**, so a fabricated marker is stripped before the student sees it rather than after (D-164). Safety classifier before the model, with a real helpline in the harm case and a ten-case false-positive table (D-166). `platform/llm` completed: scripted fake + real adapter, fully tested against a mocked HTTP layer, never called, boot-checked in production (D-170). **A real ordering bug found by the fixed clock** — a question and its reply share a millisecond, so `created_at` cannot order a transcript; `seq bigserial` now does (D-168). **Three authorisation mutations installed and all three observable** — no unenforced guard this time (D-172). D-163..D-172 | 2,491 |
 | 10 Aug 2026 | **Deployment, CI/CD, backups and alerting.** `docker/compose.prod.yml` (9 services, resource limits on every one, an `internal: true` data network with no published ports, volume names that cannot collide with the corpus); three multi-stage non-root Dockerfiles; Caddy for three hostnames with a **dedicated SSE policy** — buffering off, 300s upstream read — because getting it wrong breaks Foxy while looking like a model problem. Path-scoped per-app workflows plus a real `ci-gate` fan-in; a self-testing secret scanner closing D-096; migrations as an explicit step that CHECKS THE CATALOGUE (D-109). Continuous WAL archiving + nightly base backup to a SECOND volume, with a restore drill that was RUN and a self-test proving the drill can FAIL. An alert evaluator that finally READS `metrics_events`. **Eight gates each proven to fail on a deliberate violation**, and two of the proofs found defects in the gates themselves. D-140..D-149, D-160..D-162 | 1,993 |
+| 10-11 Aug 2026 | **Mutation audit and remediation.** Eleven agents broke every guard, threshold and validation in the codebase. **2,510 passing tests had not noticed 23 defects** - retrieval abstaining on 44% of answerable questions, Foxy's system prompt deletable with 170/170 green, anti-cheat rule 2 firing on 0.105% of its target, a session token in plaintext logs, four guards comparing a value with itself, and a coverage report calling a grade orderable while it produced zero paths. All fixed, three of them structurally rather than by adding assertions. D-178..D-216 | 2,654 |
 
 ## 12. Update protocol
 

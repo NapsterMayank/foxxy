@@ -1024,7 +1024,7 @@ The chain is **linked rather than truncated**: `0008_snapshot.prevId` equals `00
 
 **The alternative, offered for the user to decide:** collapsing 0000-0008 into a single baseline migration plus one snapshot would give a genuinely gapless chain. It is deliberately not done here because it rewrites migrations already applied to development databases.
 
-### D-080 · The rate limiter moves to `platform`, and the global limit hooks `onRoute`
+### D-206 · The rate limiter moves to `platform`, and the global limit hooks `onRoute`
 **Status:** Active
 
 Plan section 6.9's last row — 100 requests per minute for any authenticated caller — was declared in `shared/constants/rate-limits.ts` and enforced nowhere, deferred on "a second module having routes". There are three, and `/me/*` and `/content/*` were unthrottled for anyone holding a session.
@@ -3034,7 +3034,7 @@ the failure.
 Proven by widening the injected search to merge grade 6 and mathematics results:
 the leakage test fails on the retrieved ids.
 
-### D-178 · `identity` gets the mutation test the other three modules already had
+### D-207 · `identity` gets the mutation test the other three modules already had
 **Status:** Active
 
 `billing`, `foxy` and `parent` each carried a `*.authz-mutation.test.ts`.
@@ -3053,7 +3053,7 @@ call — and asserts each is OBSERVABLE. The read side of D-073 is now pinned;
 the existing D-073 tests covered the WRITE side only. **5 of its 9 tests go red** 
 under the mutation.
 
-### D-179 · `content.authoriseRead` is asserted through the SERVICE, per use-case
+### D-208 · `content.authoriseRead` is asserted through the SERVICE, per use-case
 **Status:** Active
 
 Replacing the body of `authoriseRead` with a no-op left **50/50 passing**.
@@ -3080,7 +3080,7 @@ asserts the authz table refuses writes and nothing about whether
 `content.service` consults the guard. Its comment claimed otherwise; the comment
 now states its real scope.
 
-### D-180 · The delivery plan's channel decision is enforced on the wire, and now observed
+### D-209 · The delivery plan's channel decision is enforced on the wire, and now observed
 **Status:** Active
 
 `notify.service.ts`'s `optOut` subtraction —
@@ -3112,7 +3112,7 @@ the one-row edit where it actually lands — on the PLAN, by amending the job
 payload — and asserts both channels received the real message, counted
 separately.
 
-### D-181 · `notify` could not tell Hindi from English
+### D-210 · `notify` could not tell Hindi from English
 **Status:** Active
 
 `BilingualText` is a PROPERTY NAME, not a language: `{ en: 'x', hi: 'x' }`
@@ -3135,7 +3135,7 @@ insert SUCCEEDS and an English string is filed as somebody's Hindi, permanently.
 The channel is called directly, because this is the ADAPTER's rule and
 `notify.send` is not its only caller.
 
-### D-182 · The database half of digest idempotency is now observed
+### D-211 · The database half of digest idempotency is now observed
 **Status:** Active
 
 `parent.repository.insertDigest` ends in `ON CONFLICT ... DO NOTHING`, and its
@@ -3155,7 +3155,7 @@ caller effectively is, and asserts two things rather than one: `created: false`
 read, with a different summary and a different `generatedAt`). A row COUNT alone
 would not distinguish them, which is why the assertions are about content.
 
-### D-183 · Two comments that asserted coverage which did not exist
+### D-212 · Two comments that asserted coverage which did not exist
 **Status:** Active
 
 **`parent.routes.test.ts`'s oracle test.** Its docstring listed a fifth deny case
@@ -3469,3 +3469,60 @@ All were re-run and pass. A test that genuinely wants the score-based path now p
 So `RetrievalService` now exposes the **resolved** threshold — after `deps.threshold ?? ABSTAIN_THRESHOLD` and after both constructor guards — and `wiring.test.ts` asserts on it: the provenance is `MEASURED`, the value is `0.029877369007803793`, it is strictly greater than zero, and the **background worker's is the same object shape as the API process's** (two construction sites, two places an override could land on one and not the other; Foxy and the worker would then disagree about what "we do not know" means). Read-only and carrying its provenance, so nothing can consume it as a bare number without also being handed the evidence.
 
 **Verified by re-applying the P12 mutation the failing test exists to catch** — dropping `{ role: 'system', … }` from `toLlmRequest`, which deletes the grounding rule, the citation instruction, the grade/subject scope and the age rails from what the model receives. 7 tests fail under it, including the one this entry fixed. **A repair that makes a test green but blunts its mutation is worse than the failure it replaced**, and that is the check that distinguishes the two.
+
+---
+
+## Audit and remediation wave — 10-11 August 2026
+
+### D-213 · Eleven parallel agents collided on this file's numbering
+**Status:** Active — a process rule, not a code change
+Seven read-only auditors and six fixers ran in parallel. Several appended entries at the same time, each choosing its number from the maximum present when it started. Result: **D-080 and D-178 through D-183 were each claimed twice, by different agents, for different content.** Three agents flagged the risk in their reports; none could avoid it, because the number is chosen at write time and the file is append-only.
+
+Renumbered on 11 August: the second claimant of each became D-206 through D-212. No content was lost or merged.
+
+**Rule going forward:** a monotonically increasing identifier assigned at write time cannot be made collision-safe across concurrent writers. Either the orchestrator assigns ranges before spawning, or entries are keyed by something that does not need coordination — a date plus a slug. **The orchestrator assigning a range per agent is the cheaper fix and is what will be done.**
+
+Note that `D-059`, `D-073` and `D-075` also appear twice, and those are **deliberate**: a later entry marking the original RESOLVED, in place, so the history reads forwards. That pattern stays.
+
+### D-214 · Mutation testing found nine defects that 2,510 passing tests did not
+**Status:** Active — this is now the standard for any guard
+Eleven agents audited every module by **breaking each guard, validation and threshold in the source and checking whether a test went red.** The suite was fully green before, during and after.
+
+What a green suite did not notice:
+
+| Defect | Detection before |
+|---|---|
+| Retrieval abstained on 24 of 54 known-good in-corpus questions | none — no test measured recall |
+| `ts_rank` saturated at 1.0; top twelve ordered by random UUID | none |
+| The abstain threshold was arithmetically unreachable | a **tautological** test comparing the constant to the expression that defined it |
+| Foxy's system message could be deleted, temperature set to 1.5, budget quadrupled | 170/170 passed |
+| Anti-cheat rule 2 fired on 0.105% of the behaviour it targets | 100% under the harness's constant-random shuffle |
+| `timeSpentMs` had no server-side bound despite the contract claiming one | none |
+| The session token was logged in plaintext | a test that ran at the service layer, where the HTTP hook never fires |
+| Four guards compared a value with itself or could be gutted entirely | none |
+| `knowledge` reported a grade as fully covered and orderable while producing zero paths | none — the report and the feature projected different graphs |
+
+**The pattern is now at nine instances**: enforcement that looks installed and enforces nothing. Every single one was found by deliberate breakage, and none by review, coverage, or a passing suite.
+
+**Standing rule:** a guard is not considered enforced until a mutation of it has been shown to turn a named test red. Modules with an `*.authz-mutation.test.ts` file are the pattern to copy — after this wave, `identity`, `content`, `notify`, `parent`, `billing`, `foxy` and `practice` all have one.
+
+### D-215 · Three fixes were made structural rather than test-only
+**Status:** Active
+Where a defect was a missing assertion, the temptation is to add the assertion. Three fixes deliberately went further, because an assertion protects one call site and a constructor protects all of them.
+
+- **Foxy's request** now has exactly one builder, which **refuses** a blank system message, a temperature above the ceiling, or a non-positive budget. The trace renders from the messages that were sent, so it cannot describe a prompt the model never received.
+- **The abstain threshold** carries `candidateLimit` as a required field, and both scale guards run in the service constructor on the resolved value. A depth-100 override is now a boot failure rather than a silent drop of ranks 51-100.
+- **The anti-cheat presentation index** is optional and, when absent, the rule is **skipped rather than falling back** to the canonical index. A fallback would silently reinstate the defect for whichever caller forgot.
+
+### D-216 · The calibration policy was chosen against the shipped algorithm
+**Status:** **Needs assessment review**
+With the Voyage key working, the threshold was calibrated on 54 in-corpus and 20 off-syllabus questions. The distributions **overlap**, so the placement rule is the policy, and the two candidate rules differ by six times:
+
+| rule | value | off-syllabus refused | **in-corpus wrongly refused** |
+|---|---|---|---|
+| 5/95 midpoint — the shipped `suggestThreshold` | 0.031200 | 55.0% | **24.1%** |
+| 5% false-abstain budget — **adopted** | **0.029877** | 35.0% | **3.7%** |
+
+The midpoint was rejected: refusing 24% of answerable questions contradicts the asymmetry the calibration module's own header argues for. The budget rule was added alongside rather than replacing it, and the chosen policy is recorded in the provenance.
+
+**This is a product decision sitting in a constant.** 35% off-syllabus rejection means the threshold is a floor, not a relevance detector — Foxy's grounding instruction owns the rest. Assessment should confirm the 5% budget is the right trade.
