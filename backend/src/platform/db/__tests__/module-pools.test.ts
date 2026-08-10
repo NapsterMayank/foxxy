@@ -77,6 +77,13 @@ describe('MODULE_POOLS — the §3.1 table', () => {
       'parent',
       'billing',
       'notify',
+      // `knowledge` follows `content` and `signals` follows `practice` — the
+      // modules whose tables they read and whose cost profile they share.
+      // Neither has an HTTP surface, and neither is exempt from needing a
+      // bulkhead for it: an in-process caller can saturate a pool exactly as a
+      // request can.
+      'knowledge',
+      'signals',
       'retrieval',
       'foxy',
     ];

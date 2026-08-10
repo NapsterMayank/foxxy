@@ -1,0 +1,30 @@
+-- Rollback for drizzle/migrations/0004_billing.sql
+--
+-- Drizzle does not generate down migrations, so each one is written by hand and
+-- lives here under the same number. Plan §4, rule 4: every migration must run
+-- forward AND backward against a copy of the schema in CI.
+--
+-- ===========================================================================
+-- THIS IS THE MOST DANGEROUS ROLLBACK IN THE REPOSITORY, AND IT IS WORTH
+-- SAYING SO PLAINLY RATHER THAN LEAVING IT TO BE DISCOVERED.
+--
+-- `weekly_digests` (0003) can be dropped and rebuilt: every row is derived.
+-- NOTHING HERE IS DERIVED. `subscriptions` is the only record of who is
+-- entitled to what, and `payment_events` is the only record of what the payment
+-- provider told us and when. Both are reconstructible ONLY from the provider's
+-- own dashboard, by hand, and only for as long as the provider retains them.
+--
+-- Running this against a database that has taken a single real payment
+-- destroys financial records. It is written because the migration test requires
+-- a reversible migration and because an irreversible one is worse — but it is
+-- not a routine operation, and the honest procedure before running it in an
+-- environment that has ever been live is: export both tables first.
+--
+-- THE ORDER IS LOAD-BEARING. `payment_events.subscription_id` references
+-- `subscriptions` with ON DELETE RESTRICT, so the child table goes first.
+-- Reversing these two statements produces a foreign-key error that reads like a
+-- bug in the rollback rather than like the protection it is.
+-- ===========================================================================
+DROP TABLE IF EXISTS "payment_events";
+--> statement-breakpoint
+DROP TABLE IF EXISTS "subscriptions";

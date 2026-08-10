@@ -257,10 +257,16 @@ describe('the learner and content tables', () => {
     // that an integer grade does not error, it silently matches nothing. A stub
     // typed more loosely than the table it will eventually join against is a
     // stub that imports bad data on its first day of real use.
+    // `retrieval_traces` (migration 0005) records the grade a Foxy turn was
+    // filtered by. It is text for the same reason as the rest, and it is in
+    // this list for the same reason `classes` is: a column that records what a
+    // filter WAS must be typed like the column that filter ran against, or the
+    // trace and the query it explains stop being comparable.
     expect(result.rows).toEqual([
       { table_name: 'chapters', data_type: 'text' },
       { table_name: 'classes', data_type: 'text' },
       { table_name: 'rag_chunks', data_type: 'text' },
+      { table_name: 'retrieval_traces', data_type: 'text' },
       { table_name: 'students', data_type: 'text' },
     ]);
   });

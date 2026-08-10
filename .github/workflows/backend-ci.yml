@@ -1,0 +1,159 @@
+# =============================================================================
+# BACKEND CI — type-check, lint, test against a REAL Postgres, build, and the
+# migration round-trip.
+#
+# `workflow_call` only. It is invoked by `ci.yml` when `backend/**` (or shared
+# infrastructure) changed, so a documentation-only change never starts it. See
+# the header of ci.yml for why the path scoping lives there rather than here.
+# =============================================================================
+
+name: backend-ci
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: type-check · lint · test · build · migrations
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      # A REAL Postgres, with pgvector, at the same major version as production
+      # (docker/compose.prod.yml). Not a stand-in: `rag_chunks.embedding` is
+      # `vector(1024)`, `search_vector` is a generated tsvector column, and the
+      # `distractor_misconceptions` CHECK relies on `CASE` short-circuiting
+      # (D-039). None of that exists on a fake.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: foxxy
+          POSTGRES_PASSWORD: foxxy_dev_password
+          POSTGRES_DB: foxxy
+        options: >-
+          --health-cmd "pg_isready -U foxxy -d foxxy"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+        ports:
+          - 5432:5432
+
+      valkey:
+        image: valkey/valkey:8-alpine
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+        ports:
+          - 6379:6379
+
+    env:
+      # The service container publishes 5432 on the runner. D-009's 5433 is a
+      # local-machine workaround for a native Postgres holding the default port;
+      # there is no such conflict here, and hardcoding 5433 would be copying a
+      # workaround into an environment that does not have the problem.
+      DATABASE_URL: postgres://foxxy:foxxy_dev_password@localhost:5432/foxxy
+      REDIS_URL: redis://localhost:6379
+      NODE_ENV: test
+      APP_URL: http://localhost:3000
+      API_URL: http://localhost:4000
+      CORS_READ_ORIGINS: http://localhost:3000
+      CORS_WRITE_ORIGINS: http://localhost:3000
+      SESSION_COOKIE_NAME: foxxy_session
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: install
+        run: npm ci
+
+      # --- gates, in the order that fails fastest --------------------------
+      - name: type-check
+        run: npm run type-check
+
+      - name: lint
+        run: npm run lint
+
+      # --- MIGRATIONS: an explicit step, never implicit on boot ------------
+      #
+      # Applied here, as a discrete step, exactly as production applies them
+      # (`docker compose --profile migrate run --rm migrate`). No application
+      # process migrates on start-up: with two replicas that is two concurrent
+      # migrators racing on one lock, and a failed migration becomes a
+      # crash-loop that also takes the service down.
+      - name: apply migrations
+        run: npm run db:migrate
+
+      # D-109: `db:migrate` printing "Migrations applied." does not mean it
+      # applied anything — Drizzle skips a migration whose journal timestamp
+      # precedes the last applied ledger row, and the development database
+      # silently ran a whole session on the wrong schema because of it. CHECK
+      # THE CATALOGUE, NOT THE EXIT CODE.
+      - name: the migration actually produced tables
+        run: |
+          set -euo pipefail
+          node -e "
+            const pg = require('pg');
+            const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+            client.connect()
+              .then(() => client.query(\"select count(*)::int as n from information_schema.tables where table_schema='public' and table_type='BASE TABLE'\"))
+              .then((r) => {
+                const n = r.rows[0].n;
+                console.log('tables in public: ' + n);
+                if (n < 10) { console.error('FAIL: db:migrate exited 0 but produced ' + n + ' tables (D-109)'); process.exit(1); }
+              })
+              .then(() => client.end())
+              .catch((e) => { console.error(e.message); process.exit(1); });
+          "
+
+      # --- MIGRATION ROUND-TRIP -------------------------------------------
+      #
+      # Forward, backward to an EMPTY public schema, forward again, and the
+      # catalogue diffed against the first apply. Against a scratch database, so
+      # the destructive half cannot reach the one the previous step migrated.
+      - name: migration round-trip (forward · rollback · forward)
+        env:
+          DATABASE_URL: postgres://foxxy:foxxy_dev_password@localhost:5432/round_trip
+        run: |
+          set -euo pipefail
+          PGPASSWORD=foxxy_dev_password psql -h localhost -U foxxy -d foxxy \
+            -c 'drop database if exists round_trip' -c 'create database round_trip'
+          npm run db:round-trip
+
+      # --- TESTS ------------------------------------------------------------
+      # Vitest starts its own testcontainer (tests/helpers/global-postgres.ts),
+      # which is available on this runner and is what the suite is written
+      # against. The service container above is for the migration steps and for
+      # anything that needs a database with a REAL ledger history — a fresh
+      # testcontainer has an empty one and therefore cannot reproduce D-109.
+      - name: test
+        run: npm test
+
+      - name: build
+        run: npm run build
+
+      # The operational entry points — migrations and the alert evaluator — are
+      # compiled too, because the production image runs them with `--omit=dev`
+      # and therefore without tsx. A build break here means an ops tool that
+      # cannot run on the deployed artefact.
+      - name: build ops entry points
+        run: npm run build:ops
+
+      - name: the alert rules are satisfiable by the shipped collectors
+        # A rule watching a signal nothing emits can never fire, and a rule that
+        # never fires looks exactly like a system that is never unhealthy. The
+        # assertion runs inside the evaluator at start-up; this is the same
+        # check, in CI, before anyone deploys it.
+        run: npx vitest run tests/ops/alert-rules.test.ts

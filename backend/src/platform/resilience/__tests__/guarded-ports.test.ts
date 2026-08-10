@@ -312,12 +312,41 @@ describe('the mail wrapper', () => {
 });
 
 describe('the payments wrapper', () => {
-  const WEBHOOK: VerifiedWebhook = { providerEventId: 'evt_1', kind: 'paid', payload: {} };
+  const WEBHOOK: VerifiedWebhook = {
+    providerEventId: 'evt_1',
+    kind: 'subscription.charged',
+    providerEventName: 'subscription.charged',
+    providerSubscriptionId: 'sub_1',
+    currentPeriodEnd: null,
+    payload: {},
+  };
+
+  /**
+   * The port grew `cancelSubscription`, and `CreateSubscriptionRequest` grew a
+   * PAYER that is separate from the beneficiary, when the `billing` module
+   * landed — see the header of `platform/payments/payments.port.ts`. The
+   * payer/subject split is what keeps a B2B school pilot (the school pays, a
+   * student benefits) a composition-root change rather than a schema migration.
+   */
+  const CREATE = {
+    planCode: 'monthly',
+    payer: { kind: 'user', id: 'u1' },
+    subjectUserId: 'u1',
+    amountMinorUnits: 29_900,
+    currency: 'INR',
+    idempotencyKey: 'idem-1',
+  } as const;
 
   function fakePayments(overrides: Partial<PaymentsPort> = {}): PaymentsPort {
     return {
+      name: 'test',
       createSubscription: () =>
-        Promise.resolve({ providerSubscriptionId: 'sub_1', checkoutUrl: 'https://pay.test' }),
+        Promise.resolve({
+          providerSubscriptionId: 'sub_1',
+          checkoutUrl: 'https://pay.test',
+          provider: 'test',
+        }),
+      cancelSubscription: () => Promise.resolve(),
       verifyWebhook: () => WEBHOOK,
       ...overrides,
     };
@@ -325,9 +354,24 @@ describe('the payments wrapper', () => {
 
   it('guards subscription creation', async () => {
     const payments = createGuardedPayments(fakePayments(), registry.guard('payments'));
-    await expect(
-      payments.createSubscription({ planCode: 'monthly', userId: 'u1' }),
-    ).resolves.toMatchObject({ providerSubscriptionId: 'sub_1' });
+    await expect(payments.createSubscription(CREATE)).resolves.toMatchObject({
+      providerSubscriptionId: 'sub_1',
+    });
+  });
+
+  it('guards cancellation — it is a network write like any other', async () => {
+    let cancelled: string | null = null;
+    const payments = createGuardedPayments(
+      fakePayments({
+        cancelSubscription: (id) => {
+          cancelled = id;
+          return Promise.resolve();
+        },
+      }),
+      registry.guard('payments'),
+    );
+    await payments.cancelSubscription('sub_9');
+    expect(cancelled).toBe('sub_9');
   });
 
   it('does NOT put webhook verification behind the breaker', async () => {
@@ -346,11 +390,11 @@ describe('the payments wrapper', () => {
       guard,
     );
     for (let i = 0; i < 5; i += 1) {
-      await payments.createSubscription({ planCode: 'm', userId: 'u' }).catch(() => undefined);
+      await payments.createSubscription(CREATE).catch(() => undefined);
     }
     expect(guard.breaker.state()).toBe('open');
 
-    expect(payments.verifyWebhook('{}', 'sig')).toEqual(WEBHOOK);
+    expect(payments.verifyWebhook({ rawBody: '{}', signature: 'sig' })).toEqual(WEBHOOK);
   });
 
   it('returns null on a forged signature without throwing', () => {
@@ -358,6 +402,6 @@ describe('the payments wrapper', () => {
       fakePayments({ verifyWebhook: () => null }),
       registry.guard('payments'),
     );
-    expect(payments.verifyWebhook('{}', 'forged')).toBeNull();
+    expect(payments.verifyWebhook({ rawBody: '{}', signature: 'forged' })).toBeNull();
   });
 });

@@ -18,13 +18,18 @@ Last updated: **10 August 2026**
 | Corpus | **IMPORTED.** 137 chapters · 4,686 chunks · 2,741 questions · 639 concepts · 176 edges · 57 misconception patterns |
 | Architecture | Modular backend + isolated product frontend + marketing/CMS deployable |
 | Team | 1 engineer |
-| Backend modules | **7 of 11 built** (identity, learner, content, notify, practice, **parent**, **retrieval**). Both new ones are now CONSTRUCTED in `app/routes.ts` — `parent` registers six endpoints, `retrieval` registers none by design (D-122) |
+| Pedagogy foundations | **3 of 9 delivered 10 August** — `platform/rules` (versioned deterministic evaluator), `modules/knowledge` (the 176 concept-graph edges finally have a reader), `modules/signals` (4 anomaly rules). **`knowledge` and `signals` are now WIRED** in `app/routes.ts`, both on the `core` pool, and **neither registers routes — by design** (D-175). `signals` receives `practice`'s anti-cheat floor and verdict through its no-default injected edge, which `practice/index.ts` now exports additively (D-177). See §6 |
+| Backend modules | **11 of 11 built AND WIRED** (identity, learner, content, notify, practice, parent, retrieval, foxy, **billing**, **knowledge**, **signals**). Every one is constructed in `buildModules`, and `src/app/__tests__/routes.test.ts` asserts the list exhaustively and pins each module's pool. **Eight register routes; three deliberately do not** — `retrieval` (D-122), `knowledge` and `signals`, none of which has an HTTP surface, with a comment at the foot of `registerRoutes` saying so because "built but never registered" reads exactly like an oversight (D-175). `billing`'s registration is **AWAITED**, the only one besides identity's: its webhook needs an encapsulated Fastify scope for a raw-body parser, and a dropped `await` 404s every genuine delivery in production only. The `payments` port lives on the container, guarded, with a **production boot refusal** (D-176) |
 | Backend processes | **2** — `api` and `worker`. The worker exists and runs one real job |
 | Frontend | **scaffolded** - 81 source files under `frontend/src`, committed. Build-order step 0 (the five foundation gaps) not yet closed |
 | Marketing site | **scaffolded** - 32 files under `website/`, committed. Per `06-FRONTEND-SEPARATION-PLAN.md` |
-| Tests | **1,970 passing**, 109 files |
-| Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice` + `0003_parent`. Every one of them now has a rollback test, because the round-trip is asserted over the DISCOVERED set rather than per file (D-126) |
-| Gates | type-check · lint · build · test · coverage — all green. `platform/authz` 100%, `parent/domain` 100%, `parent.service` 94.0%, `retrieval` 99.1%, `practice/domain` 100% |
+| Tests | **2,510 passing**, 137 files. The integration pass added 16: eight in `tests/integration/migration-journal-order.test.ts` (the journal-ordering rule, D-174), six in `src/app/__tests__/wiring.test.ts` (the payments boot refusal, D-176) and two in `routes.test.ts` (which modules register routes, and the `signals`←`practice` anti-cheat edge) |
+| Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice` + `0003_parent` + **`0004_billing`** + **`0005_foxy`**. Every one has a rollback test, because the round-trip is asserted over the DISCOVERED set rather than per file (D-126) — neither `0004` nor `0005` needed an edit to that test. **Neither has been applied to the development database**, deliberately, for the same reason `0002` has not: see open item 16. ✅ **`0004_billing`'s journal `when` is FIXED** — it was 1786374108357, below `0003_parent`'s 1786700000000, which is the exact D-109 hazard: drizzle selects by `when` and not by `idx`, so on any database already past `0003` it printed "Migrations applied." and applied nothing. **Reproduced on a scratch database before the fix** (`subscriptions` and `payment_events` absent, `0005` applied over the hole, exit code zero), corrected to **1786750000000**, and re-verified both from empty and from a ledger primed to `0003`. The rule is now enforced by `tests/integration/migration-journal-order.test.ts`, which was itself proved to fire by reverting the value. The round-trip test could not have caught this and never could: it applies by `idx` and never reads `when` (D-173, D-174) |
+| Gates | type-check · lint · build · test — all green. `platform/authz` stays **100%**; `billing/domain` 98.5% statements / 96.2% branches / 100% functions, `billing.service` 99.2% / 95.1% / 90%, `platform/payments` 100% statements. `parent/domain` 100%, `parent.service` 94.0%, `retrieval` 99.1%, `practice/domain` 100%. **`modules/foxy` 96.3% statements / 90.4% branches / 94.6% functions**, with `foxy/domain` at 100%/99.0%/100% and `platform/llm` at 98.5% — the real LLM adapter is fully covered and never called |
+| Deployment | **BUILT, 10 August.** `docker/compose.prod.yml` — postgres+pgvector · valkey · api · worker · alert evaluator · frontend · website · Caddy · backup. Three multi-stage non-root Dockerfiles, resource limits on EVERY service, an `internal: true` data network with no published ports, and volume names (`foxxy_prod_*`) that cannot collide with the development ones holding the corpus (D-140). Validated with `docker compose config` |
+| CI/CD | **BUILT, 10 August.** `.github/workflows/` — `ci.yml` (change detection · secret scan · infrastructure checks · `ci-gate` fan-in) calling per-app `backend-ci.yml` / `frontend-ci.yml` / `website-ci.yml`. A documentation-only change runs the secret scan and nothing else. Migrations are an EXPLICIT step, never on boot (D-145). **Eight gates, each proven to FAIL on a deliberate violation** — see §3 |
+| Backups | **BUILT AND DRILLED, 10 August.** Continuous WAL archiving plus a nightly base backup to a SECOND volume; `restore.sh`, `restore-drill.sh` and `drill-selftest.sh`. The drill was EXECUTED against a scratch database: PASS on a good backup, FAIL on a tampered one. Two real defects were found by running it (D-149) |
+| Alerting | **BUILT, 10 August.** `backend/scripts/ops/` — 11 rules over 9 signals read from `metrics_events`, split explicitly into what PAGES a human and what files a TICKET, delivered through the existing `notify-channel` port rather than a second notification path (D-147) |
 | Estimated remaining | **~92 days ≈ 19 weeks solo** |
 | Git | **4 commits**, latest `45241c7`. Working tree has the `parent` + `retrieval` wiring STAGED, uncommitted. No remote configured |
 
@@ -32,11 +37,18 @@ Last updated: **10 August 2026**
 
 ## 2. THE NEXT ACTION
 
-> **Build `foxy` (build step 10).** `retrieval` is complete and wired, `parent`
-> is complete and wired, and the `embed` adapter now exists — so `foxy` is the
-> only remaining module on the critical path to the product's core capability.
+> **`foxy` IS BUILT (build step 10, 10 August).** The core capability exists:
+> a guided NCERT-grounded tutor with verified citations, first-class abstention,
+> a safety classifier that runs before the model, per-plan usage limits and a
+> trace row for every turn. Five endpoints, one of them SSE.
+>
+> **The next action is now the two items below, both of which gate QUALITY
+> rather than existence, plus obtaining the LLM key.** Nothing in `foxy` can be
+> judged good or bad until the abstention threshold is calibrated and a real
+> model is behind the port — today it runs against a scripted fake, which proves
+> the plumbing and says nothing about the answers.
 
-Two things that are now unblocked and were not before:
+Two things that are unblocked and still unmeasured:
 
 1. **Threshold calibration by measurement, never by guess.** The harness exists
    (`eval/retrieval/calibrate.ts`, `npm run eval:retrieval:calibrate`) and is
@@ -301,6 +313,95 @@ corpus was re-counted after all of this and is byte-identical: 137 chapters,
 4,686 chunks, 2,741 questions, 639 concepts, 176 edges, 57 patterns, 773 held
 out.
 
+### Deployment, CI/CD, backups and alerting — 10 August 2026
+
+Resilience plan §5, §7, §8, §11, §12 and §13, and the CI/CD and pipeline
+isolation requirements of `06-FRONTEND-SEPARATION-PLAN.md`. Decisions
+D-140..D-149 and D-160..D-162. Nothing under `backend/src/` was touched.
+
+- **`docker/compose.prod.yml`** — nine services: postgres+pgvector, valkey, the
+  api, the worker, the alert evaluator, the frontend, the marketing website,
+  Caddy, and a backup container (plus a one-shot volume-permission init and a
+  `profiles: [migrate]` migration runner). Named volumes, healthchecks, restart
+  policies, and **CPU and memory limits on every service** — marketing gets the
+  smallest budget in the stack, because it is the surface with the most frequent
+  and least reviewed deployments.
+- **Two networks.** `edge` carries Caddy and the three application containers;
+  `internal: true` carries postgres, valkey and backup and has **no route to the
+  internet and no published ports**. The database is reachable only by container
+  name from a container on that network (D-141).
+- **Nothing can touch the development stack.** Project name `foxxy-prod`, every
+  volume `foxxy_prod_*`. The isolation is not a convention — the names do not
+  collide (D-140). `backend/docker/compose.yml` was not edited.
+- **Three multi-stage Dockerfiles**, non-root, minimal. The backend image builds
+  `dist/` (api + worker) AND `dist-ops/` (migrations + alert evaluator),
+  because the runtime installs `--omit=dev` and an ops tool that needs `tsx` is
+  an ops tool you cannot run on the box that is on fire. The Next apps use
+  `output: 'standalone'` and install no node_modules at runtime.
+- **Caddy, automatic TLS, three hostnames** derived from ONE placeholder:
+  `{$BASE_DOMAIN}` in `docker/.env.prod`. `compose.prod.yml` builds `APP_URL`,
+  `API_URL` and both CORS lists from the same variable, so the proxy's routing
+  and the backend's origin allow-lists cannot disagree.
+- **The SSE route has its own proxy policy** (D-142) — `flush_interval -1`, a
+  300s upstream read timeout, a 30s header timeout, and no compression, scoped to
+  `/api/v1/foxy/*`. Ordinary routes keep 30s and keep compression. Getting this
+  wrong breaks Foxy in production **while looking exactly like a model problem**,
+  which is why CI asserts both settings by name: `caddy validate` is perfectly
+  happy with a config that buffers.
+- **Proxy ownership is enforced in three layers** (D-143): a read-only mount, an
+  allow-list deploy script (`docker/deploy-app.sh`, which refuses `caddy`,
+  `postgres`, `valkey`, `backup` and uses `--no-deps`), and CODEOWNERS.
+- **Path-scoped workflows AND a real fan-in gate** (D-144). A documentation-only
+  change runs the secret scan and nothing else. `ci-gate` is `if: always()` and
+  inspects `needs.*.result` explicitly, because a skipped required check reports
+  as neutral, which reads as green.
+- **Migrations are a discrete step and the step CHECKS THE CATALOGUE** (D-145),
+  because D-109 proved that a zero exit code from `db:migrate` means nothing. The
+  round-trip — forward, rollback to a provably empty schema, forward again,
+  catalogues diffed — runs against the CI Postgres SERVICE, where a real ledger
+  history exists and testcontainers cannot help.
+- **A secret scanner that fails the build** (D-161), closing D-096's open action.
+  Self-testing, so that a scanner whose patterns have rotted cannot report
+  "clean" and be believed.
+- **Backups: continuous WAL archiving plus a nightly base backup, to a SECOND
+  volume.** Restore, drill and drill-self-test scripts. **The drill was run.**
+- **Alerting: `metrics_events` is finally READ.** 11 rules over 9 signals, an
+  explicit page/ticket split, delivery through the existing `notify-channel`
+  port. The evaluator refuses to start without a recipient (D-147), and an
+  absent signal never fires a rule and is never read as zero (D-148).
+
+**Every gate was proven to FAIL on a deliberate violation before being trusted**
+(the D-005 rule, applied to infrastructure):
+
+| Gate | Violation injected | Result |
+|---|---|---|
+| secret scan | the exact D-096 string, in the exact file D-096 happened in | exit 1, host named; file restored byte-for-byte |
+| secret scan self-test | — | 11 fixtures, 8 must-flag / must-not-flag pairs plus 3 token shapes, all as required |
+| `compose config` | an invalid resource limit | exit 15 |
+| shell parse (`bash -n`) | an unterminated `for` | exit 1 |
+| SSE buffering assertion | `flush_interval -1` deleted | exit 1 |
+| SSE timeout assertion | SSE `read_timeout` lowered to 30s | exit 1 |
+| `caddy validate` | a malformed include | exit 1 |
+| `ci-gate` logic | an app pipeline failing; the secret scan SKIPPED | exit 1 in both |
+| migration round-trip | a table the down migrations do not drop | exit 1 |
+| migration round-trip safety | a database holding rows | refused; rows untouched |
+| restore drill | a tampered row-count expectation | FAIL, as required |
+
+**Two defects the proofs found, which reading would not have** (D-162, D-149):
+
+- The shell-parse gate reported a PASS on a file with a deliberate syntax error,
+  because `git ls-files '*.sh'` matched nothing before the scripts were staged
+  and the loop body never ran. That is D-005's "rule matching zero files" wearing
+  a shell loop; the step now fails on zero matches. Separately, the first
+  violation used to test it — `if [ "$x" = 1 ; then … fi` — is ACCEPTED by
+  `bash -n`, because `[` is an ordinary command and a missing `]` is a runtime
+  failure. The proof was itself measuring nothing.
+- The restore drill reported ten of thirteen tables `ok` against a database it
+  had never looked at: it connected to the restored cluster's default `postgres`
+  database, where no table exists, so every "absent" expectation matched
+  trivially. The backup now records WHICH database it counted, and the drill
+  reads it rather than assuming.
+
 ### Defects found by tests, not by users
 | Defect | Would have caused |
 |---|---|
@@ -334,12 +435,12 @@ Build order from `docs/01-BACKEND-IMPLEMENTATION-PLAN.md` section 10.
 | ✅ 1-5 | Foundation, platform, identity, authz | — | — |
 | ✅ — | Resilience hardening | — | — |
 | ✅ 6 | **Corpus migration + `content` module** — module, migration `0001`, import script, all imported and verified | — | — |
-| 🟡 7 | `embed` **real adapter DONE** (Voyage, guarded, boot-checked — D-123); `llm` adapter still an interface | 1 | `VOYAGE_API_KEY` for calibration; LLM key for `foxy` |
+| ✅ 7 | `embed` **real adapter DONE** (Voyage, guarded, boot-checked — D-123); **`llm` real adapter DONE too** (Anthropic Messages API, guarded, boot-checked — D-170). Both are fully unit-tested against a mocked HTTP layer and NEITHER is ever called by a test | — | keys only: `VOYAGE_API_KEY` for calibration, `LLM_API_KEY` to run Foxy against a real model |
 | ✅ 8 | **`retrieval`** — module built, wired on the `ai` pool, no HTTP surface by design. Threshold ships `UNCALIBRATED` and INERT; the calibration harness is written | 0.5 | calibration blocked on `VOYAGE_API_KEY` only |
 | ✅ 9 | `learner` | — | — |
-| ⬜ 10 | `foxy` | 10 | LLM key — **now the critical path** |
+| ✅ 10 | **`foxy`** — module, migration `0005_foxy`, five endpoints (one SSE), 203 tests. Guided interface: 3 modes × 6 fixed actions, no open chat (D-163). Abstention never calls the model and is a successful answer (D-165); citations are verified mid-stream and fabrications stripped before the student sees them (D-164); the safety classifier runs before the model (D-166); a trace row per turn, including abstentions. Runs on the SCRIPTED FAKE until a key exists | — | quality is blocked on `LLM_API_KEY` + threshold calibration; the module is not |
 | ✅ 11 | **`practice`** — module, migration `0002`, 231 tests, atomic submission across two modules | — | — |
-| ✅ 12 | **`parent`** — module, migration `0003_parent`, six endpoints, the weekly digest seam filled into `notify`. Transcript reads return `not_yet_available` until `foxy` lands | — | — |
+| ✅ 12 | **`parent`** — module, migration `0003_parent`, six endpoints, the weekly digest seam filled into `notify`. **The transcript is now LIVE**: `0005_foxy` created the tables the catalogue probe was waiting for, so reads return `source: 'foxy'` rather than `not_yet_available` (D-171) | — | — |
 | ⬜ 13 | `billing` | 6 | Razorpay account |
 | ⬜ 14 | `notify` | 3 | Resend key |
 | ⬜ 15 | Integration suite + deployment | 5 | all |
@@ -370,23 +471,100 @@ Build order from `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` section 11. **Nothing
 
 ---
 
-## 6. Pedagogy scope — agreed, not started
+## 6. Pedagogy scope — three of nine DELIVERED, 10 August 2026
 
 Nine capabilities were assessed. Full build is ~50 days; this subset is **20 days** and closes every one-way door.
 
-| Capability | Scope agreed | Days |
-|---|---|---|
-| Constrained Foxy | already the design — grounding, abstention, citation verification | 0 |
-| **Misconception detection** | minimal: distractor-to-misconception codes, weekly aggregation | 6 |
-| **Spaced-retention scheduler** | full — FSRS or SM-2, pure functions on the injected clock | 4 |
-| Anomaly rules | basic — reuse anti-cheat, add inactivity and mastery drop | 1.5 |
-| Rules engine | foundation only — versioned evaluator, rule version stamped on every decision | 2 |
-| Prerequisite concept graph | foundation only — schema plus hand-seeded chapter-level prerequisites | 3 |
-| Adaptive difficulty | seed — ladder on authored difficulty, plus full response logging | 2 |
-| Explainable priority scoring | seed — two candidate types, with real reason strings | 1.5 |
-| Independent mastery checks | held-out question pool reserved | 0.5 |
+| Capability | Scope agreed | Days | Status |
+|---|---|---|---|
+| Constrained Foxy | already the design — grounding, abstention, citation verification | 0 | — |
+| **Misconception detection** | minimal: distractor-to-misconception codes, weekly aggregation | 6 | not started (D-077 blocks it — the data is NULL) |
+| **Spaced-retention scheduler** | full — FSRS or SM-2, pure functions on the injected clock | 4 | **DONE** with `practice` |
+| Anomaly rules | basic — reuse anti-cheat, add inactivity and mastery drop | 1.5 | **DONE** — `modules/signals` (D-131, D-132) |
+| Rules engine | foundation only — versioned evaluator, rule version stamped on every decision | 2 | **DONE** — `platform/rules` (D-130) |
+| Prerequisite concept graph | foundation only — schema plus hand-seeded chapter-level prerequisites | 3 | **DONE (reader)** — `modules/knowledge` (D-127, D-128, D-129) |
+| Adaptive difficulty | seed — ladder on authored difficulty, plus full response logging | 2 | logging done with `practice`; ladder not started |
+| Explainable priority scoring | seed — two candidate types, with real reason strings | 1.5 | not started |
+| Independent mastery checks | held-out question pool reserved | 0.5 | **DONE** — 773 of 2,741 reserved (§8) |
 
 Deferred until real usage data exists: full IRT calibration, concept-level graph extraction, multi-factor priority weights, scheduled mastery checks.
+
+**What the graph reader found, and it changes the plan.** The 176 imported edges
+were never read by anything; they are now. Two measurements matter:
+
+- **The graph is internally sound** — all 176 prerequisite references resolve,
+  zero dangling. Traversal over concept codes is exact.
+- **Chapter projection CREATES three cycles that the concept graph does not
+  have**, all in grade 7 mathematics, caused by a coarse (`math_7_ch5`) and a
+  fine (`m7.geometry.triangles`) authoring scheme layered on the same chapters.
+  Grade 7 maths is therefore 15-of-15 covered AND not orderable. See D-128.
+
+Coverage, grades 6-10 mathematics and science (the whole corpus): **128 of 137
+chapters carry a graph row, 93.4%.** Per grade/subject, chapters with a graph row
+out of chapters in scope: maths 6 `10/12`, 7 `15/15`, 8 `14/14`, 9 `13/13`,
+10 `14/15`; science 6 `12/12`, 7 `12/13`, 8 `13/13`, 9 `12/14`, 10 `13/16`.
+
+**"Hand-seeded chapter-level prerequisites" is still the outstanding half** of
+this line item. The reader, the coverage report and the cycle diagnosis exist;
+authoring the missing edges — and deciding which of the two grade 7 schemes wins —
+does not.
+
+### billing module — 10 August 2026
+
+Plan §8.8, built end to end: `createSubscription` · `handleWebhook` ·
+`getEntitlements` · `cancelSubscription` · `getSubscriptionStatus`, plus
+`platform/payments` (port, deterministic fake, Razorpay adapter) and migration
+`0004_billing` (`subscriptions`, `payment_events`).
+
+**The payer and the beneficiary are separate columns (D-150).** It is unresolved
+whether this ships B2C or as a B2B school pilot in which schools pay and
+per-parent subscriptions never exist. A single `user_id` column would have
+answered that question by accident, so a subscription carries `subject_user_id`
+(whose entitlements) and a payer (`user` or `school`) as independent facts, with
+a database CHECK making any other combination unrepresentable. The decision
+itself is ONE injected `PayerResolver` line at the composition root; a test
+drives a school-paid seat for a student who never sees a payment page, and
+another asserts that a resolver returning null REFUSES the checkout rather than
+falling back to charging the actor.
+
+**The webhook is at `/api/v1/webhooks/billing`, not the path §8.8 names
+(D-151).** `POST /billing/webhook` sits outside the CSRF exemption pattern
+`^/api/v\d+/webhooks/`, so it would have been 403'd for every genuine
+server-to-server delivery — broken in production, green in development. Three
+tests pin it: the chosen path IS exempt, the exemption is SCOPED (a live request
+to `/api/v1/billing/webhook` is 403), and the exemption buys nothing without the
+signature.
+
+**All four webhook rules are structural rather than remembered.** The signature
+check is the first statement of `handleWebhook`; the dedupe is `ON CONFLICT DO
+NOTHING` on `(provider, provider_event_id)` — one statement, so two concurrent
+deliveries cannot both pass, which a read-then-write allows; the subscription
+update shares that transaction; and there is no `catch` in the handler, so a
+failure becomes a 5xx and the provider retries. A test injects a mid-transaction
+failure and asserts BOTH halves roll back and the retry then succeeds — the
+failure that matters is the one where the event row survives, the retry is
+deduplicated against it, and the subscription never activates: money in, no
+access, no error anywhere.
+
+**Expiry is computed, not swept (D-153), and entitlements are positive grants
+(D-154).** A stored `active` whose period ended yesterday reports `expired` on
+the next read with nothing having run in between; a test advances the clock and
+watches access lapse. `free` is a real feature list rather than the absence of a
+denial, so a lost grant grants NOTHING instead of silently handing out the free
+tier.
+
+**Five guard mutations were run against the source and all five went red
+(D-152)** — including the D-125 shape (`authoriseSubscription` echoing the
+actor's own tenant), which billing has no second layer to mask. They are
+institutionalised in `billing.authz-mutation.test.ts`, which asserts each break
+is OBSERVABLE rather than merely that the guard exists.
+
+**The Razorpay adapter is fully unit-tested and never called (D-156).** There is
+no account and no key: every HTTP call goes to a recording fake `HttpClient`,
+and the only half exercised against real cryptography is `verifyWebhook`, which
+makes no network call. The deterministic fake shares `signature.ts` with the
+real adapter, so "a forged signature is rejected" is a claim about real HMAC
+rather than about a stub that was told to say no.
 
 ---
 
@@ -395,22 +573,48 @@ Deferred until real usage data exists: full IRT calibration, concept-level graph
 ### Agreed, not implemented
 | # | Item | Source | Effort |
 |---|---|---|---|
+| 19 | **`foxy`'s ANSWER QUALITY is entirely unmeasured, and no test in the suite can measure it.** Every foxy test runs against the DETERMINISTIC SCRIPTED FAKE, which does not read the prompt. That proves the pipeline — ordering, abstention, citation verification, streaming, the trace, every failure branch — and says NOTHING about whether an answer is correct, age-appropriate or well-grounded. Two things unblock it and neither is code: `LLM_API_KEY` (set it, and `createContainer` picks the real adapter with no other change), and `VOYAGE_API_KEY` for the retrieval calibration, without which `ABSTAIN_THRESHOLD` is INERT and **Foxy will effectively never abstain on a real corpus** — the grounding rail that the whole design rests on is present, wired, tested and currently set to a value that filters nothing | D-165, D-170; retrieval's `abstain-threshold.ts` | keys, then 1 d of eval |
+| 20 | **The daily usage limit is enforced per plan, but every account resolves to `free`** — and this is now the ONLY thing between a paying customer and the limits they paid for, because `billing` itself is wired. `app/routes.ts` still passes `readPlan: () => Promise.resolve(null)`, which the service reads as `free` (20 messages/day). **Deliberately not closed with the rest of the wiring**, because it is not a one-line bind: `foxy`'s `PlanReader` is `(studentUserId) => Promise<FoxyPlan | null>` and takes NO ACTOR, while `billing.getEntitlements(actor, subjectUserId)` requires one and runs `authoriseSubscription` on it. Binding them needs either a widened `PlanReader` or a deliberate system actor, plus a decision about how the billing catalogue (`free`/`monthly`/`yearly`) maps onto `FoxyPlan` (`free`/`plus`) — the honest mapping is `hasFeature(entitlements, 'foxy.unlimited')`, since that entitlement is named for exactly this. Guessing either half silently is how a customer pays and gets nothing | §8.5, D-175 | 1 h |
+| 21 | **The usage-counter day rolls over at UTC midnight, i.e. 05:30 IST.** Deliberate and imperfect: a timezone-aware key needs per-user timezone storage, which does not exist — the same gap D-069 records for job scheduling. 05:30 lands in the middle of nobody's study session, so it is the cheapest wrong answer available. Recorded so the next person changes it deliberately rather than discovering it | `foxy/domain/usage.ts` | with per-user timezones |
+| ~~22~~ | ~~**`0004_billing`'s journal `when` is BELOW `0003_parent`'s** (1786374108357 vs 1786700000000). That is exactly D-109: drizzle skips a migration whose recorded timestamp precedes the last applied ledger row, and reports "Migrations applied." while applying nothing.~~ **CLOSED 10 August.** Corrected to **1786750000000**. The defect was REPRODUCED first, on a scratch database primed to `0003`: `subscriptions` and `payment_events` absent, `0005` applied over the hole, exit code zero. Re-verified after the fix from empty and from a primed ledger — six ledger rows, both tables present. Enforced from now on by `tests/integration/migration-journal-order.test.ts`, proved to fire by reverting the value. **The round-trip test could not have caught it**: it applies by `idx` and never reads `when` | D-109, D-173, D-174 | done |
+| ~~17~~ | ~~**`billing` IS BUILT AND NOT WIRED.**~~ **CLOSED 10 August — all four parts landed.** (a) `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` / `RAZORPAY_WEBHOOK_SECRET` are in `.env.example`; (b) `Container.payments` exists, wrapped in `resilience.guard('payments')`, choosing Razorpay when all three credentials are set and the deterministic fake otherwise, **with a production boot refusal that names WHICH credential is missing** — `RAZORPAY_PLAN_IDS` is deliberately excluded from that check because an unmapped plan code is a LOUD failure at checkout, and only the silent failure needs a gate; (c) `createBillingModule` is in `buildModules` on the `core` pool, with `readTenantOfUser` reading `users` through identity and a `resolvePayer` carrying the B2C answer keyed on `subjectUserId` rather than `actor.userId`; (d) `await modules.billing.registerRoutes(app)` is in `registerRoutes`. `routes.test.ts` pins that driving `registerRoutes` with billing alone produces `/api/v1/webhooks/billing`, and `wiring.test.ts` pins the boot refusal in five cases. The module harness stays local for a different reason now: it needs the CONCRETE `FakePayments` to sign deliveries, which the port cannot give it | D-150, D-151, D-175, D-176 | done |
+| 18 | **Erasing a paying user is not possible, by design.** Every foreign key out of `subscriptions` is `ON DELETE RESTRICT`, because a receipt that vanishes when somebody deletes an account is a reconciliation hole and a GST-invoice hole. So account erasure for a billed user becomes an ANONYMISE operation, and that operation does not exist. Not pre-built: writing it before a single subscription exists would be guessing at a retention policy nobody has set | D-155 | 1 d, with the policy |
+| 19 | **No Razorpay account exists, so the HTTP half of the adapter is unproven against the live API.** Every call is driven by a recording fake `HttpClient`; the signature half needs no vendor and IS proven. What remains blocked on real credentials: that live responses carry `id` and `short_url` where asserted, that the idempotency header is honoured, that a real `x-razorpay-signature` verifies against a dashboard-issued webhook secret, that Razorpay plan ids map as configured, and the end-to-end activation of one real subscription in test mode. The adapter NARROWS every field rather than casting, so a shape mismatch fails loudly at the boundary instead of writing a subscription row no webhook can reconcile | D-156 | 2 h, once a key exists |
 | 3 | Leetspeak normalisation cannot see a substitution in the first character (`8utterfly` is accepted). Documented and asserted, not hidden | D-018 follow-up | — |
 | 4 | `questions` cannot enforce "all four options are DISTINCT" — a CHECK may not contain a subquery, and distinctness needs aggregation. It is a `content` module rule. The module now EXISTS, so it finally has somewhere to live: apply it on the write path when one is built, or as an import validation | D-039 | 30 min |
 | 8 | **`audit_log` and `notifications` keep NULLABLE tenants, deliberately.** Neither is student-owned data reached through `assertCanAccess`, and — the deciding point — neither has a writer that knows a tenant: `audit_log` records system actions whose actor is null by design, and the in-app channel is handed a recipient and nothing else. A NOT NULL column whose only writer relies on the column default is theatre of exactly the kind D-073 rejects. **The mechanism when it is done:** resolve the tenant from the recipient / the actor as a scalar sub-select in the INSERT, and leave `audit_log` nullable for genuinely actor-less rows | D-084 | 2 h |
 | 9 | **Moving an account between tenants MUST revoke its sessions.** A student reaching their own data short-circuits the tenant lookup and trusts the session's tenant — safe today (the data moves with them, and a parent gets no short-circuit) but it makes session revocation a hard requirement of any account-moving code, the same way a password reset revokes sessions. Nothing moves accounts between tenants yet | D-083 | 1 h, with the feature |
 | 11 | **1,199 of 4,686 imported chunks are exact text duplicates** — the same NCERT passages ingested twice under two `chapter_title` conventions. The effective distinct corpus is **~3,487 chunks**, and duplicates compete for the same top-k slots (the manual vector query returned one passage twice in its top six). NOT deduplicated by the import, deliberately: which copy is canonical is a retrieval-quality decision that belongs with threshold calibration, where it can be measured | D-108 | 1 day, with step 8 |
 | 12 | **20 chunks carry a NULL embedding and are invisible to vector search.** Ids in `.corpus-extract/reports/chunks-without-embedding.txt`. They import with NULL and are reachable by full-text search; **no vector was fabricated.** Needs `VOYAGE_API_KEY` and the `embed` adapter | D-078 | 1 h, with step 7 |
+| ~~17~~ | ~~**`signals` cannot be constructed until `practice/index.ts` exports its anti-cheat floor.**~~ **CLOSED 10 August.** `practice/index.ts` now exports `MIN_AVERAGE_MS_PER_QUESTION`, `SAME_ANSWER_MIN_QUESTIONS`, `ANTI_CHEAT_REASONS` and `validateAttempt`, additively — `practice.service.ts` still imports them from `./domain/anti-cheat` directly and no check, threshold or ordering changed. **The no-default property is intact**: `signals`' `AntiCheatEdge` is still required, so a missing wiring is still a compile error rather than a second copy of `3_000`. The edge built in `buildModules` discards the FAILURE REASON on purpose — that belongs to `practice`, which writes it to `practice_sessions.invalid_reason` | D-131, D-177 | done |
+| 18 | **Grade 7 mathematics cannot produce a learning path, and the data is not corrupt.** Two authoring schemes — coarse `math_7_chN` and fine `m7.topic.detail` — are layered on the same chapters and disagree once projected onto chapters, producing 3 cycles. Both edges in each cycle are TRUE statements about concepts, so the code reports the closed path rather than dropping one. **Somebody has to decide which scheme wins for grades 7 and 8 maths** (the only two carrying the fine scheme; 21 and 19 rows). Until then `getGraphCoverage('7','mathematics').orderable` is false while coverage reads 15/15, and `canPlanFor` still works for the chapters not on a cycle | D-128 | half a day of authoring |
+| 19 | **9 of 137 chapters carry no `concept_graph` row at all** — grade 10 science 3, grade 9 science 2, grade 6 maths 2, grade 7 science 1, grade 10 maths 1. They are NAMED by `getGraphCoverage`, not just counted, so a caller can tell "this chapter is invisible to the graph" from "this chapter has no prerequisites" | D-129 | with item 18 |
 | 13 | **The question-level pedagogy layer is confirmed empty in the imported data** — `hint_level_1`, `hint_level_2`, `hint_level_3` and `solution_steps` are NULL on all 3,791 source questions, and `question_hi` on 3,581 of them. `distractor_misconceptions` is NULL on all 2,741 imported questions: the 57 misconception patterns exist but nothing links a pattern to a distractor. Generation, scoped to the pilot chapters, is unavoidable | D-077 | section 6 |
 | 14 | **`misconception_patterns` has no Hindi description, and the source has no such column** — not "usually null", it does not exist. A P7 gap that needs translations written, not a column added | D-098 | with the pedagogy subset |
 | 15 | **The dev database's drizzle ledger predates the baseline collapse**, so `db:migrate` skipped `0001` on timestamp order while reporting success. Worked around by setting 0001's journal `when` above the last applied row. Any other database created from the 0000-0008 chain has the same hazard | D-109 | 30 min, if another such database exists |
 | 16 | **The development database is still on `0001` — `0002_practice` has NOT been applied to it.** Deliberate: applying it needed a `db:migrate` against the database holding the imported corpus, and D-109's hazard (a "Migrations applied." that applies nothing, because the ledger predates the baseline collapse) makes that a step to take deliberately rather than incidentally. Nothing is at risk — `0002` adds three tables and renames an EMPTY one, and its own `DO` block refuses to run if that table has rows. The whole test suite runs against testcontainers and is unaffected. **Check the catalogue, not the exit code**: after `npm run db:migrate`, `select 1 from information_schema.tables where table_name = 'practice_responses'` | D-109, D-110 | 15 min |
 | 10 | **Per-migration drizzle snapshots for `0004`-`0007` do not exist and cannot be reconstructed** — those schema states were never committed. The chain is LINKED (`0008.prevId` = `0003.id`) and `db:generate` emits nothing, which is the property that matters; `drizzle-kit check` passes and is exposed as `npm run db:check`. The alternative that would give a gapless chain is to collapse `0000`-`0008` into one baseline migration plus one snapshot — **a user decision, since it rewrites already-applied migrations** | D-081 | 2 h, if chosen |
 
+| 21 | **The backup volume is on the same host as the data it protects.** WAL archiving plus nightly base backups cover corruption, a bad migration and a lost data volume — they do NOT cover losing the host. No off-site target is configured, deliberately: a half-configured object-store credential is worse than an honest gap, because it looks like a solved problem. Needs an encrypted `restic`/`rclone` sync to a different failure domain, and that target must then be included in the monthly drill — an off-site backup never restored FROM off-site is the same defect one level up. Until then: **a host loss is a data loss** | D-149 | 1 day |
+| 22 | **CODEOWNERS is documentation until branch protection requires it.** Two of the three layers protecting the proxy configuration are mechanical (a read-only mount, an allow-list deploy script); the third is a review requirement that depends on "require review from Code Owners" being enabled in the repository SETTINGS, which is not a file and is not in this repository. The placeholder team handles must also be replaced — a CODEOWNERS naming a team that does not exist matches nothing and requires no review | D-143 | 10 min, in the repository settings |
+| 23 | **"The notification reached NOBODY" has no metric**, only an `error` log line in `dispatcher.ts`. The alert rule therefore watches per-CHANNEL failures instead, which is a weaker signal. Fix is one counter beside the existing log in the undeliverable branch, after which the rule can be tightened to threshold 1 | D-146 | 15 min, with the `notify` module |
+| 24 | **The SSE proxy matcher is `/api/v1/foxy/*`, not the exact stream path**, because `foxy` was being built while the proxy was written. Once the route is final, narrow it — and run the SSE smoke check in `docs/runbooks/deploy-rollback.md` §1.2 afterwards, because a wrong matcher fails as BUFFERED STREAMING, which nobody attributes to a proxy | D-142 | 15 min, once `foxy` ships |
+
 **Closed on 10 August:** item 1 (CORS read/write split — D-082), item 2
 (`POST /links/code` rate limit — D-085), item 5 (global authenticated rate limit
 — D-080), item 6 (drizzle snapshot chain — D-081, with the residue above as item
 10), item 7 (`tenant_id` NOT NULL and the strict guard — D-073).
+
+**Closed by the composition-root integration, 10 August:** the `0004_billing`
+journal `when` (D-173/D-174 — reproduced, fixed, and now pinned by a test that
+was itself proved to fire), `billing` wiring including the `payments` port and
+its production boot refusal (D-175/D-176), the `practice` anti-cheat export that
+made `signals` constructible (D-177), and `knowledge` + `signals` construction on
+the `core` pool. **One residue, stated rather than closed quietly:** `foxy`'s
+`readPlan` is STILL `() => Promise.resolve(null)`, so every account still
+resolves to the `free` daily limit even with a live subscription — see item 20,
+which is now the only thing standing between a paying customer and the limits
+they paid for.
 
 **Closed on 9 August:** the `distractor_misconceptions` shape (jsonb object keyed
 by option index, migration `0003`, D-048) and `hnsw.ef_search` (set to 100 on the
@@ -530,6 +734,9 @@ per-chapter counts are in `.corpus-extract/reports/chapter-readiness.ndjson`.
 | 10 Aug 2026 | **`parent` + `retrieval` wired, and three test-suite defects closed.** Both modules were BUILT and NEITHER was constructed — `parent` half-wired (import landed, construction missing), `retrieval` not at all. Both now in `Modules`, which is total; `retrieval` deliberately registers no routes (D-122). `platform/embed` reached the container: Voyage when keyed, deterministic fake otherwise, and a BOOT FAILURE in production without a key, because the degraded mode has no symptom (D-123). **`parent` service + route tests written from nothing** — 37 + 15 + 10 across allow, four indistinguishable denies, immediate revocation, digest idempotence, quiet-week grace, audit PII. **Two real defects found:** `db.execute()` hands back timestamp WIRE STRINGS, so `DigestRecord.generatedAt` was a string typed `Date` (D-124); and `authoriseSelf` was an unenforced guard — mutating it left the whole suite green (D-125). The three failing migration tests were fixed at the CLASS level: no peeling, properties over the discovered set, two fiction-asserting tests DELETED with reasons, one generic round-trip test in their place, and the D-075 lint rule strengthened to count migration names rather than only array literals (D-126). D-122..D-126 | 1,970 |
 
 ---
+
+| 10 Aug 2026 | **`foxy` — the core capability.** Migration `0005_foxy` (`chat_sessions`, `chat_messages`, `retrieval_traces`, forward/rollback proven); 15 module files; 8 domain modules at 100% coverage; five endpoints, one of them SSE. **Guided interface, not open chat** — 3 modes × 6 fixed actions, both TOTAL `Record`s so a new value cannot reach the prompt assembler without a label, an instruction, a budget and a translation (D-163). **Abstention never calls the model** and arrives as a successful 200 with its own frame, its own stored message and its own trace (D-165). **Citations are verified INCREMENTALLY**, so a fabricated marker is stripped before the student sees it rather than after (D-164). Safety classifier before the model, with a real helpline in the harm case and a ten-case false-positive table (D-166). `platform/llm` completed: scripted fake + real adapter, fully tested against a mocked HTTP layer, never called, boot-checked in production (D-170). **A real ordering bug found by the fixed clock** — a question and its reply share a millisecond, so `created_at` cannot order a transcript; `seq bigserial` now does (D-168). **Three authorisation mutations installed and all three observable** — no unenforced guard this time (D-172). D-163..D-172 | 2,491 |
+| 10 Aug 2026 | **Deployment, CI/CD, backups and alerting.** `docker/compose.prod.yml` (9 services, resource limits on every one, an `internal: true` data network with no published ports, volume names that cannot collide with the corpus); three multi-stage non-root Dockerfiles; Caddy for three hostnames with a **dedicated SSE policy** — buffering off, 300s upstream read — because getting it wrong breaks Foxy while looking like a model problem. Path-scoped per-app workflows plus a real `ci-gate` fan-in; a self-testing secret scanner closing D-096; migrations as an explicit step that CHECKS THE CATALOGUE (D-109). Continuous WAL archiving + nightly base backup to a SECOND volume, with a restore drill that was RUN and a self-test proving the drill can FAIL. An alert evaluator that finally READS `metrics_events`. **Eight gates each proven to fail on a deliberate violation**, and two of the proofs found defects in the gates themselves. D-140..D-149, D-160..D-162 | 1,993 |
 
 ## 12. Update protocol
 

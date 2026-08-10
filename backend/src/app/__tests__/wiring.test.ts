@@ -3,9 +3,16 @@ import { RecordingAudit, createNoopAudit } from '@/platform/audit/index';
 import { MemoryCache } from '@/platform/cache/index';
 import { FixedClock } from '@/platform/clock/index';
 import { parseConfig } from '@/platform/config/load-config';
+import { createDeterministicEmbed } from '@/platform/embed/index';
 import { DependencyError } from '@/platform/errors/index';
+import { createFakeLlm } from '@/platform/llm/index';
 import { FakeLogger } from '@/platform/logger/index';
 import { RecordingMail } from '@/platform/mail/index';
+import {
+  FAKE_PROVIDER,
+  RAZORPAY_PROVIDER,
+  createFakePayments,
+} from '@/platform/payments/index';
 import { PLATFORM_METRICS } from '@/platform/metrics/index';
 import { createRateLimiter, RATE_LIMIT_FALLBACK_METRIC } from '@/modules/identity/identity.rate-limit';
 import { createContainer, type Container } from '../container';
@@ -185,5 +192,114 @@ describe('the rate-limit fallback emits a metric', () => {
       .metricsSnapshot()
       .find((series) => series.name === RATE_LIMIT_FALLBACK_METRIC);
     expect(emitted?.value).toBe(1);
+  });
+});
+
+/**
+ * ============================================================================
+ * THE PAYMENT-GATEWAY PORT — the third "wrong without anything failing" adapter
+ * choice in the container, and the worst of the three.
+ *
+ * `embed` on the fake returns confident wrong answers; `llm` on the fake
+ * returns one canned sentence. `payments` on the fake HAPPILY CREATES
+ * SUBSCRIPTIONS and HAPPILY VERIFIES WEBHOOKS SIGNED WITH A SECRET WE CHOSE —
+ * so a production deployment that fell back to it would grant entitlements
+ * against payments that never happened, with no error, no failed request and
+ * nothing in a log. It is discovered by reconciling a bank statement.
+ *
+ * These are the assertions that the boot refusal is REAL rather than a comment
+ * about one. Every case supplies `embed` and `llm` overrides, because those two
+ * checks run FIRST in `createContainer` and would otherwise be the thing that
+ * threw — a green test proving the wrong refusal.
+ * ============================================================================
+ */
+describe('the container chooses a payment gateway and refuses to guess', () => {
+  const PRODUCTION_BASE = {
+    NODE_ENV: 'production',
+    DATABASE_URL: 'postgres://user:pass@localhost:5433/unused',
+    REDIS_URL: 'redis://localhost:6379',
+    CORS_READ_ORIGINS: 'https://app.example.com',
+    CORS_WRITE_ORIGINS: 'https://app.example.com',
+    SESSION_COOKIE_NAME: 'foxxy_session',
+    APP_URL: 'https://app.example.com',
+    API_URL: 'https://api.example.com',
+  } as const;
+
+  const RAZORPAY_ENV = {
+    RAZORPAY_KEY_ID: 'rzp_test_key_id',
+    RAZORPAY_KEY_SECRET: 'rzp_test_key_secret',
+    RAZORPAY_WEBHOOK_SECRET: 'whsec_different_from_the_api_secret',
+    RAZORPAY_PLAN_IDS: 'monthly:plan_MONTH,yearly:plan_YEAR',
+  } as const;
+
+  /** The two adapter choices that precede payments, taken out of the picture. */
+  const AI_OVERRIDES = {
+    embed: createDeterministicEmbed(),
+    llm: createFakeLlm(),
+  };
+
+  it('takes the deterministic fake in development, guarded', () => {
+    const built = makeContainer();
+    expect(built.payments.name).toBe(FAKE_PROVIDER);
+  });
+
+  it('REFUSES TO BOOT in production with no credentials, naming the missing one', () => {
+    const config = parseConfig(PRODUCTION_BASE);
+    expect(() => createContainer(config, AI_OVERRIDES)).toThrow(/RAZORPAY_KEY_ID/);
+  });
+
+  it('names RAZORPAY_WEBHOOK_SECRET specifically when only that one is absent', () => {
+    /**
+     * THE CASE MOST LIKELY TO HAPPEN. The webhook secret is a DIFFERENT secret
+     * from the API key, issued per endpoint in the Razorpay dashboard, and
+     * setting the API key pair while forgetting it is the standard
+     * misconfiguration. Its symptom without this check is not an outage: it is
+     * checkout working perfectly while every genuine delivery fails its
+     * signature — money in, no access.
+     */
+    const config = parseConfig({
+      ...PRODUCTION_BASE,
+      RAZORPAY_KEY_ID: RAZORPAY_ENV.RAZORPAY_KEY_ID,
+      RAZORPAY_KEY_SECRET: RAZORPAY_ENV.RAZORPAY_KEY_SECRET,
+    });
+    expect(() => createContainer(config, AI_OVERRIDES)).toThrow(/RAZORPAY_WEBHOOK_SECRET/);
+  });
+
+  it('takes the Razorpay adapter in production once all three are set', async () => {
+    const config = parseConfig({ ...PRODUCTION_BASE, ...RAZORPAY_ENV });
+    const built = createContainer(config, AI_OVERRIDES);
+    try {
+      expect(built.payments.name).toBe(RAZORPAY_PROVIDER);
+    } finally {
+      await built.shutdown();
+    }
+  });
+
+  it('lets an EXPLICIT override through in production without credentials', async () => {
+    /**
+     * "No key was set" and "this deployment supplies its own port" are
+     * different facts, and only one of them should be refused. The refusal is
+     * about the SILENT fallback, not about the fake itself.
+     */
+    const config = parseConfig(PRODUCTION_BASE);
+    const built = createContainer(config, {
+      ...AI_OVERRIDES,
+      payments: createFakePayments({ secret: 'explicit' }),
+    });
+    try {
+      expect(built.payments.name).toBe(FAKE_PROVIDER);
+    } finally {
+      await built.shutdown();
+    }
+  });
+
+  it('hands billing the container’s port rather than letting it build one', () => {
+    // `BillingModuleDeps.payments` is REQUIRED, so this cannot be silently
+    // omitted — but it could be satisfied with a locally-constructed adapter,
+    // which would sidestep both the guard and the boot refusal above.
+    const built = makeContainer();
+    const modules = buildModules(built);
+    expect(modules.billing.service).toBeDefined();
+    expect(built.payments.name).toBe(FAKE_PROVIDER);
   });
 });

@@ -4,6 +4,7 @@ import type {
   CreatedSubscription,
   PaymentsPort,
   VerifiedWebhook,
+  WebhookDelivery,
 } from './payments.port';
 
 /**
@@ -16,6 +17,7 @@ import type {
  *    a double charge is a refund, a chargeback and a customer who will not use
  *    the product again. The guard never retries on its own, and no caller may
  *    add one — `platform/retry` refuses a budget on a non-idempotent call.
+ *    `cancelSubscription` is guarded on the same terms.
  *
  *  - `verifyWebhook` is NOT guarded. It is a local HMAC comparison with no
  *    network call in it, and routing it through a breaker would mean an open
@@ -25,11 +27,16 @@ import type {
  */
 export function createGuardedPayments(inner: PaymentsPort, guard: PortGuard): PaymentsPort {
   return {
+    // Forwarded, not re-derived. See `PaymentsPort.name`.
+    name: inner.name,
     createSubscription(req: CreateSubscriptionRequest): Promise<CreatedSubscription> {
       return guard.run(() => inner.createSubscription(req));
     },
-    verifyWebhook(rawBody: string, signature: string): VerifiedWebhook | null {
-      return inner.verifyWebhook(rawBody, signature);
+    cancelSubscription(providerSubscriptionId: string): Promise<void> {
+      return guard.run(() => inner.cancelSubscription(providerSubscriptionId));
+    },
+    verifyWebhook(delivery: WebhookDelivery): VerifiedWebhook | null {
+      return inner.verifyWebhook(delivery);
     },
   };
 }

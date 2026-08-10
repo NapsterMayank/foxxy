@@ -1,0 +1,67 @@
+# =============================================================================
+# INFRASTRUCTURE-OWNED. No application pipeline may write this file or anything
+# under conf.d/.
+#
+# 06-FRONTEND-SEPARATION-PLAN.md: "Keep proxy configuration in an
+# infrastructure-owned Compose/Caddy include that no application pipeline can
+# write. Marketing deployment credentials cannot restart, recreate, or inspect
+# product containers and volumes."
+#
+# HOW THAT IS ENFORCED, in three layers, because a comment enforces nothing:
+#
+#   1. The whole directory is mounted READ-ONLY into the caddy container
+#      (`:ro` in compose.prod.yml). Caddy itself cannot rewrite its own config.
+#   2. `.github/CODEOWNERS` requires an infrastructure review on docker/caddy/**
+#      and on docker/compose.prod.yml.
+#   3. `docker/deploy-app.sh` — the only deployment entry point the application
+#      pipelines have — REFUSES the service names `caddy`, `postgres`, `valkey`
+#      and `backup`. A marketing deploy can restart `website` and nothing else.
+#
+# THE DOMAIN IS A PLACEHOLDER. `{$BASE_DOMAIN}` is substituted by Caddy from the
+# environment; it is set in `docker/.env.prod` (see `.env.prod.example`) and
+# nowhere else. Three hostnames are derived from it:
+#
+#     {$BASE_DOMAIN}          marketing   -> website:3000
+#     app.{$BASE_DOMAIN}      product     -> frontend:3000
+#     api.{$BASE_DOMAIN}      backend     -> backend-api:4000
+#
+# It must agree with APP_URL / API_URL / CORS_*_ORIGINS in the backend
+# environment (D-022, D-082). They are separate variables on purpose — the
+# backend must fail at boot on a mismatch rather than silently serve an origin
+# the proxy does not route.
+# =============================================================================
+{
+	# ACME contact. Let's Encrypt uses it for expiry warnings; without it a
+	# certificate renewal failure is discovered by a user, not by an operator.
+	email {$ACME_EMAIL}
+
+	servers {
+		timeouts {
+			# Bounded so a slow-loris client cannot hold a connection open
+			# indefinitely while sending one byte a minute.
+			read_body 30s
+			read_header 10s
+			# Idle is KEEP-ALIVE idleness between requests, not silence within a
+			# streaming response, so a long SSE stream is unaffected by it.
+			idle 300s
+			# `write` is deliberately LEFT UNSET (Caddy default: no limit).
+			#
+			# This is the one honest limitation of the SSE policy. A server-level
+			# write timeout applies to the whole listener, which every one of the
+			# three hostnames shares, so setting it to a value safe for ordinary
+			# routes (say 30s) would sever every Foxy stream at 30 seconds — and
+			# it would look like a model timeout, not a proxy setting.
+			#
+			# Per-route bounding is therefore done UPSTREAM instead, in the
+			# `transport http { read_timeout ... }` of each reverse_proxy below:
+			# ordinary API routes get 30s, the Foxy stream gets 300s. That is the
+			# limit that actually protects the backend. What is not bounded here
+			# is a slow CLIENT reading an ordinary response, which is the
+			# cheaper of the two exposures.
+		}
+	}
+}
+
+# Every hostname is defined in its own include, so a change to one is a diff
+# that cannot touch the others.
+import /etc/caddy/conf.d/*.caddy

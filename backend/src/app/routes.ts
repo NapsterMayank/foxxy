@@ -1,11 +1,21 @@
 import type { FastifyInstance } from 'fastify';
 import type { LinkStatus } from '../platform/authz/index';
+import type { Payer } from '../platform/payments/index';
+import { createBillingModule, type BillingModule } from '../modules/billing/index';
 import { createContentModule, type ContentModule } from '../modules/content/index';
+import { createFoxyModule, type FoxyModule } from '../modules/foxy/index';
 import { createIdentityModule, type IdentityModule } from '../modules/identity/index';
+import { createKnowledgeModule, type KnowledgeModule } from '../modules/knowledge/index';
 import { createLearnerModule, type LearnerModule } from '../modules/learner/index';
 import { createParentModule, type ParentModule } from '../modules/parent/index';
-import { createPracticeModule, type PracticeModule } from '../modules/practice/index';
+import {
+  MIN_AVERAGE_MS_PER_QUESTION,
+  createPracticeModule,
+  validateAttempt,
+  type PracticeModule,
+} from '../modules/practice/index';
 import { createRetrievalModule, type RetrievalModule } from '../modules/retrieval/index';
+import { createSignalsModule, type SignalsModule } from '../modules/signals/index';
 import {
   createNotifyModule,
   type DigestSource,
@@ -22,9 +32,20 @@ import type { Container } from './container';
  * which modules exist, what they are given, and — since every cross-module
  * dependency is injected rather than imported — the complete dependency graph.
  *
- * There are exactly two edges today, both from `learner`/`content` to
- * `identity`, and both are visible in `buildModules` below: session validation
- * and the parent-child link status. Neither module imports `@/modules/identity`.
+ * ELEVEN MODULES, and every cross-module edge among them is a FUNCTION BOUND IN
+ * `buildModules` BELOW — session validation, the parent-child link status, the
+ * account tenant, the mastery write, the retrieval search, the anti-cheat floor.
+ * Not one module imports another, which is the property that keeps this file
+ * the complete dependency graph rather than a partial one (D-051).
+ *
+ * THREE OF THE ELEVEN REGISTER NO ROUTES — `retrieval`, `knowledge` and
+ * `signals` — and that is a decision rather than an omission in each case. See
+ * their entries below and the note at the foot of `registerRoutes`, which says
+ * so explicitly because "built but never registered" reads exactly like a
+ * mistake somebody would helpfully correct.
+ *
+ * `billing` and `identity` are the two whose registration is ASYNCHRONOUS and
+ * must be awaited; every other module's is a plain call.
  */
 export interface Modules {
   readonly identity: IdentityModule;
@@ -46,6 +67,55 @@ export interface Modules {
    * was never constructed, and the `ai`-pool assignment below stays greppable.
    */
   readonly retrieval: RetrievalModule;
+  /**
+   * THE ONLY MODULE THAT CALLS AN EXTERNAL SERVICE INSIDE A USER REQUEST.
+   *
+   * Five endpoints, all `/api/v1/foxy/*`, one of which streams. It is the sole
+   * consumer of `retrieval` — which has no HTTP surface precisely so that the
+   * grade and subject filters are chosen by a module with a session rather than
+   * by a caller.
+   */
+  readonly foxy: FoxyModule;
+  /**
+   * FOUR ENDPOINTS UNDER `/api/v1`, AND ITS `registerRoutes` IS AWAITED.
+   *
+   * It is the only module besides `identity` whose registration returns a
+   * promise, because the webhook needs its OWN ENCAPSULATED FASTIFY SCOPE for
+   * a raw-body parser — the HMAC is computed over the exact bytes Razorpay
+   * sent, and a JSON parse followed by a re-serialise is not those bytes. A
+   * missing `await` would let `app.ready()` run before the scope exists, and
+   * the symptom is a webhook route that 404s in production only.
+   */
+  readonly billing: BillingModule;
+  /**
+   * NO HTTP SURFACE, AND THAT IS NOT AN OVERSIGHT — the same decision as
+   * `retrieval` above (D-122).
+   *
+   * `knowledge` is the prerequisite concept graph: curriculum structure,
+   * consumed in-process by whatever decides what a student does next. An
+   * endpoint returning it would be a way to page the syllabus, and a caller who
+   * chose the filters could choose a grade the student is not in — the same
+   * reasoning that keeps `retrieval` off the wire.
+   *
+   * It is a member of `Modules` rather than a local for the same reason
+   * `retrieval` is: the type is total, so the day something needs the graph it
+   * cannot be handed a service that was never constructed, and the `core`-pool
+   * assignment below stays greppable.
+   */
+  readonly knowledge: KnowledgeModule;
+  /**
+   * NO HTTP SURFACE EITHER, AND ALSO NOT AN OVERSIGHT.
+   *
+   * `signals` detects anomalies ABOUT A NAMED STUDENT — inactivity, a mastery
+   * drop, suspiciously fast completion. An endpoint would be a way to ask about
+   * a student the caller may not be entitled to see, and this module has no
+   * session and no access guard of its own. Detection is called in-process by
+   * whatever notifies a teacher or a parent, and THAT caller carries the
+   * boundary.
+   *
+   * Its `antiCheat` edge below is the one wiring line worth reading twice.
+   */
+  readonly signals: SignalsModule;
 }
 
 export interface BuildModulesOptions {
@@ -418,6 +488,98 @@ export function buildModules(container: Container, options: BuildModulesOptions 
     logger: container.logger,
   });
 
+  /**
+   * ==========================================================================
+   * foxy — THE ONLY EXTERNAL CALL INSIDE A USER REQUEST.
+   *
+   * Six injected edges, to four modules, all visible here and none of them an
+   * import: the retrieval itself from `retrieval`, the grade/subjects and the
+   * preferred language from `learner`, the account tenant from `identity`, and
+   * the subscription plan from `billing` — which does not exist, so the reader
+   * below reports "no subscription" and the service reads that as `free`.
+   *
+   * THREE LINES BELOW ARE LOAD-BEARING.
+   *
+   *  1. `search` IS BOUND TO `retrieval.service.search` AND THE FILTERS ARE NOT
+   *     PASSED THROUGH FROM ANY REQUEST. `foxy` builds them from the session's
+   *     subject and the student's own grade. This is the reason `retrieval` has
+   *     no HTTP surface at all: a caller who could choose the filters could
+   *     choose a grade the student is not in.
+   *
+   *  2. `readTenantOfStudent` READS `users.tenant_id`. Passing `actor.tenantId`
+   *     would type-check perfectly and turn `assertTenantMatch` into a
+   *     comparison of a value with itself — a check that always passes wearing
+   *     the shape of one that sometimes fails. That is not hypothetical: it
+   *     shipped in `notify` (D-091) and again, undetected, in `parent`'s
+   *     `authoriseSelf` (D-125).
+   *
+   *  3. `model` COMES FROM CONFIGURATION AND IS STAMPED ON EVERY TRACE. The
+   *     model id is an environment variable, so which model produced a given
+   *     answer is not derivable from the code afterwards. Per-row is the only
+   *     place it can be true.
+   * ==========================================================================
+   */
+  const foxy = createFoxyModule({
+    // §3.1: the `ai` pool, like `retrieval` and for the same reason — a Foxy
+    // turn is a retrieval plus a model call, and a slow one must not be able to
+    // hold a connection that a login needs.
+    db: forWorker ? container.pools.worker : container.poolFor('foxy'),
+    clock: container.clock,
+    logger: container.logger,
+    // Already behind its bulkhead, breaker and both timeout rules — the
+    // composition root never hands out a bare adapter.
+    llm: container.llm,
+    // Usage counters. In `platform/cache`, never in process memory (§7).
+    cache: container.cache,
+    requireSession: identity.requireSession,
+
+    search: async (query, filters) => {
+      const result = await retrieval.service.search(query, {
+        grade: filters.grade,
+        subject: filters.subject,
+      });
+      // NARROWED, not passed through. `foxy` needs the text, the citation
+      // fields and the ranking; it has no use for the embedding model name or
+      // the duplicate groups, and a wider shape is a wider thing to leak into a
+      // prompt later.
+      return {
+        chunks: result.chunks.map((chunk) => ({
+          id: chunk.id,
+          chunkText: chunk.chunkText,
+          chapterNumber: chunk.chapterNumber,
+          chapterTitle: chunk.chapterTitle,
+          score: chunk.score,
+          rank: chunk.rank,
+        })),
+        shouldAbstain: result.shouldAbstain,
+        confidence: result.confidence,
+        normalisedQuery: result.trace.normalisedQuery,
+        abstainReason: result.trace.abstainReason,
+      };
+    },
+
+    // D-091 / D-125 — read from the DATA, never echoed off the actor.
+    readTenantOfStudent: (studentUserId: string): Promise<string | null> =>
+      identity.service.getTenantOfUser(studentUserId),
+
+    readStudentContext: async (actor, studentUserId) => {
+      const [profile, subjects] = await Promise.all([
+        learner.service.getProfile(actor, studentUserId),
+        learner.service.getSubjects(actor, studentUserId),
+      ]);
+      return { grade: profile.grade, subjects };
+    },
+    readLanguage: async (actor, studentUserId) =>
+      (await learner.service.getProfile(actor, studentUserId)).preferredLanguage,
+
+    // `billing` is build step 13. Until it exists every account reports no
+    // subscription, which the service reads as `free` — stated here rather than
+    // defaulted invisibly inside the module.
+    readPlan: (): Promise<null> => Promise.resolve(null),
+
+    model: config.ai.llmModel ?? 'unset',
+  });
+
   const notify = createNotifyModule({
     // §3.1: notify's HTTP surface is ordinary request traffic, so `core`. In
     // the worker it is background work and gets `worker` — the delivery job
@@ -473,7 +635,144 @@ export function buildModules(container: Container, options: BuildModulesOptions 
     digest: options.digest ?? parent.digestSource,
   });
 
-  return { identity, learner, content, practice, parent, notify, retrieval };
+  /**
+   * ==========================================================================
+   * billing — TWO EDGES, AND THE SECOND ONE IS A COMMERCIAL DECISION.
+   *
+   * `readTenantOfUser` is the same D-091 wiring every other module gets: the
+   * resource tenant read from `users` through `identity`, never echoed off the
+   * actor. `billing.authz-mutation.test.ts` installs the broken version
+   * deliberately and proves a cross-tenant read then succeeds, so this line is
+   * load-bearing rather than ceremonial.
+   *
+   * `resolvePayer` IS THE B2C/B2B ANSWER, and it is one line HERE precisely so
+   * that it is not a hundred lines inside the module. `billing` never
+   * constructs a payer, so it cannot assume a parent is paying; a subscription
+   * carries `subject_user_id` (whose entitlements) and a payer as INDEPENDENT
+   * facts, with a database CHECK making any other combination unrepresentable
+   * (D-150). Changing the product to a B2B school pilot is an edit to the
+   * function below and to nothing else.
+   *
+   * The `payments` port arrives from the container ALREADY GUARDED and already
+   * chosen: Razorpay when credentials exist, the deterministic fake otherwise,
+   * and a production boot refusal in between. That refusal is why this line can
+   * be read as "the real gateway" — see `Container.payments`.
+   * ==========================================================================
+   */
+  const billing = createBillingModule({
+    // §3.1: ordinary request traffic, so the `core` pool.
+    db: forWorker ? container.pools.worker : container.poolFor('billing'),
+    clock: container.clock,
+    logger: container.logger,
+    requireSession: identity.requireSession,
+    payments: container.payments,
+
+    // D-091 / D-125 — read from the DATA, never echoed off the actor.
+    readTenantOfUser: (userId: string): Promise<string | null> =>
+      identity.service.getTenantOfUser(userId),
+
+    /**
+     * THE B2C ANSWER: the beneficiary pays for themselves.
+     *
+     * `subjectUserId` and NOT `actor.userId`, even though today they are equal
+     * for every path that reaches here. They are equal because
+     * `authoriseSubscription` has already refused any actor who is not the
+     * subject — so writing `actor.userId` would be relying on a guard elsewhere
+     * to keep two values in step, and the day a parent may subscribe FOR a
+     * child that reliance silently bills the wrong person. Naming the subject
+     * makes the row say what it means.
+     *
+     * The B2B pilot replaces this with a school lookup returning
+     * `{ kind: 'school', id }`, and returning null refuses the checkout rather
+     * than falling back to charging the actor.
+     */
+    resolvePayer: (subjectUserId: string): Promise<Payer | null> =>
+      Promise.resolve({ kind: 'user', id: subjectUserId }),
+
+    // Subscription creation, cancellation and REJECTED WEBHOOKS are audited.
+    // Wired here rather than defaulted inside the module, for the same reason
+    // identity's and parent's are: the module's own default is a no-op, and a
+    // silently-unwired audit log is indistinguishable from one that is working
+    // and has nothing to say.
+    audit: container.audit,
+  });
+
+  /**
+   * ==========================================================================
+   * knowledge — CONSTRUCTED HERE, REGISTERED NOWHERE. Deliberate; see
+   * `Modules.knowledge`.
+   *
+   * ONE dependency and no cross-module edges at all: it owns `concept_graph`,
+   * `chapter_concepts` and the chapter rows it projects onto, and it asks
+   * nobody anything. The 176 graph edges were imported with the corpus and,
+   * until this module, NOTHING READ THEM.
+   *
+   * THE `core` POOL, following `content` — these are small indexed curriculum
+   * reads, the same cost profile as a chapter listing. Note this is not the
+   * same rule as "the pool of the table's owner": `retrieval` also reads a
+   * table `content` owns and still gets `ai`, because a vector scan has nothing
+   * in common with a chapter listing. Here the profiles genuinely match.
+   * ==========================================================================
+   */
+  const knowledge = createKnowledgeModule({
+    db: forWorker ? container.pools.worker : container.poolFor('knowledge'),
+    logger: container.logger,
+  });
+
+  /**
+   * ==========================================================================
+   * signals — CONSTRUCTED HERE, REGISTERED NOWHERE. Deliberate; see
+   * `Modules.signals`.
+   *
+   * THE ONE LINE THAT MATTERS IS `antiCheat`, and what matters about it is that
+   * it is a REFERENCE rather than a value.
+   *
+   * `signals`' `fast_completion` rule is defined relative to the floor that
+   * `practice` rejects a submission by. There is DELIBERATELY NO DEFAULT on the
+   * edge (D-131), so a missing wiring is a compile error rather than a silent
+   * second copy of `3_000` — and both fields below come from
+   * `practice/index.ts` rather than being restated here. Two copies of a
+   * threshold drift, and the symptom of that drift is a signal that quietly
+   * stops agreeing with the rejection it is defined relative to: sessions
+   * refused as too fast that raise no anomaly, or anomalies raised for sessions
+   * nobody refused. Neither errors.
+   *
+   * `isAttemptValid` DISCARDS THE REASON on purpose. `validateAttempt` returns
+   * which of the three checks failed, and that reason belongs to `practice` —
+   * it is written to `practice_sessions.invalid_reason` and read by a human
+   * deciding what to say to a student. `signals` needs the VERDICT to decide
+   * whether a fast session was already rejected; giving it the reason would
+   * invite it to grow its own opinion about what the reason means, in a second
+   * place, from evidence it did not gather.
+   *
+   * THE `core` POOL, following `practice` — small indexed reads over one
+   * student's recent sessions.
+   * ==========================================================================
+   */
+  const signals = createSignalsModule({
+    db: forWorker ? container.pools.worker : container.poolFor('signals'),
+    antiCheat: {
+      minimumAverageMsPerQuestion: MIN_AVERAGE_MS_PER_QUESTION,
+      isAttemptValid: (responses, questionCount): boolean =>
+        validateAttempt(responses, questionCount).isValid,
+    },
+    clock: container.clock,
+    logger: container.logger,
+  });
+
+  return {
+    identity,
+    learner,
+    content,
+    practice,
+    parent,
+    notify,
+    retrieval,
+    foxy,
+    billing,
+    knowledge,
+    signals,
+  };
 }
 
 /**
@@ -503,6 +802,40 @@ export async function registerRoutes(
   modules.practice?.registerRoutes(app);
   modules.parent?.registerRoutes(app);
   modules.notify?.registerRoutes(app);
-  // `retrieval` is deliberately absent. It has no HTTP surface — see the note
-  // on `Modules.retrieval`. Adding a line for it here is the regression.
+  modules.foxy?.registerRoutes(app);
+  /**
+   * AWAITED, unlike every module above it except `identity`.
+   *
+   * `billing.registerRoutes` returns a promise because the webhook is
+   * registered inside its OWN ENCAPSULATED FASTIFY SCOPE, which needs a raw-body
+   * content-type parser: the HMAC is computed over the exact bytes Razorpay
+   * sent, and a JSON parse followed by a re-serialise is not those bytes.
+   * `app.register` is asynchronous, so dropping the `await` here lets
+   * `app.ready()` run before the scope is installed — and the symptom is a
+   * webhook that 404s, in production only, for every genuine delivery.
+   */
+  if (modules.billing !== undefined) {
+    await modules.billing.registerRoutes(app);
+  }
+  /**
+   * `retrieval`, `knowledge` AND `signals` ARE DELIBERATELY ABSENT — all three
+   * are constructed in `buildModules` and none of them is registered here.
+   *
+   * Stated explicitly because "built but never registered" reads exactly like
+   * an oversight, and the next person to notice will otherwise close the
+   * apparent gap by adding three lines. Each one is a decision:
+   *
+   *   retrieval  an endpoint would be an unauthenticated way to page the
+   *              corpus, and a caller who chose the filters could choose a
+   *              grade the student is not in (D-122). Reached in-process by
+   *              `foxy`, which has a session.
+   *   knowledge  an endpoint would be a way to page the syllabus, for the same
+   *              filter-choosing reason. Curriculum structure consumed by
+   *              whatever plans a student's next step.
+   *   signals    every answer it gives is ABOUT A NAMED STUDENT, and the module
+   *              has no session and no access guard of its own. The caller that
+   *              notifies a teacher or a parent carries that boundary.
+   *
+   * Adding a line here for any of the three is the regression, not the fix.
+   */
 }

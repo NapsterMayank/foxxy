@@ -215,7 +215,18 @@ const migrationChainPlugin = {
 
 export default tseslint.config(
   {
-    ignores: ['dist/**', 'coverage/**', 'node_modules/**', 'drizzle/**', 'eslint.config.js'],
+    // `dist-ops/` is build OUTPUT, like `dist/` — the compiled operational entry
+    // points (migrations, the alert evaluator) that the production image runs
+    // with `--omit=dev`, where tsx does not exist. Omitting it here made `npm
+    // run lint` report 256 errors in generated JavaScript.
+    ignores: [
+      'dist/**',
+      'dist-ops/**',
+      'coverage/**',
+      'node_modules/**',
+      'drizzle/**',
+      'eslint.config.js',
+    ],
   },
 
   js.configs.recommended,

@@ -216,6 +216,71 @@ export const envSchema = z.object({
    * metric. See the header of `platform/embed/voyage-embed.ts`.
    */
   VOYAGE_API_KEY: z.string().min(1).optional(),
+
+  /**
+   * THE LANGUAGE-MODEL KEY — optional here, REQUIRED IN PRODUCTION.
+   *
+   * Exactly the shape `VOYAGE_API_KEY` above takes, and for exactly the same
+   * reasons: optional in the schema so development and every test run on the
+   * deterministic fake with no key and no network, required in production by an
+   * explicit check in the composition root rather than by a mandatory variable
+   * that would force every fixture to invent a fake key — and a fake key that
+   * parses is the thing that would then reach a paid API.
+   *
+   * The failure this closes is LOUDER than the embedding one and still worth a
+   * boot check: with no key, production would fall back to the scripted fake and
+   * every student would be told the same canned sentence about photosynthesis,
+   * with citations, in a UI that looks entirely healthy.
+   */
+  LLM_API_KEY: z.string().min(1).optional(),
+
+  /**
+   * The model id, overridable WITHOUT a code change.
+   *
+   * §0 of the architecture requires the language model to be replaceable by one
+   * adapter file and by configuration. A model pinned only in source means
+   * switching it is a deploy; here it is an environment variable, and the value
+   * that was actually used is stamped on every trace row (§8.5) so the two can
+   * never be assumed to agree.
+   */
+  LLM_MODEL: z.string().min(1).optional(),
+  LLM_BASE_URL: z.string().url().optional(),
+
+  /**
+   * THE PAYMENT CREDENTIALS — optional here, REQUIRED IN PRODUCTION.
+   *
+   * The same shape, and the same reasoning, as `VOYAGE_API_KEY`: optional in
+   * the schema because every test and every development run uses
+   * `createFakePayments`, which needs no account; required in production by an
+   * explicit check in the composition root, NOT by making the variable
+   * mandatory here. A mandatory variable would force every test fixture to
+   * invent a fake key, and a fake key that parses is exactly the thing that
+   * would then reach Razorpay.
+   *
+   * The degraded mode this prevents is worse than the embedding one. With no
+   * credentials and no boot check, production would fall back to the
+   * deterministic fake — which happily "creates subscriptions" and happily
+   * verifies webhooks signed with a secret we chose. Entitlements would be
+   * granted against payments that never happened, with no error anywhere.
+   *
+   * `RAZORPAY_WEBHOOK_SECRET` IS A DIFFERENT SECRET FROM `RAZORPAY_KEY_SECRET`,
+   * set per endpoint in the Razorpay dashboard. Conflating them is a common
+   * misconfiguration whose symptom is that every genuine webhook fails its
+   * signature check while everything else about the integration works.
+   */
+  RAZORPAY_KEY_ID: z.string().min(1).optional(),
+  RAZORPAY_KEY_SECRET: z.string().min(1).optional(),
+  RAZORPAY_WEBHOOK_SECRET: z.string().min(1).optional(),
+  /**
+   * Our plan code -> Razorpay's `plan_id`, as comma-separated `code:plan_id`
+   * pairs.
+   *
+   * A VARIABLE rather than a constant, because a Razorpay plan id is created in
+   * their dashboard and DIFFERS between the test and live accounts. Hardcoding
+   * one would mean a staging deployment silently subscribing people to a
+   * production plan — a real charge, on a real card, from a test click.
+   */
+  RAZORPAY_PLAN_IDS: z.string().optional(),
 })
   /**
    * WRITE IS A SUBSET OF READ. See the note on `CORS_READ_ORIGINS`.
@@ -344,7 +409,39 @@ export interface Config {
    */
   readonly ai: {
     readonly voyageApiKey: string | null;
+    /** `null` when this deployment has no key — a fact, not an omission. */
+    readonly llmApiKey: string | null;
+    /** `null` means "the adapter's own default". Stamped on every trace. */
+    readonly llmModel: string | null;
+    readonly llmBaseUrl: string | null;
   };
+  /**
+   * The payment-gateway credentials.
+   *
+   * `null` rather than `undefined` when absent, for the same reason as the AI
+   * keys: `undefined` on a readonly property is indistinguishable from a
+   * property nobody thought to set, and these have a boot-time consequence.
+   */
+  readonly payments: {
+    readonly razorpayKeyId: string | null;
+    readonly razorpayKeySecret: string | null;
+    readonly razorpayWebhookSecret: string | null;
+    /** Our plan code -> Razorpay's plan id. Empty when unconfigured. */
+    readonly razorpayPlanIds: Readonly<Record<string, string>>;
+  };
+}
+
+/** `monthly:plan_ABC,yearly:plan_DEF` -> a map. Malformed pairs are dropped. */
+function parsePlanIds(value: string | undefined): Readonly<Record<string, string>> {
+  if (value === undefined) return Object.freeze({});
+  const entries: [string, string][] = [];
+  for (const pair of value.split(',')) {
+    const [code, planId] = pair.split(':').map((part) => part.trim());
+    if (code !== undefined && planId !== undefined && code.length > 0 && planId.length > 0) {
+      entries.push([code, planId]);
+    }
+  }
+  return Object.freeze(Object.fromEntries(entries));
 }
 
 /** Maps validated environment values into the nested, frozen shape. */
@@ -390,6 +487,17 @@ export function toConfig(env: Env): Config {
       workerTimeoutMs: env.SHUTDOWN_WORKER_TIMEOUT_MS,
     }),
     tenancy: Object.freeze({ defaultTenantId: env.DEFAULT_TENANT_ID }),
-    ai: Object.freeze({ voyageApiKey: env.VOYAGE_API_KEY ?? null }),
+    ai: Object.freeze({
+      voyageApiKey: env.VOYAGE_API_KEY ?? null,
+      llmApiKey: env.LLM_API_KEY ?? null,
+      llmModel: env.LLM_MODEL ?? null,
+      llmBaseUrl: env.LLM_BASE_URL ?? null,
+    }),
+    payments: Object.freeze({
+      razorpayKeyId: env.RAZORPAY_KEY_ID ?? null,
+      razorpayKeySecret: env.RAZORPAY_KEY_SECRET ?? null,
+      razorpayWebhookSecret: env.RAZORPAY_WEBHOOK_SECRET ?? null,
+      razorpayPlanIds: parsePlanIds(env.RAZORPAY_PLAN_IDS),
+    }),
   });
 }

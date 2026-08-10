@@ -1,0 +1,78 @@
+# =============================================================================
+# PRODUCT FRONTEND CI — app.<domain>
+#
+# `workflow_call` only; invoked by ci.yml when `frontend/**` changed.
+#
+# 06-FRONTEND-SEPARATION-PLAN.md: "The product pipeline owns only `frontend/`."
+# It installs nothing from `website/` and nothing from `backend/`, so a
+# marketing dependency bump cannot rebuild or break the product.
+# =============================================================================
+
+name: frontend-ci
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: type-check · lint · test · build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      # Synthetic, not production. An ephemeral CI build must never hold a
+      # production secret or point at a production origin — the separation plan
+      # is explicit that preview builds get "synthetic content and no production
+      # secrets".
+      NEXT_PUBLIC_API_URL: https://api.example.com
+      NEXT_PUBLIC_APP_URL: https://app.example.com
+      NEXT_PUBLIC_MARKETING_URL: https://example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: install
+        run: npm ci
+
+      - name: type-check
+        run: npm run typecheck
+
+      - name: lint
+        run: npm run lint
+
+      - name: test
+        run: npm test
+
+      - name: build
+        run: npm run build
+
+      # The production image is built from `.next/standalone`, which only exists
+      # when `output: 'standalone'` is set. If that line is ever removed the
+      # build still succeeds and the DOCKER build fails later, in a place that
+      # does not name the cause.
+      - name: the standalone server output exists (the Docker image needs it)
+        run: |
+          set -euo pipefail
+          test -f .next/standalone/server.js \
+            || { echo "FAIL: no .next/standalone/server.js — is output:'standalone' still set in next.config.ts?"; exit 1; }
+          echo "standalone output present"
+
+      - name: the Docker image builds
+        run: |
+          docker build \
+            --build-arg NEXT_PUBLIC_API_URL="$NEXT_PUBLIC_API_URL" \
+            --build-arg NEXT_PUBLIC_APP_URL="$NEXT_PUBLIC_APP_URL" \
+            --build-arg NEXT_PUBLIC_MARKETING_URL="$NEXT_PUBLIC_MARKETING_URL" \
+            -t foxxy/frontend:ci .

@@ -1,0 +1,483 @@
+# =============================================================================
+# PRODUCTION STACK — Alfanumrik / Foxxy
+#
+# Run from the `docker/` directory:
+#     docker compose -f compose.prod.yml --env-file .env.prod config     # validate
+#     docker compose -f compose.prod.yml --env-file .env.prod up -d
+#
+# THIS FILE IS INFRASTRUCTURE-OWNED. `.github/CODEOWNERS` requires an
+# infrastructure review, and no application pipeline runs `docker compose up`
+# against the whole file — they call `docker/deploy-app.sh <app>`, which refuses
+# every service except the three application containers.
+#
+# =============================================================================
+# WHAT IS DELIBERATELY NOT HERE, AND WHY.
+#
+# The DEVELOPMENT stack (`backend/docker/compose.yml`) is untouched and stays
+# untouched. It holds an imported corpus — 137 chapters, 4,686 chunks, 2,741
+# questions — in the named volumes `foxxy_postgres_data` / `foxxy_valkey_data`.
+# Every volume below carries a DIFFERENT name (`foxxy_prod_*`), and this file
+# uses the project name `foxxy-prod`, so nothing here can bind, overwrite or
+# recreate a development container. That is not a convention; the names simply
+# do not collide.
+#
+# =============================================================================
+# TWO NETWORKS.
+#
+#   edge      caddy plus the three application containers. Internet-facing.
+#   internal  postgres, valkey, backup. `internal: true` — NO route to or from
+#             the internet, and no published ports. The database is reachable
+#             only from a container that is on this network by name.
+#
+# Postgres and Valkey publish NOTHING to the host. The most common way a
+# self-hosted database is compromised is a `ports: 5432:5432` left in from
+# development; there is no such line below, and the runbook's psql access is
+# `docker compose exec`, which needs no exposed port.
+#
+# =============================================================================
+# RESOURCE LIMITS ARE ON EVERY SERVICE, AND THEY ARE NOT DECORATION.
+#
+# 06-FRONTEND-SEPARATION-PLAN.md: "Apply CPU and memory limits to marketing/CMS
+# containers so they cannot exhaust resources reserved for the product", and
+# the verification step "Confirm exhausting marketing container limits leaves
+# product login and health endpoints responsive."
+#
+# Marketing gets the smallest budget in the stack. It is the surface with the
+# most frequent, least-reviewed deployments, and the one whose failure should
+# cost the least.
+#
+# The reservations are as important as the limits: a limit stops a container
+# taking everything, a reservation stops it being starved by one that does.
+# =============================================================================
+
+name: foxxy-prod
+
+# --- YAML anchors: repeated blocks declared once -----------------------------
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '5'
+
+x-backend-env: &backend-env
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  DATABASE_SSL: 'false' # in-cluster, on an internal network with no route out
+  REDIS_URL: redis://valkey:6379
+  APP_URL: https://app.${BASE_DOMAIN}
+  API_URL: https://api.${BASE_DOMAIN}
+  # D-082 — two lists, and write must be a subset of read or the app refuses to
+  # boot. Neither includes the marketing origin: the marketing site never calls
+  # the product API (06-FRONTEND-SEPARATION-PLAN.md).
+  CORS_READ_ORIGINS: https://app.${BASE_DOMAIN}
+  CORS_WRITE_ORIGINS: https://app.${BASE_DOMAIN}
+  SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-foxxy_session}
+  DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-11111111-1111-4111-8111-111111111111}
+  VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  RESEND_API_KEY: ${RESEND_API_KEY:-}
+
+services:
+  # ===========================================================================
+  # DATA
+  # ===========================================================================
+
+  # One-shot. The backup volume is created root-owned by Docker; postgres runs
+  # as uid 999 and its `archive_command` writes into it on every WAL segment.
+  # Without this the archive fails silently-ish — postgres retries forever,
+  # WAL accumulates in pg_wal, and the disk fills. Ordering is enforced by
+  # `service_completed_successfully` below, not by hope.
+  backup-init:
+    image: alpine:3.20
+    container_name: foxxy-prod-backup-init
+    command: ['sh', '-c', 'mkdir -p /backup/wal /backup/base && chown -R 999:999 /backup']
+    volumes:
+      - backup_data:/backup
+    networks: [internal]
+    restart: 'no'
+    logging: *default-logging
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: foxxy-prod-postgres
+    restart: unless-stopped
+    depends_on:
+      backup-init:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Deterministic collation, identical to development, so ORDER BY does not
+      # change meaning between the machine a query was tested on and the one it
+      # runs on.
+      POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
+    command:
+      - postgres
+      # --- Continuous WAL archiving (04-RESILIENCE-PLAN.md §7) --------------
+      # `archive_mode=on` requires wal_level >= replica. The archive target is
+      # the SECOND volume: a backup on the same volume as the data it protects
+      # is not a backup, it is a copy that dies in the same incident.
+      #
+      # The `test ! -f` guard is mandatory, not defensive style: postgres may
+      # re-archive a segment after a crash, and an archive_command that
+      # overwrites can destroy a segment the restore chain needs.
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=test ! -f /backup/wal/%f && cp %p /backup/wal/%f
+      # Force a segment closed every 5 minutes even on a quiet database, so the
+      # recovery point objective is bounded by TIME and not by write volume. A
+      # low-traffic night must not mean an unarchived hour.
+      - -c
+      - archive_timeout=300
+      - -c
+      - max_wal_senders=3
+      - -c
+      - wal_keep_size=512MB
+      # §4 — no query runs forever. The application also sets this per pool;
+      # this is the backstop for psql sessions and for anything that connects
+      # without going through platform/db.
+      - -c
+      - statement_timeout=60s
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # THE SECOND VOLUME. Separate lifecycle, separate name, and the one thing
+      # that must be replicated off this host — see docs/runbooks/backup-restore.md.
+      - backup_data:/backup
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '2.0', memory: 2G }
+        reservations: { cpus: '0.5', memory: 1G }
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: foxxy-prod-valkey
+    restart: unless-stopped
+    # `appendonly yes` because the rate-limit counters and the session cache
+    # are cheap to lose but expensive to lose SILENTLY: an empty cache after a
+    # restart resets every rate-limit window at once.
+    command: ['valkey-server', '--appendonly', 'yes', '--save', '60', '1', '--maxmemory', '384mb', '--maxmemory-policy', 'allkeys-lru']
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks: [internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 512M }
+        reservations: { cpus: '0.1', memory: 128M }
+
+  # ===========================================================================
+  # BACKEND — one image, three commands
+  # ===========================================================================
+
+  # MIGRATIONS ARE A SEPARATE, EXPLICIT STEP. Never on boot.
+  #
+  # Under `profiles: [migrate]` it does NOT start with `up -d`; it runs only
+  # when named:
+  #     docker compose -f compose.prod.yml --profile migrate run --rm migrate
+  #
+  # Why not an entrypoint on the api container: with two api replicas, boot
+  # migration means two concurrent migrators racing on the same lock, and a
+  # failed migration becomes a crash-loop that also takes the service down. As
+  # a discrete step, a failed migration leaves the OLD version running and
+  # serving traffic, which is the whole point of the deploy order in
+  # docs/runbooks/deploy-rollback.md.
+  migrate:
+    image: ${BACKEND_IMAGE:-foxxy/backend:latest}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: foxxy-prod-migrate
+    profiles: ['migrate']
+    command: ['node', 'dist-ops/scripts/migrate.js']
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+    restart: 'no'
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 512M }
+
+  backend-api:
+    image: ${BACKEND_IMAGE:-foxxy/backend:latest}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: foxxy-prod-api
+    restart: unless-stopped
+    command: ['node', 'dist/main.js']
+    environment:
+      <<: *backend-env
+      PORT: '4000'
+      HOST: 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    # §12 — SIGTERM, readiness 503, 15s drain, then close. Docker's default
+    # stop grace is 10s, which would SIGKILL the process in the middle of its
+    # own drain and drop exactly the requests the drain exists to protect.
+    stop_grace_period: 30s
+    networks: [edge, internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '2.0', memory: 1G }
+        reservations: { cpus: '0.5', memory: 384M }
+
+  backend-worker:
+    image: ${BACKEND_IMAGE:-foxxy/backend:latest}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: foxxy-prod-worker
+    restart: unless-stopped
+    command: ['node', 'dist/worker-main.js']
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    # §12 — the worker gets longer: it finishes its CURRENT job (up to 30s) and
+    # claims no new ones. SHUTDOWN_WORKER_TIMEOUT_MS defaults to 30000, so the
+    # grace period must exceed it or the process is killed mid-job and the job
+    # is reclaimed by the reaper — correct, but slower and noisier than a clean
+    # finish.
+    stop_grace_period: 45s
+    # §3.2 — the worker has no HTTP surface, so its liveness is a ROW:
+    # worker_heartbeats.last_beat_at. Checked by the alert evaluator, not by
+    # Docker, because Docker restarting a worker that is merely slow would
+    # abandon the job it is slow on.
+    networks: [internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 768M }
+        reservations: { cpus: '0.25', memory: 256M }
+
+  # THE THING THAT PAGES A HUMAN. 04-RESILIENCE-PLAN.md §5.
+  #
+  # Metrics land in `metrics_events` and, until this container existed, nothing
+  # read them. A circuit breaker that opens silently is a silent outage; the
+  # table made the outage RECORDED, not NOTICED.
+  #
+  # It is a separate container rather than a job inside the worker on purpose:
+  # "the worker is dead" is one of the conditions it must be able to report,
+  # and a watchdog that dies with the thing it watches reports nothing.
+  backend-alerts:
+    image: ${BACKEND_IMAGE:-foxxy/backend:latest}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: foxxy-prod-alerts
+    restart: unless-stopped
+    command:
+      - node
+      - dist-ops/scripts/ops/alert-evaluator-main.js
+      - --loop
+      - --interval-seconds=60
+      - --on-call-user-id=${ONCALL_USER_ID}
+      - --on-call-email=${ONCALL_EMAIL}
+      - --mail=${ALERT_MAIL_TRANSPORT:-console}
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    stop_grace_period: 15s
+    networks: [internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 384M }
+        reservations: { cpus: '0.1', memory: 128M }
+
+  # ===========================================================================
+  # FRONTENDS
+  # ===========================================================================
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-foxxy/frontend:latest}
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://api.${BASE_DOMAIN}
+        NEXT_PUBLIC_APP_URL: https://app.${BASE_DOMAIN}
+        NEXT_PUBLIC_MARKETING_URL: https://${BASE_DOMAIN}
+    container_name: foxxy-prod-frontend
+    restart: unless-stopped
+    # NOT on `internal`. The product frontend talks to the backend from the
+    # BROWSER, cross-origin with credentials (06-FRONTEND-SEPARATION-PLAN.md).
+    # It has no reason to reach postgres or valkey, so it cannot.
+    networks: [edge]
+    stop_grace_period: 20s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 768M }
+        reservations: { cpus: '0.25', memory: 256M }
+
+  website:
+    image: ${WEBSITE_IMAGE:-foxxy/website:latest}
+    build:
+      context: ../website
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_APP_URL: https://app.${BASE_DOMAIN}
+        NEXT_PUBLIC_MARKETING_URL: https://${BASE_DOMAIN}
+    container_name: foxxy-prod-website
+    restart: unless-stopped
+    # THE SMALLEST BUDGET IN THE STACK, and on `edge` only. Marketing has no
+    # database, no cache, no product credentials and no route to either. If it
+    # is compromised or simply loops, the blast radius is one container that
+    # serves static pages.
+    networks: [edge]
+    stop_grace_period: 15s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 384M }
+        reservations: { cpus: '0.1', memory: 128M }
+
+  # ===========================================================================
+  # EDGE
+  # ===========================================================================
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: foxxy-prod-caddy
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp' # HTTP/3
+    environment:
+      BASE_DOMAIN: ${BASE_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      # READ-ONLY, and that is layer 1 of "no application pipeline can write
+      # the proxy configuration". Caddy cannot rewrite its own config even if
+      # something inside the container tries.
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/conf.d:/etc/caddy/conf.d:ro
+      # Certificates and ACME account keys. Losing this volume means re-issuing
+      # every certificate and hitting Let's Encrypt rate limits at the worst
+      # possible moment, so it is named and it is backed up.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend-api
+      - frontend
+      - website
+    networks: [edge]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 512M }
+        reservations: { cpus: '0.25', memory: 128M }
+
+  # ===========================================================================
+  # BACKUP — §7. "A backup that has never been restored is not a backup."
+  # ===========================================================================
+  #
+  # Continuous WAL archiving is done by POSTGRES (archive_command above). This
+  # container adds the other half: a nightly base backup, plus retention.
+  # Together they are point-in-time recovery.
+  #
+  # It runs as uid 999 (postgres) so everything it writes is readable by the
+  # archive_command's output, and it holds the database password — which is why
+  # it is on `internal` and has no port and no edge access.
+  #
+  # It does NOT run the restore DRILL. The drill needs to start a second
+  # postgres, which needs the Docker socket, and mounting the Docker socket into
+  # a long-running container is a root-equivalent grant that is not worth it for
+  # a monthly task. The drill is `docker/backup/restore-drill.sh`, run from the
+  # host — see docs/runbooks/backup-restore.md.
+  backup:
+    image: pgvector/pgvector:pg16
+    container_name: foxxy-prod-backup
+    restart: unless-stopped
+    user: '999:999'
+    entrypoint: ['/bin/bash', '/opt/backup/backup-loop.sh']
+    environment:
+      PGHOST: postgres
+      PGPORT: '5432'
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      BACKUP_DIR: /backup
+      # 02:30 UTC = 08:00 Asia/Kolkata. Deliberately not midnight: the hour
+      # every cron in the world fires is the hour a shared host is slowest.
+      BACKUP_AT_UTC: ${BACKUP_AT_UTC:-02:30}
+      RETAIN_DAYS: ${BACKUP_RETAIN_DAYS:-14}
+    volumes:
+      - backup_data:/backup
+      - ./backup:/opt/backup:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 512M }
+        reservations: { cpus: '0.1', memory: 128M }
+
+networks:
+  edge:
+    name: foxxy_prod_edge
+  internal:
+    name: foxxy_prod_internal
+    # No route to the internet and no published ports. The database is
+    # reachable only by container name, from a container on this network.
+    internal: true
+
+volumes:
+  # Every name is prefixed `foxxy_prod_` and therefore CANNOT collide with the
+  # development volumes (`foxxy_postgres_data`, `foxxy_valkey_data`) that hold
+  # the imported corpus.
+  postgres_data:
+    name: foxxy_prod_postgres_data
+  # THE SECOND VOLUME (§7). WAL archive + nightly base backups. Separate from
+  # the data volume so that losing the data volume — the actual failure this
+  # protects against — does not lose the backups with it. Replicate this one
+  # off-host; see docs/runbooks/backup-restore.md, step 8.
+  backup_data:
+    name: foxxy_prod_backup_data
+  valkey_data:
+    name: foxxy_prod_valkey_data
+  caddy_data:
+    name: foxxy_prod_caddy_data
+  caddy_config:
+    name: foxxy_prod_caddy_config

@@ -730,9 +730,22 @@ describe('the transcript is read-only and the child-visibility flag is ALWAYS pr
   });
 
   it('distinguishes "no conversations" from "foxy has not shipped"', async () => {
-    // `chat_sessions` does not exist yet — foxy is a later build step. An empty
-    // list with no explanation would tell a parent their child has never used
-    // the tutor, which is a different and false statement.
+    /**
+     * THIS ASSERTION HAS FLIPPED, AND THE FLIP IS THE POINT.
+     *
+     * It read `not_yet_available` while `chat_sessions` did not exist. Migration
+     * `0005_foxy` created it, so the catalogue probe in
+     * `parent.repository.readTranscript` now returns true and the source is
+     * `'foxy'` with an empty session list — which is the honest statement that
+     * this child has had no conversations, rather than the honest statement that
+     * the feature had not shipped.
+     *
+     * Both halves still matter. An empty list with no explanation would tell a
+     * parent their child has never used the tutor, and before 0005 that would
+     * have been false. The probe is what keeps the two distinguishable, and this
+     * test is what proves the probe actually switched over rather than staying
+     * stuck on its pre-foxy answer.
+     */
     const { parent, child } = await makePair('approved');
     const transcript = await harness.parent.service.getChildTranscript(
       parentActor(parent),
@@ -740,7 +753,7 @@ describe('the transcript is read-only and the child-visibility flag is ALWAYS pr
       20,
     );
 
-    expect(transcript.source).toBe('not_yet_available');
+    expect(transcript.source).toBe('foxy');
     expect(transcript.sessions).toEqual([]);
   });
 
@@ -777,7 +790,10 @@ describe('audit entries carry NO PII', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.resource_id).toBe(child.userId);
     // Counts and booleans. Never a message, never a name, never an address.
-    expect(rows[0]?.metadata).toMatchObject({ sessions: 0, available: false });
+    // `available` flipped to true with migration `0005_foxy` — the tables now
+    // exist, so the transcript path is live and reporting an empty history
+    // rather than a missing feature.
+    expect(rows[0]?.metadata).toMatchObject({ sessions: 0, available: true });
   });
 
   it('records a consent revocation, distinct from identity’s own row', async () => {

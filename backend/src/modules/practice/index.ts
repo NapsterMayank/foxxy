@@ -156,3 +156,39 @@ export type {
   StudentContextReader,
   TenantReader,
 } from './practice.types';
+
+/**
+ * ---------------------------------------------------------------------------
+ * THE ANTI-CHEAT FLOOR AND VERDICT — exported so that `signals` can REUSE them
+ * rather than restate them.
+ *
+ * `modules/signals` sits above this rule: its `fast_completion` anomaly is
+ * defined relative to the same floor a rejection is defined by, and its
+ * `AntiCheatEdge` has DELIBERATELY NO DEFAULT — a missing edge is a compile
+ * error (D-131). That only works if the real values are reachable, and until
+ * now they were not: this file exported the service and its injected-dependency
+ * types and nothing else, so `signals` could not be constructed at all.
+ *
+ * WHY THE ALTERNATIVE IS WORSE. The cheap fix is a `3_000` inside `signals`, or
+ * a default on the edge. Either is a SECOND COPY OF A THRESHOLD, and two copies
+ * of a threshold drift — silently, because nothing fails when they disagree. The
+ * symptom is a signal that quietly stops agreeing with the rejection it is
+ * defined relative to: sessions rejected as too fast that raise no anomaly, or
+ * anomalies raised for sessions nobody rejected. Neither errors, and neither is
+ * visible from the outside.
+ *
+ * PURELY ADDITIVE. `practice` still OWNS these — it authored them, it tests
+ * them, and `practice.service.ts` keeps importing them from `./domain/anti-cheat`
+ * directly. Nothing about the checks, their order or their thresholds changes by
+ * being exported; the only thing that changes is that there is now ONE
+ * definition of "too fast" reachable from the composition root, instead of one
+ * definition and one dependency that could not be satisfied.
+ * ---------------------------------------------------------------------------
+ */
+export {
+  ANTI_CHEAT_REASONS,
+  MIN_AVERAGE_MS_PER_QUESTION,
+  SAME_ANSWER_MIN_QUESTIONS,
+  validateAttempt,
+} from './domain/anti-cheat';
+export type { AntiCheatReason, AttemptResponse, AttemptValidity } from './domain/anti-cheat';

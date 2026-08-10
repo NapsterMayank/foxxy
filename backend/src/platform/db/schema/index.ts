@@ -2,7 +2,7 @@
  * The schema barrel. One file per concern, all re-exported here.
  * `drizzle-kit` and the Drizzle client both read this single entry point.
  *
- * Modules land as they are built: foxy and billing remain.
+ * Modules land as they are built: billing remains.
  *
  * ===========================================================================
  * IMPORT ORDER IS LOAD-BEARING, and the reason is worth stating once.
@@ -41,7 +41,12 @@ export * from './content';
 export * from './pedagogy';
 export * from './practice';
 export * from './parent';
+export * from './foxy';
 export * from './schools';
+// `billing` is listed AFTER `schools` because it references it: a `school`
+// payer points at `schools.id`. See the import-order note above — a cycle here
+// is a temporal-dead-zone crash at generate time, not a warning.
+export * from './billing';
 export * from './audit';
 export * from './notifications';
 export * from './observability';

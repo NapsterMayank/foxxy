@@ -15,6 +15,7 @@ import type { DbPools, NamedDbHandle, PoolName } from './pools';
  *          |                         | else works.
  *   core   | learner content practice| Ordinary request traffic.
  *          | parent billing notify   |
+ *          | knowledge signals       |
  *   ai     | retrieval foxy          | Vector search is expensive and spiky.
  *          |                         | Capped so it CANNOT exhaust the others.
  *   worker | (background jobs)       | Digests must never compete with live
@@ -39,6 +40,8 @@ export type ModuleName =
   | 'parent'
   | 'billing'
   | 'notify'
+  | 'knowledge'
+  | 'signals'
   | 'retrieval'
   | 'foxy';
 
@@ -56,6 +59,20 @@ export const MODULE_POOLS: Readonly<Record<ModuleName, PoolName>> = Object.freez
   parent: 'core',
   billing: 'core',
   notify: 'core',
+
+  /**
+   * `knowledge` FOLLOWS `content`, and `signals` FOLLOWS `practice` — the two
+   * modules whose tables they read.
+   *
+   * Both are small indexed reads (a chapter's concepts, a student's recent
+   * sessions), so the pool that carries the read they sit next to is the one
+   * whose cost profile they share. That is NOT the same rule as "the table's
+   * owner": `retrieval` reads `content`'s `rag_chunks` and still gets `ai`,
+   * because a slow HNSW scan has nothing in common with a chapter listing.
+   * Here the profiles genuinely do match, which is why the answer coincides.
+   */
+  knowledge: 'core',
+  signals: 'core',
 
   retrieval: 'ai',
   foxy: 'ai',

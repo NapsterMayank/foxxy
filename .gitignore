@@ -3,7 +3,14 @@ node_modules/
 
 # build output
 dist/
+dist-ops/
+.next/
 *.tsbuildinfo
+
+# backup and restore-drill working directories (docker/backup writes here when
+# run outside a container; the container writes to a named volume)
+backups/
+.restore-drill/
 
 # environment
 .env

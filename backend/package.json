@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=.env src/main.ts",
     "build": "tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json",
+    "build:ops": "tsc -p tsconfig.ops.json && tsc-alias -p tsconfig.ops.json",
     "start": "node --env-file-if-exists=.env dist/main.js",
     "worker": "node --env-file-if-exists=.env dist/worker-main.js",
     "worker:dev": "tsx watch --env-file-if-exists=.env src/worker-main.ts",
@@ -27,6 +28,8 @@
     "db:studio": "node --env-file-if-exists=.env node_modules/drizzle-kit/bin.cjs studio",
     "db:clear-content": "tsx --env-file-if-exists=.env scripts/clear-content.ts",
     "db:import-corpus": "tsx --env-file-if-exists=.env scripts/import-corpus.ts",
+    "db:round-trip": "tsx --env-file-if-exists=.env scripts/ops/migration-round-trip.ts",
+    "ops:alerts": "tsx --env-file-if-exists=.env scripts/ops/alert-evaluator-main.ts",
     "eval:retrieval:calibrate": "tsx --env-file-if-exists=.env eval/retrieval/calibrate.ts",
     "eval:retrieval:sparse": "tsx --env-file-if-exists=.env eval/retrieval/sparse-probe.ts"
   },

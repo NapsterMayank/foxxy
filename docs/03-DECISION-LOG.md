@@ -1619,3 +1619,1110 @@ chain, and a chain is a claim about which migrations exist. Verified to fire on 
 real violation before being trusted (D-005): pointed at the pre-rewrite
 `foundation-hooks-migration` it reports 6.
 
+
+---
+
+## Pedagogy foundations — 10 August 2026
+
+### D-127 · The concept graph is traversable at CONCEPT level and only reportable at CHAPTER level
+**Status:** Active — the constraint `modules/knowledge` is built around
+
+D-077 recorded that `concept_graph.concept_code` does not join to
+`chapter_concepts`. Building the reader forced a sharper reading of what that
+does and does not prevent, and the two halves came out differently:
+
+- **Internally the graph is sound.** All **176** prerequisite references resolve
+  to a real `concept_code` — measured, **zero dangling**. The column carries no
+  foreign key, so this was an open question; it is now an answered one. Traversal
+  over concept codes is therefore exact, not best-effort.
+- **Outward it reaches nothing but a chapter.** `chapter_concepts` has no code
+  column at all, so the only key linking an edge to content is `chapter_id`.
+
+So the module traverses codes and REPORTS chapters, and the return types say so
+(`ChapterNodeId` is what a learning path is made of). **No key is invented** — no
+fuzzy title match, no string-munged code, no lookup table. A future change that
+"fixes" the join by manufacturing one is the regression this entry exists to
+prevent.
+
+### D-128 · Projecting the graph onto chapters CREATES cycles that the concept graph does not have
+**Status:** Active — **the finding of this build step**
+
+Measured on the imported corpus: the concept-level graph is **acyclic — 0 cycles
+over 176 edges.** Its chapter projection has **three**, all in grade 7
+mathematics.
+
+The cause is **two authoring schemes layered on the same chapters.** Grade 7 (21
+rows) and grade 8 (19 rows) mathematics carry both a COARSE scheme — `math_7_ch5`,
+one code per chapter — and a FINE scheme — `m7.geometry.triangles`, several codes
+per chapter. No other grade or subject has the fine one. Each scheme is
+individually consistent; the fine one orders concepts in a way that disagrees with
+the coarse one's chapter order, and collapsing both onto `chapter_id` merges two
+independent authorings into a graph that contradicts itself:
+
+```
+7/math/ch8 -> ch7 -> ch5 -> ch4 -> ch3 -> ch8
+  via math_7_ch8 needs math_7_ch7                    (coarse)
+  via m7.geometry.triangles needs m7.geometry.angles (fine)
+  via m7.decimals.concept needs m7.fractions.concept (fine)
+```
+
+**Decision: report the cycle, never repair it.** Both edges in a projected cycle
+are TRUE statements about concepts, so dropping one is an editorial decision the
+code has no standing to make — and the dropped edge would be unrecoverable. The
+walk returns the closed chapter path that demonstrates the contradiction, so a
+human can decide which scheme wins. `findLearningPath` is cycle-safe by
+construction (iterative three-colour DFS, no recursion).
+
+**A second, quieter trap:** 22 of the 176 edges join two concepts in the SAME
+chapter. Under projection those become chapter self-edges, and a self-edge makes
+every topological sort report a cycle that is not one. They are dropped, and the
+count is returned rather than swallowed.
+
+### D-129 · Graph coverage is measured against every chapter IN SCOPE, and "orderable" is part of it
+**Status:** Active
+
+The denominator is every chapter in the grade and subject, never the chapters the
+graph already knows about — the second denominator always reports 100% and is the
+reason a thin graph looks finished.
+
+Measured, grades 6-10 mathematics and science (the whole imported corpus):
+**128 of 137 chapters carry a graph row (93.4%);** the nine that do not are named,
+not just counted.
+
+`orderable` is reported as part of coverage rather than as a separate health
+check, because a grade whose chapters are all covered but whose projection
+contains a cycle cannot produce a learning path — its effective coverage for the
+one feature the graph exists to serve is zero. **Grade 7 mathematics is exactly
+that case: 15 of 15 chapters covered, and not orderable.** Reporting
+`chaptersWithGraph: 15` and stopping would rank it the best-covered grade in the
+corpus.
+
+`canPlanFor` exists for the same reason in the other direction: most grade 7
+chapters are not on the cycle and can still be given a path, and refusing the
+whole grade because three chapters contradict each other would hide a working
+feature behind a data defect.
+
+### D-130 · `platform/rules` carries the mechanism and no business rule; a version is added, never edited
+**Status:** Active
+
+The rules engine is `platform/`, so it holds no threshold, no subject, no grade
+and no student. Facts and outcomes are generic; the first consumer (`signals`)
+supplies its own.
+
+Three properties, each with the failure it prevents:
+
+1. **Deterministic — the instant is an ARGUMENT, never a clock read.** A
+   `Date.now()` anywhere in the directory makes yesterday's decision
+   unreproducible, which makes the audit trail decorative rather than evidential.
+2. **Every evaluation records `code@version`.** That stamp is the difference
+   between "the system flagged this student" and a claim that can be argued with,
+   replayed and rolled back. The evaluator stamps from the rule object it actually
+   ran — a rule that stamped itself could lie about its own version.
+3. **A duplicate `(code, version)` is rejected at construction.** Two rules
+   sharing a stamp would retroactively make every decision ever recorded under it
+   ambiguous — silently. A boot failure is a bad morning; that is a bad quarter.
+
+**Versions are ADDED, never edited.** A threshold change is a new version with a
+later `activeFrom`, which leaves last month's decisions explainable by the numbers
+that actually produced them. Version integers are per code and are not semver:
+there is no backwards-compatible change to a rule.
+
+Two consequences worth stating. `evaluateAll` does NOT short-circuit on first
+match and retains `matched: false` — "rule X saw these facts and did not fire" is
+the most common question asked of a rules engine, and a filtered list cannot
+answer it. And a code whose earliest version begins after the instant is SKIPPED
+rather than failing the batch, so a backfill over historical facts is not blocked
+by a rule shipped last week; asking for that code BY NAME still throws, because
+that caller asserted it applies.
+
+### D-131 · `signals` reuses `practice`'s anti-cheat through an INJECTED EDGE with no default
+**Status:** Active
+
+"Unusually fast completion" is defined relative to the anti-cheat floor
+`practice` already authored and tested (`MIN_AVERAGE_MS_PER_QUESTION = 3000`).
+`signals` needs the floor and the verdict, and takes both through an
+`AntiCheatEdge` port.
+
+**There is deliberately NO DEFAULT.** A missing edge is a compile error, because a
+default would be a second copy of a constant — and two copies of a threshold
+drift, silently, with the symptom being a signal that quietly stops agreeing with
+the rejection it is defined to sit just above. The domain tests build the edge
+from `practice`'s REAL functions rather than a stub, so a divergence fails a test
+instead of shipping.
+
+The rule sits in the band the system does not otherwise look at: **below 3s the
+attempt is already rejected and scored zero** (re-reporting it would double-count
+and send a teacher after something already handled); **between 3s and 6s it is
+accepted, scored and counted toward mastery** while being faster than a CBSE MCQ
+can be read.
+
+**Consequence for whoever wires this:** `practice/index.ts` does not currently
+export `MIN_AVERAGE_MS_PER_QUESTION` or `validateAttempt`. One additive export
+line is needed there before the composition root can build the edge. Left to
+`practice`'s owner rather than done here, since `modules/practice/` was out of
+scope for this change.
+
+### D-132 · Anomaly evidence is `Record<string, number>`, and that is a privacy mechanism
+**Status:** Active — P13
+
+Every signal has to explain itself, and the cheap way to do that is a free-text
+field — which is how a name, a chapter title, a typed answer or a phone number
+ends up in a notification payload, a log line and an analytics export.
+
+Constraining evidence to NUMBERS makes that **structurally impossible rather than
+a matter of review discipline**: there is no way to put a name in a `number`. The
+single `reason` string is assembled from those numbers and fixed words only, and
+is asserted to contain no uuid and nothing matching
+`/name|email|phone|address|dob|parent|guardian|password|token/i` — including over
+the whole serialised payload.
+
+The uuids it does carry (`studentUserId`, `chapterId`) are identifiers, not PII:
+they mean nothing outside a database that already applies the tenancy guard, and a
+signal that could not say who it was about would be unusable. The service's one
+log line is counts and stamps only, for the same reason.
+
+The four MVP thresholds are named constants with their rationale written beside
+them, in one file a non-engineer can read: `INACTIVITY_DAYS = 7` (the unit of a
+school routine; shorter fires on every weekend and every festival),
+`MASTERY_DROP_MIN_PERCENTAGE_POINTS = 15` (one question on a ten-question set is
+worth ~10 points, so a lower bar fires on noise), `FAST_COMPLETION_FLOOR_MULTIPLE
+= 2` (derived from the injected floor, never restated), `STRUGGLE_SCORE_PERCENT =
+40` and `REPEATED_STRUGGLE_SESSIONS = 3` (the client's teacher-escalation
+trigger — two is two bad days, three is a pattern the student cannot break
+alone). **None has been validated against a false-positive rate, because no
+student has used the system yet, and each records the observation that would
+change it.**
+
+---
+
+## billing module — 10 August 2026
+
+> **Numbering note.** D-150 to D-156 are taken as a BLOCK for `billing`, rather
+> than continuing from D-126, because three other modules were being built in
+> parallel against this same file. A block avoids two agents both claiming
+> D-127; the gap is deliberate and is not a missing decision.
+
+### D-150 · The PAYER and the BENEFICIARY are separate columns, because the commercial model is unresolved
+**Status:** Active — the decision the whole module is shaped around
+
+It is not settled whether the product ships B2C (a parent subscribes for their
+own child) or as a **B2B school pilot**, in which schools pay and per-parent
+subscriptions never ship at all. The cheapest-looking schema —
+`subscriptions.user_id` — answers that question **by accident**, and unanswering
+it later is a migration across live financial rows plus a rewrite of every call
+site that assumed the payer was the actor.
+
+**Decision:** every subscription carries two independent facts.
+
+* `subject_user_id` — whose entitlements this grants. Always a `users` row.
+* `payer_kind` plus exactly one of `payer_user_id` / `payer_school_id` — who is
+  charged.
+
+`subscriptions_payer_exactly_one_check` makes any other combination
+unrepresentable in the database. The second half of that CHECK is the one that
+matters: a `school` payer must ALSO have a NULL `payer_user_id`. Without it a
+B2B row could carry a stale user payer, and a reconciliation query joining on
+`payer_user_id` would bill the wrong party — a defect discovered by an angry
+parent rather than by a test.
+
+**The decision itself lives in ONE injected function**, `PayerResolver`,
+supplied at the composition root. `billing` never constructs a payer, so it
+cannot hard-code one; the B2C answer is `{ kind: 'user', id: actor.userId }` and
+the B2B answer looks up the subject's school. A test drives a school-paid seat
+end to end, and a second test asserts that a resolver returning `null` REFUSES
+the checkout rather than falling back to charging the actor.
+
+The same split runs through `platform/payments`: `CreateSubscriptionRequest`
+carries a `payer` AND a `subjectUserId`. The port previously had a bare
+`userId`, which is the assumption being removed.
+
+### D-151 · The webhook lives at `/api/v1/webhooks/billing`, NOT the path plan section 8.8 names
+**Status:** Active — a defect found in the plan, not in the code
+
+Plan §8.8 writes the endpoint as `POST /billing/webhook`. **That path would have
+been broken in production and green in development.**
+`app/plugins/origin-check.ts` exempts state-changing requests from the CSRF
+origin check by the path pattern `^/api/v\d+/webhooks/` and by nothing else. A
+payment provider POSTs server-to-server and sends no browser `Origin`, so a
+webhook route outside that prefix is refused **403 — for every genuine
+delivery**, which Razorpay then retries for hours while subscriptions silently
+fail to activate. Nothing in a local test would have shown it, because a local
+test sends whatever headers it is told to.
+
+Two fixes were available: widen the exemption pattern, or name the endpoint so
+the existing pattern covers it. The plugin's own header answers that — "the
+exemption is a PATH PREFIX and nothing wider… never a loosened pattern" — so the
+endpoint moved.
+
+`billing.routes.test.ts` pins **three** properties, not one:
+
+1. the chosen path IS exempt (a delivery with no `Origin` is not 403'd);
+2. the exemption is SCOPED — a live request to `/api/v1/billing/webhook` is
+   **403**, and `WEBHOOK_PATH_PATTERN.test()` is asserted false for it, so a
+   future rename cannot silently reintroduce the failure;
+3. the exemption buys nothing without the signature — an unsigned POST to the
+   exempt path is still refused.
+
+### D-152 · Five guard mutations were run against the source. All five went red.
+**Status:** Active — the sixth "is this enforcement real" audit
+
+D-125 recorded the fifth "installed and enforcing nothing" defect
+(`parent.authoriseSelf`). `billing.authoriseSubscription` has **exactly the same
+shape**: `kind: 'subscription'` is granted on OWNERSHIP alone, so for a
+self-check the ownership rule is trivially true and the tenant comparison is the
+only thing the function does. Echoing `actor.tenantId` as the resource tenant
+would turn it into a no-op wearing the shape of a boundary.
+
+So each guard was broken in the source, one at a time, and the suite re-run:
+
+| Mutation | Caught? |
+|---|---|
+| `authoriseSubscription` resource tenant echoed off the actor (D-091 shape) | **YES** — 2 files failed |
+| `authoriseSubscription`'s `assertCanAccess` removed entirely | **YES** — 2 files failed |
+| `verifySignature` always returns `true` | **YES** — 5 files failed |
+| the `ON CONFLICT DO NOTHING` dedupe always reports "inserted" | **YES** — 1 file failed |
+| `effectiveStatus` never expires by the clock | **YES** — 3 files failed |
+
+**The first one is the interesting result, and the reason it was caught is worth
+recording.** D-125's mutation survived because `parent` had a SECOND,
+independent check downstream (`learner.getProfile`) which masked it, and because
+the only test used a parent WITH a child. `billing` has no second layer —
+`subscriptions` is its own table and nothing else re-checks — so the isolating
+test had to be written deliberately: an account whose row is MOVED to another
+tenant while the actor keeps claiming the old one, plus a same-tenant control so
+the assertion is about the tenant and not about the account existing.
+
+The mutations are institutionalised in
+`src/modules/billing/__tests__/billing.authz-mutation.test.ts`, which builds the
+service with each guard broken **through its injected seams** and asserts the
+break is OBSERVABLE — including that with the signature check defeated, an
+anonymous caller can cancel a stranger's subscription with four bytes.
+
+### D-153 · Expiry is COMPUTED at request time; no job decides it
+**Status:** Active
+
+A stored status is a claim made when the last event arrived. A row saying
+`active` whose `current_period_end` was yesterday is not active — it is a row
+nobody has revisited. If a background sweeper were the thing that expired it,
+every minute of job downtime would be a minute of free paid access, and a
+sweeper that silently stopped would be indistinguishable from a business doing
+well.
+
+`effectiveStatus(state, now)` therefore decides, on every `getEntitlements` and
+every `/billing/status`, and **nothing is cached in the session** — the same
+reasoning as §7 rule 3 for parent-child link revocation. A housekeeping sweeper
+that rewrites stale rows is welcome later; it must never become the thing that
+decides.
+
+Corollary, and it is not a detail: a NULL `current_period_end` on a granting
+status reads as **expired**, not as unlimited. A grant with no expiry is a grant
+forever, and the safe reading of a missing end is that it is over.
+
+### D-154 · An entitlement is a positive grant; `free` is a real feature list
+**Status:** Active
+
+The natural free tier is "no subscription row, so nothing has restricted you
+yet" — free access as the ABSENCE of a denial. That inverts the safety property:
+any path that fails to look up a subscription, or throws before it does,
+silently grants the free tier, and the day a feature moves from free to paid
+every one of those paths keeps giving it away.
+
+`PLANS.free` therefore has an explicit feature list and every consumer asks
+`hasFeature(entitlements, …)`. A lost grant is an EMPTY list, which grants
+nothing — loud, rather than a working free tier nobody notices is being handed
+out. Paid plans are written as `[...FREE_FEATURES, …]`, so "paying takes
+something away" is not expressible.
+
+Two lookup functions exist and they behave **oppositely on an unknown code, on
+purpose**: `findPlan` returns null and the checkout REFUSES (selling somebody a
+misspelt plan takes their money for nothing), while `planOrFree` degrades and
+the entitlement path continues (a retired plan code must not lock out a customer
+who is still paying).
+
+### D-155 · Financial rows are `ON DELETE RESTRICT`, which makes erasure an ANONYMISE job that does not exist yet
+**Status:** Active — a stated, unpaid cost
+
+Every foreign key out of `subscriptions` is RESTRICT, unlike every other
+student-owned table in this schema. A subscription is a financial record: money
+moved, and a receipt that vanishes because somebody deleted an account is a
+reconciliation hole and, in India, a GST-invoice hole. So deleting a user who
+has ever been billed **fails loudly**.
+
+The consequence is accepted rather than designed around: account erasure for a
+paying user becomes an ANONYMISE operation rather than a DELETE, and that work
+does not exist. It is recorded here rather than pre-built, because writing it
+before there is a single subscription would be guessing at a retention policy
+nobody has set. The harness truncates the billing tables above `users` for the
+same reason.
+
+`payment_events.tenant_id` is **NULLABLE**, matching `audit_log` and
+`notifications` (open item 8, D-084) and for the same reason: the writer is an
+anonymous provider webhook with no actor and no session. The tenant is stamped
+FROM THE MATCHED SUBSCRIPTION when there is one and left NULL when there is not
+— an event matching nothing genuinely has no tenant, and filling it from the
+column default would file cross-tenant noise under whichever tenant happens to
+be first.
+
+### D-156 · The Razorpay adapter is fully tested and never called; the fake shares its cryptography
+**Status:** Active — and the residue is stated in PROGRESS.md §7
+
+There is no Razorpay account and no key, and there will not be one before this
+ships. Two consequences, handled differently:
+
+* **The HTTP half** — `createSubscription`, `cancelSubscription` — is driven
+  entirely by a recording fake `HttpClient`. Success, non-2xx, malformed body,
+  missing `id`, unmapped plan code: all covered, nothing leaves the machine,
+  nothing is charged. What this **cannot** prove is that Razorpay's live
+  responses have the asserted shape, which is exactly why every field is
+  NARROWED rather than cast — a live response missing `id` fails loudly at the
+  boundary instead of becoming a subscription row with an empty provider id that
+  no webhook can ever reconcile.
+* **The signature half** makes no network call at all, so it is exercised
+  against real cryptography. `platform/payments/signature.ts` is shared by the
+  Razorpay adapter AND the deterministic fake — same HMAC, same timing-safe
+  comparison, same refusal on an empty secret. A fake that accepted any webhook
+  would have left every "a forged signature is rejected" test green against a
+  service with the check deleted.
+
+Three details that have each been got wrong in published code, and are pinned by
+tests: the comparison is timing-safe (with the length checked separately, since
+digest length is public); the digest is over the RAW bytes, never a
+re-serialised parse; and **an empty secret verifies nothing rather than
+everything** — HMAC with an empty key is valid arithmetic an attacker can also
+perform, so a deployment that forgot to set the secret would otherwise accept
+every forgery with the suite still green.
+
+`RAZORPAY_PLAN_IDS` is a variable rather than a constant because a Razorpay plan
+id is created in their dashboard and differs between the test and live accounts.
+A hardcoded one means a staging deployment subscribing somebody to a production
+plan — a real charge, on a real card, from a test click.
+
+---
+
+## Deployment, CI/CD, backups and alerting — 10 August 2026
+
+Resilience plan §5, §7, §8, §11, §12 and §13, plus the CI/CD and pipeline
+isolation requirements of `06-FRONTEND-SEPARATION-PLAN.md`.
+
+**Numbering note:** this block starts at D-140 rather than D-133. Three other
+agents were appending to this file at the same time; the gap is deliberate
+collision avoidance, not a lost decision. The last three entries were renumbered from D-150-152 to D-160-162 after another agent claimed D-150-156 mid-write — which is itself the hazard this note is about.
+
+### D-140 · The production stack is a SEPARATE compose file with separate volume NAMES, not a profile on the development one
+**Status:** Active
+
+The development stack (`backend/docker/compose.yml`) holds the imported corpus in
+`foxxy_postgres_data` — 137 chapters, 4,686 chunks, 2,741 questions, hours of
+extraction that cannot be re-run cheaply (the source is a live production
+Supabase project, read-only).
+
+A `profiles:` overlay or a second `--env-file` on the same file would have made
+the two stacks share volume names and container names, and the failure mode is
+`docker compose -f the-wrong-file down -v`.
+
+**Decision:** `docker/compose.prod.yml`, project name `foxxy-prod`, and every
+volume named `foxxy_prod_*`. The isolation is not a convention anybody has to
+remember; the names simply do not collide. The development compose file was not
+edited at all.
+
+### D-141 · Postgres and Valkey are on an `internal: true` network with NO published ports
+**Status:** Active
+
+The most common way a self-hosted database is compromised is a `ports:
+5432:5432` line left in from development. `internal: true` means the network has
+no route to or from the internet, and there is no `ports:` key on either data
+service. Operator access is `docker compose exec`, which needs no exposed port.
+
+The product frontend is on the `edge` network ONLY: it talks to the backend from
+the BROWSER, cross-origin with credentials, so it has no reason to reach Postgres
+and therefore cannot.
+
+### D-142 · The SSE route has its own proxy policy, and the ORDINARY routes were deliberately not relaxed
+**Status:** Active — the highest-risk item in the deployment
+
+A reverse proxy's defaults are written for request/response, and every one of
+them is wrong for a token stream: buffering holds the first token until the
+answer is finished, gzip re-introduces the same delay through its own buffer, and
+a 15-60s read timeout severs a long answer mid-sentence.
+
+**Every symptom of getting this wrong points at the language model, and the
+language model is fine.** That is why it is called out here rather than left to
+whoever configures the proxy.
+
+**Decision:** in `docker/caddy/conf.d/20-api.caddy`, a `@sse path /api/v1/foxy/*`
+matcher with `flush_interval -1` (buffering off), a 300s upstream read timeout
+(at or above the plan's 120s minimum, and above §4's 60s stream budget so the
+APPLICATION's timeout always fires first — the application can send a typed error
+and the proxy cannot), a 30s `response_header_timeout`, and NO `encode`
+directive. Ordinary API routes keep a 30s read timeout and keep compression.
+
+The matcher is deliberately WIDER than the stream route — every `/api/v1/foxy/*`
+path, not one exact URL — because `foxy` is being built now and pinning an exact
+path produces a config that is correct on the day it is written and silently
+wrong afterwards, with the failure appearing as buffered streaming.
+
+**The one honest limitation:** Caddy's server-level `write` timeout applies to
+the whole listener, which all three hostnames share, so a value safe for ordinary
+routes would sever every stream. It is therefore left unset and per-route
+bounding is done UPSTREAM (`transport http { read_timeout }`). What is not
+bounded is a slow CLIENT reading an ordinary response — the cheaper of the two
+exposures, and it is stated in the Caddyfile rather than discovered later.
+
+CI asserts both settings by name. `caddy validate` is perfectly happy with a
+config that buffers: the result is a valid file and a broken product.
+
+### D-143 · Proxy ownership is enforced in three layers, because a comment enforces nothing
+**Status:** Active
+
+`06-FRONTEND-SEPARATION-PLAN.md` requires that no application pipeline can write
+the proxy configuration or restart the product. Implemented as:
+
+1. `docker/caddy` is mounted `:ro` — Caddy cannot rewrite its own config.
+2. `docker/deploy-app.sh` is the only deployment entry point an application
+   pipeline has. Its service list is an ALLOW-LIST keyed by app name; there is no
+   argument that reaches `caddy`, `postgres`, `valkey` or `backup`, and it uses
+   `--no-deps` — without which `docker compose up -d website` recreates
+   everything `website` depends on, which is exactly the mechanism by which a
+   marketing deploy takes the product down.
+3. `.github/CODEOWNERS` requires an infrastructure review on `docker/caddy/**`,
+   `docker/compose.prod.yml`, `docker/backup/**` and `.github/**`.
+
+Layers 1 and 2 are mechanical. Layer 3 depends on branch protection having
+"require review from Code Owners" enabled — a repository SETTING, not a file.
+Recorded as a known gap: without that setting, CODEOWNERS is documentation.
+
+### D-144 · Path-scoped per-app workflows AND a single fan-in gate, reconciled by a change-detection job
+**Status:** Active
+
+The two requirements pull in opposite directions. Per-app workflows with their
+own `on: push` path filters report "skipped" when the paths do not match, and a
+REQUIRED check that never runs blocks every pull request forever.
+
+**Decision:** each app's CI is its own file (`backend-ci.yml`, `frontend-ci.yml`,
+`website-ci.yml`) declared `on: workflow_call`; `ci.yml` runs a `changes` job and
+calls only the ones whose paths moved. One required check, `ci-gate`.
+
+Two details that are the difference between a gate and a decoration:
+
+- the gate is `if: always()` and inspects `needs.*.result` explicitly, because
+  `needs:` alone makes it SKIP when an upstream job skips, and a skipped required
+  check reports as neutral, which reads as green;
+- an unknown diff base (first push, force-push) runs EVERY app. A
+  change-detection failure must never be read as "no app changed".
+
+### D-145 · Migrations run as an explicit step, and the step CHECKS THE CATALOGUE
+**Status:** Active — implements the D-109 lesson mechanically
+
+Never on boot: with two replicas that is two concurrent migrators racing on one
+lock, and a failed migration becomes a crash-loop that also takes the service
+down. As a discrete step, a failed migration leaves the OLD version serving. The
+compose service is under `profiles: [migrate]`, so `up -d` does not start it.
+
+D-109 is why the CI step does not stop at the exit code: `db:migrate` printed
+"Migrations applied." and applied NOTHING, because Drizzle skips a migration
+whose journal timestamp precedes the last applied ledger row. The CI step
+therefore counts tables in `information_schema` afterwards and fails below a
+floor.
+
+`backend/scripts/ops/migration-round-trip.ts` is the second half: forward,
+rollback to a provably EMPTY public schema, forward again, catalogue diffed. It
+exists alongside the vitest test of the same property because they run against
+different databases — testcontainers cannot reproduce D-109, since a fresh
+container has an empty ledger. It refuses to run against a database holding rows,
+because its rollback half drops every table.
+
+One exclusion in the catalogue diff, and it is not a loosening: Postgres names
+implicit NOT NULL check constraints after the table OID
+(`2200_17032_1_not_null`), which differs on every apply. Including them made the
+comparison fail on a byte-identical schema — a check that can never pass, which
+is worse than one that never fails, because it gets switched off. Nullability is
+still compared, in the column rows.
+
+### D-146 · "The notification reached NOBODY" is a log line, not a metric — so no rule watches it
+**Status:** Active — an accepted gap, recorded rather than papered over
+
+The dispatcher emits `platform.notify.failed` per CHANNEL and logs the
+all-channels-failed case at `error` as `notify.undeliverable` with no counter.
+The alert an operator actually wants is the second one.
+
+A rule watching a signal nothing emits can never fire, and a rule that never
+fires is indistinguishable from a system that is never unhealthy — the exact
+failure this codebase has now found six times. So the shipped rule watches the
+signal that EXISTS (`notify.failed`, per channel, threshold 5) and its text says
+plainly that it counts channels rather than notifications.
+
+**The fix, when `notify` next changes:** emit a counter alongside the existing
+`error` log in `dispatcher.ts`'s undeliverable branch. One line, and then the
+rule can be tightened to threshold 1.
+
+### D-147 · The alert evaluator REFUSES TO START without a recipient, and its cooldowns are in memory
+**Status:** Active — the D-123 pattern applied to alerting
+
+D-123 made the embedding adapter a boot failure in production without a key
+rather than a warning, because "the degraded mode has no symptom". Alerting is
+the extreme case: an evaluator with no on-call recipient runs perfectly,
+evaluates every rule correctly, delivers to nobody, and is indistinguishable from
+a system that is never unhealthy. So: no `--on-call-user-id` and
+`--on-call-email`, no start.
+
+`--mail=console` writes page-severity alerts to stdout. That is a real path for a
+single-operator deployment reading `docker compose logs`, and it warns loudly on
+every start that it is not a pager. `--mail=resend` THROWS until the Resend
+adapter exists (build step 14) rather than falling back to console: a deployment
+that asked for a pager and silently received a log line would believe it had one.
+
+Configuration is ARGUMENTS, not environment variables, because `process.env` is
+read in exactly one place (`platform/config`) and that is lint-enforced. Adding
+operational variables there would make the API refuse to boot when an ALERTING
+variable is missing — coupling the product's availability to its monitoring,
+which is backwards.
+
+Cooldowns are IN MEMORY. The alternatives are a table (a migration, for state
+worthless after a restart) or the cache — a dependency whose failure is itself
+one of the things being alerted on, so an alerter that goes quiet when the cache
+dies is the exact failure §5 is about. The cost is that a restart re-pages
+anything still breached; that is the right direction to fail.
+
+Delivery goes through the existing `notify-channel` port and NOT a second
+notification path. Severity is expressed as the message KIND (`ops.alert.page`
+to email + in-app, `ops.alert.ticket` to in-app only), so "what wakes a human" is
+a four-line diff a reviewer can see.
+
+### D-148 · An ABSENT signal never fires a rule, and is never read as zero
+**Status:** Active
+
+Every collector is individually failure-isolated and contributes NO KEY on
+failure rather than a zero.
+
+Zeroing would be catastrophic in the ordinary way: "the database is unreachable,
+so I counted zero breaker transitions" is reassuring news produced by the exact
+fault it is meant to detect. Unmeasurable signals are logged at `error` — a blind
+spot in the alerter is itself an incident, because every rule on that signal is
+now silently disabled — and there is a unit test asserting that an `lte` rule
+which WOULD fire on a present zero does NOT fire on an absent signal.
+
+### D-149 · The restore drill compares against counts RECORDED AT BACKUP TIME, and refuses to pass on all-zeros
+**Status:** Active — and the drill was proven able to FAIL before being trusted
+
+`full-backup.sh` writes `rowcounts.txt` and `DATABASE` beside each base backup.
+The drill restores into a scratch instance and compares. Without a recorded
+expectation a drill can only compare against the live database, which is not
+always available during a real recovery and which passes silently when BOTH sides
+are empty.
+
+Two defects were found by running it rather than by reading it:
+
+1. **The drill connected to the restored cluster's DEFAULT database**
+   (`postgres`), where none of the tables exist. Every "this table did not exist"
+   expectation matched trivially and ten of thirteen rows reported `ok` — a drill
+   passing on a database it had never looked at. Hence the `DATABASE` file: the
+   database name is READ FROM THE BACKUP, never assumed.
+2. **The self-test's seed silently did nothing.** `docker exec` without `-i` does
+   not attach stdin, so psql read an empty script and exited 0. The backup was of
+   an empty database. The vacuity guard — "every expected count was zero, so this
+   drill would pass against an empty backup and therefore proves nothing" — is
+   what caught it.
+
+`drill-selftest.sh` runs the drill twice against a scratch stack: once on a
+known-good backup (must PASS) and once with the recorded expectation tampered
+with (must FAIL). Both were executed. A drill that always passes is worse than no
+drill, because it is believed at the moment it matters most.
+
+**Honestly stated limitation:** the expectation is recorded at backup time, so it
+can never contain rows written afterwards. The drill verifies "the backup
+restores to the state it recorded". Recovering PAST the base backup to an
+arbitrary instant is a different assertion — `restore.sh --target-time` — and
+`restore.sh` now prints how many WAL segments it fetched from the archive so the
+two cannot be confused. A base backup taken with `--wal-method=stream` carries
+enough WAL to recover and promote WITHOUT ever calling `restore_command`, which
+is a valid restore and is NOT point-in-time recovery.
+
+### D-160 · `archive_mode = off` is FORCED into every restored instance
+**Status:** Active — the most dangerous default in the restore procedure
+
+A restored instance inherits the source's archive settings. Left alone it begins
+writing its own divergent timeline into the production WAL archive directory,
+which corrupts the chain every other backup depends on — turning a recovery into
+a second, worse incident.
+
+`restore.sh` appends `archive_mode = off` to `postgresql.auto.conf` (last
+occurrence wins), mounts the backup volume `:ro`, and REFUSES a target volume
+named `foxxy_prod_postgres_data` or `foxxy_postgres_data`. Three independent
+guards, because a restore script is run by a frightened person at 3am.
+
+### D-161 · The secret scanner is self-testing, and its allow-list is the one uncomfortable place
+**Status:** Active — closes D-096's "worth an automated check"
+
+`tools/scan-secrets.mjs` scans TRACKED files only (`git ls-files`), because the
+thing that matters is whether a secret is in the repository — a real `.env` on a
+developer's disk is gitignored and reporting it would teach everyone to ignore
+the check.
+
+Two surfaces, deliberately split: every tracked `.env*` line by line (a `.env*`
+exists to hold credentials, so a non-placeholder value in a tracked one is a
+finding), and a small set of UNAMBIGUOUS provider token shapes repository-wide
+(`sk-…`, `rzp_live_…`, `AKIA…`, `re_…`, a three-part JWT). A scanner that flags
+anything high-entropy across a whole repository produces a wall of findings on
+hashes, UUIDs and minified assets, and a check nobody can keep green is a check
+somebody deletes.
+
+`--self-test` drives every rule against fixtures that must be flagged and
+fixtures that must not, through THE SAME function the real scan uses — a
+self-test against a re-implementation would prove the re-implementation works. It
+exits 2 if any rule has stopped matching, because a scanner whose regular
+expressions no longer match anything reports "clean", which is the same output as
+a clean repository.
+
+**Proven, not assumed:** the exact D-096 string was inserted into the exact file
+D-096 happened in (`backend/.env.example`); the scanner exited 1 and named the
+host. The file was then restored byte-for-byte.
+
+### D-162 · A check that matched NOTHING is not a passing check
+**Status:** Active — found while proving the gates, not by reading them
+
+The CI step "every shell script parses" iterates `git ls-files '*.sh'`. Run
+locally before the scripts were staged, it iterated zero files, never executed
+the loop body, and reported a PASS on a script with a deliberate syntax error.
+
+That is the "ESLint rule matching zero files" defect (D-005) wearing a shell
+loop. The step now counts what it checked and FAILS on zero.
+
+A second finding from the same exercise, worth recording because it invalidates
+the obvious test: `bash -n` ACCEPTS `if [ "$x" = 1 ; then … fi`. `[` is an
+ordinary command, so a missing `]` is a RUNTIME failure, not a parse error. The
+first attempt at proving this gate was itself measuring nothing.
+
+---
+
+## foxy module — 10 August 2026
+
+Build step 10. Migration `0005_foxy`, `src/modules/foxy/`, and `platform/llm`'s
+fake plus real adapters. D-163..D-172.
+
+### D-163 · Foxy is a GUIDED INTERFACE, and the fixed action set is what makes it evaluable
+**Status:** Active — the shape of the whole module
+
+Three modes (`doubt`, `explain`, `practice`) and six actions (`simpler`,
+`visual`, `example`, `hindi`, `quiz_me`, `confused`). Both are closed sets in
+`shared/constants/foxy.ts`, and both are consumed as `Record<Mode, Spec>` and
+`Record<Action, Spec>` — TOTAL, so adding a value without a label, an
+instruction, a token budget and a translation is a compile error rather than a
+value that silently inherits a default.
+
+**The argument is not aesthetic.** A fixed action set means a BOUNDED number of
+prompt shapes, each reviewable once and testable forever — which is the only
+reason "is the tutor safe" is a question anybody can answer. With open chat it
+becomes a question about whatever a child happened to type, and the answer is a
+moderation budget and an incident channel.
+
+`hindi` is an ACTION rather than a setting. A student who wants one explanation
+in Hindi is not changing their account language, and sending them to a settings
+screen in the middle of a doubt is friction that ends the session. It overrides
+the session language for exactly one turn.
+
+The capability list is SERVED (`GET /foxy/capabilities`) rather than hardcoded in
+the client, so the vocabulary has one definition. A client with its own copy
+eventually renders a button the server does not implement, and that fails at the
+moment a child presses it.
+
+### D-164 · Citations are verified INCREMENTALLY, mid-stream, not after the answer
+**Status:** Active — this is the difference between a citation and a decoration
+
+Plan §8.5: "a language model will happily invent a page number." The model marks
+claims as `[chunk:<id>]`; the id is checked against the set of chunks retrieved
+FOR THAT TURN; an unknown id is dropped and recorded as fabricated.
+
+**The non-obvious half is WHEN.** The answer is streamed. Verifying at the end
+means a fabricated marker has already been shown to the student, so "stripped
+before the response is sent" would be false in the one place it is load-bearing.
+`domain/citations.ts` is therefore an incremental filter: it withholds any
+trailing text that could still become a marker, emits everything else
+immediately, and resolves each marker the moment it closes. The cost is a few
+characters of latency at a `[`.
+
+**Two decisions inside it that are not obvious and are both tested.**
+
+- THE ID, NOT AN INDEX. `[chunk:1]` is easier for a model to produce and makes
+  verification worthless: with three passages, a model that invents an index is
+  right by accident a third of the time. A fabricated UUID is fabricated with
+  certainty, so the check has no lucky path.
+- AN UNTERMINATED MARKER IS RELEASED AS PROSE, and there is a length bound
+  (`MAX_CITATION_ID_CHARS = 80`). Without the bound, one stray `[chunk:` swallows
+  the rest of the answer — the response stops mid-sentence, forever, with no
+  error anywhere, which is the worst failure shape there is.
+
+### D-165 · Abstention is a SUCCESSFUL answer, and the model is never called on that path
+**Status:** Active — the product, stated as control flow
+
+An abstention arrives on a 200, as an `abstention` SSE frame (never an `error`
+frame), is stored as an ordinary assistant message with `abstained = true`, and
+gets its own trace row. The client renders it as an answer with no retry button,
+because retrying cannot change the textbook.
+
+`retrieval.search` decides, and the branch that returns the abstention sits above
+every line that touches `deps.llm`. A test asserts the scripted model recorded
+ZERO calls. **If that assertion is ever weakened, foxy has become a chatbot with
+a search box attached.**
+
+The wording is FIXED and bilingual, not generated — asking a model to explain
+that it cannot answer is a model call we just decided not to make, and produces a
+sentence that varies. Every abstention ends with a NEXT STEP: "I do not know" is
+honest and useless.
+
+A CHECK in migration `0005` enforces that an abstention carries no citations. "I
+could not find this in your textbook" with a page reference attached is a
+contradiction, and it is exactly the row a half-finished refactor writes —
+retrieval abstains, the citation extractor runs anyway.
+
+### D-166 · The safety classifier runs BEFORE the model, and its false-POSITIVE rate is the thing to tune
+**Status:** Active
+
+A classifier on the model's OUTPUT is a filter; one on the INPUT is a boundary.
+Three reasons, and the third decided it: input that will not be answered costs
+nothing if it never reaches the model; a refusal composed by us reads the same
+every time; and **a child asking about self-harm must be answered by a fixed
+sentence naming a trusted adult and a real free helpline (Tele-MANAS, 14416,
+reachable from any Indian number) — never by a language model improvising under a
+tutoring persona.**
+
+It is deliberately blunt — keyword and pattern matching, not a model — because
+grounding catches everything subtle: an off-syllabus question retrieves nothing
+and abstains. So it is tuned for the cases abstention CANNOT catch (harm, adult
+content, contact-swapping) and is reluctant elsewhere.
+
+**The false-positive half is the part with a test list.** `\bkill (?:myself|me)\b`
+rather than `kill`, because half of biology is about things dying; "explain the
+reproductive system in humans" is CBSE syllabus and must be answered. A table of
+ten such inputs is pinned as ALLOWED.
+
+A refused turn does NOT consume the student's daily allowance. Charging a child a
+message for being told to talk to an adult is indefensible. An abstention DOES
+consume one — it cost a retrieval, and a free abstention is an unlimited supply
+of retrievals.
+
+### D-167 · `sendMessage` returns a PROMISE OF A STREAM, so every status code happens before the first byte
+**Status:** Active — the reason a mid-stream failure is never a 500
+
+Authorisation, the usage limit and the session lookup have real HTTP answers:
+403, 404, 429. Once a single SSE byte is written the status is committed to 200
+and there is nothing left to change.
+
+So the service resolves a promise ONLY once the turn is authorised, admitted and
+grounded. Everything before that rejects and the error plugin renders it as
+ordinary JSON. Everything after it is a FRAME: a model failure becomes `error`
+then `done`, and the tokens already delivered stand. The `error` frame carries
+`partial`, because §7 of the frontend plan lists "failed before any token" and
+"failed halfway" as two DIFFERENT required client behaviours and nothing else on
+the wire distinguishes them.
+
+**The message and the trace are persisted even when the stream fails.** A half
+answer the student was shown has to be in the transcript, or the conversation
+they remember and the one we stored disagree — and the trace is exactly what
+somebody wants when they ask why it stopped.
+
+### D-168 · `chat_messages.seq` is the transcript order; `created_at` cannot be
+**Status:** Active — a real ordering bug, surfaced by a fixed clock
+
+A student's question and Foxy's reply can share a millisecond: ALWAYS under the
+`FixedClock` every test uses, and intermittently in production. Ordering a
+transcript by `created_at` alone then returns the two turns in whatever order the
+plan produced — so the transcript reads "assistant, user" at random and the
+history handed to the model is incoherent.
+
+This surfaced as four failing assertions that looked unrelated to each other. It
+is not a test artefact: a fixed clock makes the bug deterministic and a real
+clock makes it intermittent, which is the worse of the two.
+
+`seq bigserial` is monotonic per insert and needs no read-then-write, so two
+concurrent turns cannot be handed the same number. The session index is on
+`(session_id, seq)`, and every ordering in the repository uses it.
+
+### D-169 · No identity reaches the model, enforced on the ASSEMBLED prompt and not on its inputs
+**Status:** Active — 00-ARCHITECTURE.md §0 as a function
+
+`assertNoIdentity` refuses an email address, a phone number and a UUID, and it
+runs on every section of the assembled system prompt — because the failure it
+guards against is somebody adding a field to a TEMPLATE, not somebody
+deliberately passing a name.
+
+Three consequences worth stating:
+
+- **FOXY DOES NOT KNOW THE STUDENT'S NAME and cannot greet them by it.** That is
+  the cost of the rule, paid deliberately.
+- THE UUID CHECK RUNS BEFORE THE PHONE CHECK. A UUID is digits and hyphens, so it
+  matches the phone pattern too, and reporting an account identifier as a "phone
+  number" would send the investigation after the wrong bug.
+- THE PASSAGE BLOCK IS CHECKED FIELD BY FIELD, not as a rendered string. The
+  chunk id is a UUID and belongs in the passage header — the citation scheme
+  depends on it — so checking the rendered block would refuse every prompt this
+  system will ever build. The chunk TEXT and TITLE still get the email and phone
+  checks, and that is not theoretical: NCERT front matter carries publisher
+  contact details.
+
+The error carries the KIND and never the offending text. A log line containing
+the address it just refused to send is the same leak by a different route.
+
+### D-170 · The language-model adapter follows the `embed` pattern exactly, including the boot failure
+**Status:** Active — mirrors D-123
+
+`platform/llm` now has all three pieces plan §5 asks for: the port, a
+DETERMINISTIC scripted fake, and a real adapter (the Anthropic Messages API, with
+`LLM_MODEL` and `LLM_BASE_URL` overridable so the vendor stays a config value).
+
+**No test calls the real adapter.** There is no key. Every branch — success,
+non-2xx, malformed body, empty completion, a frame split across chunk
+boundaries, a mid-stream error event, a missing body — is driven by a fake
+`HttpClient` and an injected `fetch`. `createContainer` REFUSES TO BOOT in
+production without `LLM_API_KEY`, exactly as it does for `VOYAGE_API_KEY` and for
+the same reason: the degraded mode is not "slower", it is "every student receives
+the same scripted sentence, streamed and cited, through a UI that reports itself
+healthy".
+
+Two deliberate asymmetries with `embed`:
+
+- `complete()` does NOT set `idempotent: true`. `platform/http` refuses to retry
+  a POST, which is right here — a completion costs money per call, so repeating
+  one is a charge rather than a free retry.
+- `stream()` bypasses `HttpClient` and takes `fetch` directly, because streaming
+  needs the response body AS A STREAM and the client buffers by design.
+  `createGuardedLlm` still supplies the first-token timeout, the total budget,
+  the breaker and the concurrency slot, so nothing is unprotected — the only
+  thing skipped is the buffering, which is the thing streaming exists to avoid.
+
+The SSE reader BUFFERS ACROSS CHUNK BOUNDARIES. A network chunk can split a frame
+mid-field; a parser that assumes whole frames per chunk works perfectly in
+development and corrupts under real conditions. That is the same hazard
+02-FRONTEND-IMPLEMENTATION-PLAN.md §7 warns the CLIENT about — the server has it
+too, and it is the same bug.
+
+### D-171 · Applying `0005_foxy` turns the parent transcript on, and the column names are a contract
+**Status:** Active
+
+`parent.repository.readTranscript` has probed `to_regclass('public.chat_sessions')`
+since build step 12, returning `source: 'not_yet_available'` while the table was
+absent. The moment `0005` lands, the probe returns true and the endpoint serves
+real rows.
+
+So `chat_sessions(id, mode, started_at, last_message_at, student_user_id,
+tenant_id)` and `chat_messages(id, session_id, role, content, created_at)` with
+`role in ('user','assistant')` were written against plan §4 BEFORE the tables
+existed, and are a CONTRACT rather than a preference. Renaming any of them breaks
+a surface where the failure is invisible: an empty transcript reads as a quiet
+child.
+
+Two `parent` assertions flipped with this migration and were updated IN PLACE
+rather than deleted — `source` from `'not_yet_available'` to `'foxy'`, and the
+audit metadata's `available` from `false` to `true`. Both still distinguish "no
+conversations" from "the feature has not shipped", which is the property that
+mattered; what changed is which side of it is now true.
+
+### D-172 · Three foxy authorisation mutations, all observable — the guard is load-bearing
+**Status:** Active — the sixth application of the D-125 method
+
+Each guard was deliberately broken and the suite re-run:
+
+| Mutation | Caught? |
+|---|---|
+| actor-scoped tenant echoed off the actor (`listSessions`, `getUsage`, `startSession`) | YES — the correct wiring denies, the broken one succeeds |
+| session tenant echoed off the actor instead of read from the ROW | YES — a conversation became readable from another tenant |
+| conversation OWNER echoed off the actor instead of read from the row | YES — any student could read and send into any conversation |
+
+**No unenforced guard was found**, and that sentence is only worth anything
+because all three mutations were installed and observed rather than reasoned
+about. They are institutionalised in `foxy.authz-mutation.test.ts`, alongside a
+same-tenant, same-owner control so that no "broken wiring" case can be passing
+because the service refuses everything.
+
+The actor-scoped mutation is the D-125 case exactly: for `listSessions`,
+`getUsage` and `startSession` the resource is the caller themselves, so the
+OWNERSHIP rule is trivially true and the tenant comparison is the ONLY thing the
+guard does. That is precisely the shape that lost its entire boundary in `parent`
+and was found by nothing else.
+
+One honest note on defence in depth: the repository ALSO scopes its queries by
+tenant, so the broken `listSessions` returns an empty list rather than another
+tenant's rows. The mutation is still observable — the correct wiring THROWS and
+the broken one does not — but that second layer is why the assertion is about the
+deny path rather than about the payload. Mutations 2 and 3 have no second layer
+and leak real rows when broken.
+
+Mutations 2 and 3 are installed through the REPOSITORY rather than by editing the
+service: the value the service reads is the value the repository hands it, so a
+repository that lies about the row is exactly equivalent to a service that
+ignores it, and it needs no source edit to arrange.
+
+---
+
+## Composition-root integration — 10 August 2026
+
+> Four modules were built in parallel against an `app/routes.ts` and
+> `app/container.ts` that only one of them was allowed to edit. This section
+> records what landing the other three changed, and the one live defect found
+> and fixed while doing it. D-173 to D-177 continue from D-172.
+
+### D-173 · `0004_billing`'s journal `when` was below `0003_parent`'s — reproduced, then fixed
+**Status:** Closed — the defect was real and is now pinned by a test
+
+`drizzle/migrations/meta/_journal.json` recorded `0004_billing` at
+`1786374108357`, below `0003_parent`'s `1786700000000`. This is D-109 exactly,
+and the mechanism is worth being precise about, because it is NOT "the
+migrations run in the wrong order".
+
+`drizzle-orm`'s migrator does not use `idx` at all. It reads the last row of
+`drizzle.__drizzle_migrations`, takes its `created_at`, and applies **only the
+journal entries whose `when` is strictly greater than that number.** So on a
+database whose ledger had reached `0003`, `0004_billing` failed that filter and
+was **skipped in silence** — while `0005_foxy` (deliberately set to
+`1786800000000`) passed it and applied on top of the hole.
+
+**This was reproduced before it was fixed, and the reproduction is why the fix
+is trustworthy.** A scratch database was primed with a genuine drizzle ledger
+through `0003`, then `migrate()` was run against the unfixed journal:
+
+    primed ledger through 0003_parent
+    Migrations applied.            <-- the D-109 sentence, applying nothing
+    MISSING  subscriptions
+    MISSING  payment_events
+    ledger rows: 5 -> ...1786700000000, 1786800000000
+
+`subscriptions` and `payment_events` did not exist, `0005` had applied over the
+gap, and the exit code was zero. Every command in a deploy pipeline would have
+reported success.
+
+**Decision:** `0004_billing`'s `when` becomes `1786750000000` — between `0003`
+and `0005`, so the journal is strictly increasing and the `idx` order and the
+`when` order finally agree. Nothing else in the file changes and no migration
+SQL is touched. Verified by re-running both scenarios (empty database, and a
+ledger primed to `0003`) against a scratch database: six ledger rows and both
+tables present, in both.
+
+**Why renumber `0004` rather than the alternatives.** Renumbering `0005_foxy`
+upward does not help — the problem is `0004` being below `0003`, not `0005`
+being above anything. Rewriting the ledger on deployed databases was rejected
+outright: nothing has yet been past `0003`, so there is nothing to reconcile,
+and a fix requiring a manual step in every environment is a fix that will be
+forgotten in one.
+
+### D-174 · The round-trip test could not have caught it, and the reason is structural
+**Status:** Active — states the boundary of what the existing migration tests prove
+
+The obvious question is why `migration-round-trip.test.ts` — which applies every
+migration, reverses it and re-applies it — was green throughout.
+
+Because **it reaches the migrations through `listMigrations()`, which sorts by
+`idx`.** That is the correct order to apply in, and it is why every harness in
+the suite uses it. But it means the whole test suite applies migrations by a
+mechanism the production migrator does not use, and `when` is never read by
+anything under test. The round trip would have stayed green with `0004`'s
+timestamp set to any value at all.
+
+That is not a flaw in that test; it is a different question. So the rule is
+asserted where it lives — on the FILE — by
+`tests/integration/migration-journal-order.test.ts`, which pins four properties
+per migration set:
+
+1. there is a subject at all (the guard on the guard);
+2. every entry carries a finite positive integer `when` — a missing one is
+   coerced rather than rejected, and `undefined > n` is false, so it is skipped
+   exactly like an inverted one and just as quietly;
+3. `when` increases **strictly** with `idx` — strictly, because two entries
+   sharing a `when` are skipped by the same arithmetic as an inverted pair;
+4. the migrator's own selection rule, transcribed: for a ledger at any entry N,
+   the set of entries with a greater `when` must equal the set with a greater
+   `idx`.
+
+**The test was proved to fire** by reverting the value and watching it go red —
+naming the inverted pair (`0004_billing` after `0003_parent`) and the migration
+that would be skipped — and then restored.
+
+### D-175 · `billing`, `knowledge` and `signals` are wired; three of eleven modules still register no routes
+**Status:** Active
+
+`foxy` was wired by the agent that built it. The other three were built while
+the composition root was owned by a change in flight and reported their wiring
+lines instead. They are now in `buildModules`:
+
+| Module | Pool | Routes |
+|---|---|---|
+| `billing` | `core` | four, under `/api/v1`, **awaited** |
+| `knowledge` | `core`, following `content` | none |
+| `signals` | `core`, following `practice` | none |
+
+**The `await` on `billing.registerRoutes` is load-bearing**, and billing is the
+only module besides `identity` that needs one. The webhook is registered inside
+its own encapsulated Fastify scope because it needs a raw-body content-type
+parser: the HMAC is computed over the exact bytes Razorpay sent, and a JSON
+parse followed by a re-serialise is not those bytes. `app.register` is
+asynchronous, so a dropped `await` lets `app.ready()` win the race — and the
+symptom is a webhook that 404s **in production only**, for every genuine
+delivery.
+
+**THREE MODULES NOW REGISTER NO ROUTES, AND A COMMENT AT THE FOOT OF
+`registerRoutes` SAYS SO.** `retrieval` (D-122), `knowledge` and `signals`.
+"Built but never registered" reads exactly like an oversight, and the next
+person to notice would helpfully close the apparent gap. Each is a decision: a
+`retrieval` or `knowledge` endpoint would let a caller choose the filters —
+including a grade the student is not in — and every answer `signals` gives is
+about a NAMED STUDENT, in a module with no session and no access guard of its
+own. That boundary belongs to the caller that has a request.
+
+`src/app/__tests__/routes.test.ts` pins both halves: driving `registerRoutes`
+with `billing` alone produces `/api/v1/webhooks/billing`, and driving it with
+each of the other three alone produces an empty route tree.
+
+### D-176 · The `payments` port refuses to boot in production, and it is the worst of the three fallbacks
+**Status:** Active
+
+`Container.payments` follows the `embed` and `llm` pattern exactly: Razorpay
+when credentials are configured, the deterministic fake otherwise, and a **boot
+failure** in production rather than a silent fallback. It is guarded with
+`resilience.guard('payments')`, so no caller can hold a bare adapter.
+
+**The degraded mode is worse than either of the other two.** `embed` on the fake
+returns confident wrong answers; `llm` on the fake returns one canned sentence.
+`payments` on the fake happily CREATES SUBSCRIPTIONS and happily VERIFIES
+WEBHOOKS SIGNED WITH A SECRET WE CHOSE — so entitlements would be granted
+against payments that never happened, with no error, no failed request and
+nothing in a log. It is discovered by reconciling a bank statement.
+
+Three details that are decisions rather than defaults:
+
+* **The error names WHICH credential is missing**, checked in order. The webhook
+  secret is a *different* secret from the API key, issued per endpoint in the
+  Razorpay dashboard, and supplying the API secret in its place is the standard
+  misconfiguration — whose symptom without a boot gate is checkout working
+  perfectly while every genuine delivery fails its signature.
+* **`RAZORPAY_PLAN_IDS` is deliberately NOT in the boot check.** An empty map is
+  a LOUD failure at checkout time: `createSubscription` refuses a plan code it
+  cannot map. Only the silent failure needs a gate.
+* **The three credentials are narrowed as ONE value**, so the adapter is built
+  from strings the compiler has proved non-null. The tempting `?? ''` per field
+  is a credential that parses and then reaches Razorpay, which is the exact
+  hazard the config schema's own header calls out.
+
+An explicit `payments` override is allowed through in production: "no key was
+set" and "this deployment supplies its own port" are different facts, and the
+refusal is about the silent fallback, not about the fake.
+
+### D-177 · `practice` exports its anti-cheat floor; `signals` still has no default
+**Status:** Active
+
+`modules/signals` could not be constructed at all: its `AntiCheatEdge` needs
+`practice`'s `MIN_AVERAGE_MS_PER_QUESTION` and `validateAttempt`, and
+`practice/index.ts` exported neither. Both are now exported, **additively** —
+`practice` still owns them, `practice.service.ts` still imports them from
+`./domain/anti-cheat` directly, and no check, threshold or ordering changed.
+
+**The property preserved is that there is still NO DEFAULT on the edge (D-131).**
+A default would be a second copy of a threshold, and two copies drift silently:
+the symptom is a `fast_completion` signal that stops agreeing with the rejection
+it is defined relative to — sessions refused as too fast that raise no anomaly,
+or anomalies raised for sessions nobody refused. Neither errors and neither is
+visible from outside. The compile error stays the enforcement.
+
+The edge built at the composition root **discards the reason** on purpose.
+`validateAttempt` returns which of the three checks failed, and that reason
+belongs to `practice`: it is written to `practice_sessions.invalid_reason` and
+read by a human deciding what to say to a student. `signals` gets the VERDICT
+only — giving it the reason would invite it to grow a second opinion about what
+the reason means, in a second place, from evidence it did not gather.

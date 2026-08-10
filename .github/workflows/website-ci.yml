@@ -1,0 +1,80 @@
+# =============================================================================
+# MARKETING WEBSITE CI — <domain>
+#
+# `workflow_call` only; invoked by ci.yml when `website/**` changed.
+#
+# 06-FRONTEND-SEPARATION-PLAN.md: "The marketing pipeline owns only the CMS
+# image, static marketing artifact, and marketing tests." It has no access to
+# product or backend code here, and — the part that matters more — the
+# deployment credentials it is given cannot restart product containers. That
+# half is enforced by `docker/deploy-app.sh`, which only ever names `website`.
+# =============================================================================
+
+name: website-ci
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  website:
+    name: type-check · lint · build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
+
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      NEXT_PUBLIC_APP_URL: https://app.example.com
+      NEXT_PUBLIC_MARKETING_URL: https://example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: install
+        run: npm ci
+
+      - name: type-check
+        run: npm run typecheck
+
+      - name: lint
+        run: npm run lint
+
+      # `website/package.json` declares no `test` script yet. Running `npm test`
+      # would report "missing script" and FAIL the pipeline on a project that
+      # legitimately has no tests, so the step reports the gap instead of
+      # pretending — and starts running them the moment the script exists.
+      - name: test (if the app declares any)
+        run: |
+          set -euo pipefail
+          if node -e "process.exit(require('./package.json').scripts?.test ? 0 : 1)"; then
+            npm test
+          else
+            echo "NOTE: website/package.json declares no test script. No marketing tests are running."
+          fi
+
+      - name: build
+        run: npm run build
+
+      - name: the standalone server output exists (the Docker image needs it)
+        run: |
+          set -euo pipefail
+          test -f .next/standalone/server.js \
+            || { echo "FAIL: no .next/standalone/server.js — is output:'standalone' still set in next.config.ts?"; exit 1; }
+          echo "standalone output present"
+
+      - name: the Docker image builds
+        run: |
+          docker build \
+            --build-arg NEXT_PUBLIC_APP_URL="$NEXT_PUBLIC_APP_URL" \
+            --build-arg NEXT_PUBLIC_MARKETING_URL="$NEXT_PUBLIC_MARKETING_URL" \
+            -t foxxy/website:ci .

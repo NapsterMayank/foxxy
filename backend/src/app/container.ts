@@ -26,6 +26,12 @@ import {
 import { createHttpClient, type HttpClient } from '../platform/http/index';
 import { createUuidGen, type IdGen } from '../platform/id-gen/index';
 import { createPostgresJobQueue, type JobQueue } from '../platform/jobs/index';
+import {
+  createAnthropicLlm,
+  createFakeLlm,
+  createGuardedLlm,
+  type LlmProvider,
+} from '../platform/llm/index';
 import { createLogger, type Logger } from '../platform/logger/index';
 import { createConsoleMail, createGuardedMail, type MailPort } from '../platform/mail/index';
 import {
@@ -45,6 +51,12 @@ import {
   type ChannelPolicy,
   type NotificationDispatcher,
 } from '../platform/notify-channel/index';
+import {
+  createFakePayments,
+  createGuardedPayments,
+  createRazorpayPayments,
+  type PaymentsPort,
+} from '../platform/payments/index';
 import { createResilienceRegistry, type ResilienceRegistry } from '../platform/resilience/index';
 import { toChannelPolicy } from '../modules/notify/index';
 
@@ -111,6 +123,42 @@ export interface Container {
    * Always guarded, so no caller can hold a bare adapter (§3.3, §4, §5).
    */
   readonly embed: EmbeddingProvider;
+  /**
+   * THE LANGUAGE-MODEL PORT — plan §8.5, and the same "wrong without anything
+   * failing" hazard as `embed` above.
+   *
+   * The real adapter when a key is configured, the deterministic scripted fake
+   * otherwise, and `createContainer` REFUSES TO BOOT in production without a
+   * key rather than quietly taking the fake. The two are interchangeable to the
+   * type system, and a production deployment on the fake would serve every
+   * student the same canned sentence — with citations, over SSE, through a UI
+   * that shows no error at all.
+   *
+   * Always guarded, so no caller can hold a bare adapter (§3.3, §4, §5). The
+   * guard carries BOTH timeout rules: 30s for a completion, and 8s to the first
+   * token with a 60s total and no retry for a stream.
+   */
+  readonly llm: LlmProvider;
+  /**
+   * THE PAYMENT-GATEWAY PORT — plan §8.8, and the THIRD adapter choice in this
+   * file that can be wrong without anything failing. It is also the worst of
+   * the three.
+   *
+   * Razorpay when credentials are configured, the deterministic fake otherwise,
+   * and `createContainer` REFUSES TO BOOT in production without them rather
+   * than quietly taking the fake. `embed` on the fake returns wrong answers and
+   * `llm` on the fake returns one canned sentence; `payments` on the fake
+   * happily CREATES SUBSCRIPTIONS and happily VERIFIES WEBHOOKS SIGNED WITH A
+   * SECRET WE CHOSE. Entitlements would be granted against payments that never
+   * happened — no error, no failed request, and a revenue hole that is only
+   * discovered by reconciling a bank statement.
+   *
+   * Always guarded, so no caller can hold a bare adapter (§3.3, §4, §5). Note
+   * that `verifyWebhook` passes THROUGH the guard rather than into it: it is
+   * pure HMAC with no I/O, and putting a breaker in front of it would let an
+   * unrelated Razorpay outage start rejecting genuine deliveries.
+   */
+  readonly payments: PaymentsPort;
   readonly authz: AccessGuard;
   readonly resilience: ResilienceRegistry;
   readonly databaseProbe: DatabaseProbe;
@@ -166,6 +214,26 @@ export interface ContainerOverrides {
    * and only one of them should survive somebody adding a key to their shell.
    */
   readonly embed?: EmbeddingProvider;
+  /**
+   * Substitute language-model provider.
+   *
+   * Supplied explicitly by every test that exercises Foxy, rather than relying
+   * on the absence of a key — "no key was set" and "this test wants the scripted
+   * fake" are different facts, and only one of them should survive somebody
+   * adding a key to their shell.
+   */
+  readonly llm?: LlmProvider;
+  /**
+   * Substitute payment gateway.
+   *
+   * Supplied explicitly by every test that exercises billing, rather than
+   * relying on the absence of credentials — "no key was set" and "this test
+   * wants the deterministic fake" are different facts, and only one of them
+   * should survive somebody adding a key to their shell. A test that wants to
+   * SIGN a delivery needs the concrete `FakePayments` anyway, so it has to pass
+   * its own instance in regardless.
+   */
+  readonly payments?: PaymentsPort;
   /**
    * Channel routing by message kind.
    *
@@ -292,6 +360,122 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
     resilience.guard('embed'),
   );
 
+  /**
+   * THE LANGUAGE-MODEL ADAPTER CHOICE — see `Container.llm`.
+   *
+   * A BOOT FAILURE rather than a warning, for the same reason as `embed`: the
+   * degraded mode is not "slower" or "shorter answers", it is "every student
+   * receives the same scripted sentence and the system reports itself healthy".
+   * A warn line in a log nobody reads is not a defence against a failure with
+   * no symptom.
+   */
+  if (config.isProduction && overrides.llm === undefined && config.ai.llmApiKey === null) {
+    throw new Error(
+      'LLM_API_KEY is required in production. Without it the deterministic scripted ' +
+        'fake would be used, and every Foxy answer would be the same canned sentence — ' +
+        'streamed, cited and indistinguishable from a working tutor. Set LLM_API_KEY, ' +
+        'or run with NODE_ENV=development.',
+    );
+  }
+  const llm = createGuardedLlm(
+    overrides.llm ??
+      (config.ai.llmApiKey === null
+        ? createFakeLlm()
+        : createAnthropicLlm({
+            http,
+            apiKey: config.ai.llmApiKey,
+            ...(config.ai.llmModel === null ? {} : { model: config.ai.llmModel }),
+            ...(config.ai.llmBaseUrl === null ? {} : { baseUrl: config.ai.llmBaseUrl }),
+          })),
+    {
+      guard: resilience.guard('llm'),
+      clock,
+      completion: config.timeouts.llm,
+      streaming: config.timeouts.llmStreaming,
+    },
+  );
+
+  /**
+   * THE PAYMENT ADAPTER CHOICE — see `Container.payments`.
+   *
+   * A BOOT FAILURE rather than a warning, for the same reason as `embed` and
+   * `llm`, and with more at stake than either. All THREE credentials are
+   * required together, and the check names which one is missing: the webhook
+   * secret is a SEPARATE secret from the API key, set per endpoint in the
+   * Razorpay dashboard, and supplying the API secret in its place is a common
+   * misconfiguration whose only symptom is that every genuine delivery fails
+   * its signature check while checkout keeps working.
+   *
+   * `RAZORPAY_PLAN_IDS` is deliberately NOT in the boot check. An empty map is
+   * a loud failure at checkout time — `createSubscription` refuses a plan code
+   * it cannot map — whereas missing credentials are a SILENT fallback to a fake
+   * that grants entitlements for free. Only the silent one needs a boot gate.
+   */
+  const paymentsMissing =
+    config.payments.razorpayKeyId === null
+      ? 'RAZORPAY_KEY_ID'
+      : config.payments.razorpayKeySecret === null
+        ? 'RAZORPAY_KEY_SECRET'
+        : config.payments.razorpayWebhookSecret === null
+          ? 'RAZORPAY_WEBHOOK_SECRET'
+          : null;
+
+  /**
+   * The three credentials as ONE value that is either wholly present or null.
+   *
+   * Narrowed here rather than at the call site so that the adapter is
+   * constructed from strings the compiler has proved non-null. The tempting
+   * `?? ''` at each field would be a credential that PARSES and then reaches
+   * Razorpay — precisely the "a fake key that parses is exactly the thing that
+   * would then reach Razorpay" hazard the config schema's own header calls out.
+   */
+  const razorpayCredentials =
+    config.payments.razorpayKeyId !== null &&
+    config.payments.razorpayKeySecret !== null &&
+    config.payments.razorpayWebhookSecret !== null
+      ? {
+          keyId: config.payments.razorpayKeyId,
+          keySecret: config.payments.razorpayKeySecret,
+          webhookSecret: config.payments.razorpayWebhookSecret,
+        }
+      : null;
+
+  if (config.isProduction && overrides.payments === undefined && paymentsMissing !== null) {
+    throw new Error(
+      `${paymentsMissing} is required in production. Without the Razorpay credentials the ` +
+        'deterministic payments fake would be used, and it happily creates subscriptions and ' +
+        'happily verifies webhooks signed with a secret we chose — granting entitlements ' +
+        'against payments that never happened, with no error anywhere. Set RAZORPAY_KEY_ID, ' +
+        'RAZORPAY_KEY_SECRET and RAZORPAY_WEBHOOK_SECRET, or run with NODE_ENV=development.',
+    );
+  }
+
+  const payments = createGuardedPayments(
+    overrides.payments ??
+      (razorpayCredentials === null
+        ? createFakePayments({
+            /**
+             * A FIXED, OBVIOUSLY-FAKE SECRET, and it never reaches production —
+             * the boot check above has already thrown by the time this line can
+             * run there. Fixed rather than random so that a developer can sign
+             * a delivery by hand against a documented value; obviously fake so
+             * that finding it in a log or a heap dump prompts the right
+             * question.
+             */
+            secret: 'dev-only-not-a-real-webhook-secret',
+            // The catalogue's purchasable codes, so the fake refuses an unknown
+            // one exactly as Razorpay does rather than selling anything asked
+            // for. Local, because `platform/` may not import a module.
+            planCodes: ['monthly', 'yearly'],
+          })
+        : createRazorpayPayments({
+            http,
+            ...razorpayCredentials,
+            planIds: config.payments.razorpayPlanIds,
+          })),
+    resilience.guard('payments'),
+  );
+
   // The link reader is wired to the identity repository in build step 4.
   // Until that module exists the guard denies every parent-child read, which
   // is the correct posture for a boundary that has no data source yet.
@@ -372,6 +556,8 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
     http,
     mail,
     embed,
+    llm,
+    payments,
     authz,
     resilience,
     metrics,

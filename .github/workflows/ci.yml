@@ -1,0 +1,273 @@
+# =============================================================================
+# CI — the single entry point, and the gate everything fans into.
+#
+# =============================================================================
+# HOW "PATH-SCOPED WORKFLOWS PER APP" AND "A GATE EVERYTHING FANS INTO" ARE BOTH
+# TRUE HERE.
+#
+# 06-FRONTEND-SEPARATION-PLAN.md asks for separate, path-scoped workflows per
+# app: "A documentation-only change deploys nothing." It also has to be possible
+# to require ONE status check on a branch protection rule — otherwise the rule
+# has to name every job, and a job added later is un-required by default, which
+# is a gate that silently stops gating.
+#
+# Those two pull in opposite directions if each app workflow carries its own
+# `on: push` path filter: GitHub reports "skipped" for a workflow whose paths do
+# not match, and a required check that never runs blocks every PR forever.
+#
+# So: each app's CI is its OWN FILE (`backend-ci.yml`, `frontend-ci.yml`,
+# `website-ci.yml`) declared `on: workflow_call`, and THIS workflow decides
+# which of them to call from a change detection job. The scoping is real — a
+# docs-only PR runs the secret scan and nothing else — and there is exactly one
+# required check, `ci-gate`.
+#
+# =============================================================================
+# THE GATE IS `if: always()` AND INSPECTS RESULTS EXPLICITLY.
+#
+# `needs: [...]` alone would make the gate SKIP when an upstream job is skipped,
+# and a skipped required check is reported as neutral — which reads as green.
+# The gate therefore runs unconditionally and treats `success` and `skipped` as
+# passing, and everything else (`failure`, `cancelled`) as failing. Being
+# explicit about it is the difference between a gate and a decoration.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push supersedes an in-flight run on the same ref. Not on `main`,
+# where every commit's result is a fact somebody may need later.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ===========================================================================
+  # WHICH APPS CHANGED
+  # ===========================================================================
+  changes:
+    name: detect changed apps
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      website: ${{ steps.filter.outputs.website }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Two commits is enough for a push diff; a PR is diffed against its
+          # merge base, resolved below.
+          fetch-depth: 0
+
+      - id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          elif [ -n "${{ github.event.before }}" ] && \
+               git cat-file -e "${{ github.event.before }}^{commit}" 2>/dev/null; then
+            base="${{ github.event.before }}"
+          else
+            # First push to a branch, or a force-push that removed the old tip.
+            # BUILD EVERYTHING. An unknown diff base must never be read as "no
+            # app changed" — that is a change-detection failure quietly turning
+            # into a skipped test run.
+            base=""
+          fi
+
+          if [ -z "$base" ]; then
+            echo "no usable diff base; running every app"
+            changed="ALL"
+          else
+            changed="$(git diff --name-only "$base" "${{ github.sha }}")"
+            echo "changed files:"
+            echo "$changed"
+          fi
+
+          matches() {
+            [ "$changed" = "ALL" ] && return 0
+            echo "$changed" | grep -qE "$1"
+          }
+
+          # Root infrastructure — Docker, CI, the secret scanner — affects every
+          # app, so a change to it runs every app's pipeline. Erring towards
+          # running too much: the cost is minutes, the cost of the opposite is a
+          # broken deployment that CI said was fine.
+          INFRA='^(docker/|\.github/|tools/)'
+
+          for app in backend frontend website; do
+            if matches "^${app}/" || matches "$INFRA"; then
+              echo "${app}=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "${app}=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+          cat "$GITHUB_OUTPUT"
+
+  # ===========================================================================
+  # SECRET SCAN — always, on every change, including documentation-only ones.
+  # ===========================================================================
+  #
+  # NOT path-scoped, deliberately. The whole point is that a credential can
+  # arrive in a file nobody thought of as sensitive, in a change nobody thought
+  # of as risky. D-096's credential arrived in a documentation-shaped file
+  # during a data-extraction task.
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # `--self-test` first: it drives every rule against a fixture that must be
+      # flagged and one that must not, and exits 2 if any rule has stopped
+      # working. Without it, a scanner whose regular expressions no longer match
+      # anything reports "clean" — which is the same output as a clean
+      # repository.
+      - name: scan tracked files for credentials (self-testing)
+        run: node tools/scan-secrets.mjs --self-test
+
+  # ===========================================================================
+  # PER-APP PIPELINES
+  # ===========================================================================
+  backend:
+    name: backend
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    uses: ./.github/workflows/backend-ci.yml
+
+  frontend:
+    name: frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    uses: ./.github/workflows/frontend-ci.yml
+
+  website:
+    name: website
+    needs: changes
+    if: needs.changes.outputs.website == 'true'
+    uses: ./.github/workflows/website-ci.yml
+
+  # ===========================================================================
+  # INFRASTRUCTURE — the compose file and the shell scripts have to parse
+  # ===========================================================================
+  infra:
+    name: infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: compose.prod.yml is valid
+        run: |
+          set -euo pipefail
+          cd docker
+          # A throwaway env file: `config` interpolates variables and fails on a
+          # missing REQUIRED one, so this validates the file AND that
+          # .env.prod.example documents every variable the file references.
+          cp .env.prod.example .env.prod
+          sed -i 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=ci-validation-only|' .env.prod
+          sed -i 's|^ONCALL_USER_ID=.*|ONCALL_USER_ID=00000000-0000-4000-8000-000000000001|' .env.prod
+          docker compose -f compose.prod.yml --env-file .env.prod config > /dev/null
+          echo "compose.prod.yml validates"
+
+      - name: every shell script parses
+        run: |
+          set -euo pipefail
+          failed=0
+          checked=0
+          while IFS= read -r script; do
+            checked=$((checked + 1))
+            if bash -n "$script"; then
+              echo "ok   $script"
+            else
+              echo "FAIL $script"
+              failed=1
+            fi
+          done < <(git ls-files '*.sh')
+
+          # A CHECK THAT MATCHED NOTHING IS NOT A PASSING CHECK.
+          #
+          # This exact guard is here because the local proof run of this gate
+          # reported a pass on a file with a deliberate syntax error: the
+          # scripts were not yet tracked, `git ls-files` returned nothing, the
+          # loop body never executed and `failed` stayed 0. That is the "an
+          # ESLint rule matching zero files" defect, in a shell loop, found by
+          # insisting on a fail-proof rather than trusting the green.
+          if [ "$checked" -eq 0 ]; then
+            echo "FAIL: no shell scripts were checked. Either they are untracked, or the glob is wrong."
+            exit 1
+          fi
+          echo "checked ${checked} script(s)"
+          exit $failed
+
+      - name: the Caddyfile is valid, and the SSE policy is present
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e BASE_DOMAIN=example.com -e ACME_EMAIL=ops@example.com \
+            -v "$PWD/docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -v "$PWD/docker/caddy/conf.d:/etc/caddy/conf.d:ro" \
+            caddy:2.8-alpine caddy validate --config /etc/caddy/Caddyfile
+
+          # THE SSE POLICY IS A CONTENT ASSERTION, not just a syntax check.
+          # `caddy validate` is perfectly happy with a config that buffers the
+          # Foxy stream — the result is a valid file and a broken product, and
+          # the symptom points at the language model rather than at the proxy.
+          # So the two settings that make streaming work are asserted by name.
+          api='docker/caddy/conf.d/20-api.caddy'
+          grep -q 'flush_interval -1' "$api" \
+            || { echo "FAIL: SSE route has no 'flush_interval -1' — responses will be BUFFERED"; exit 1; }
+          grep -qE 'read_timeout +(1[2-9][0-9]|[2-9][0-9]{2,})s' "$api" \
+            || { echo "FAIL: SSE route read_timeout is below the 120s minimum"; exit 1; }
+          echo "SSE proxy policy present: buffering disabled, timeout >= 120s"
+
+  # ===========================================================================
+  # THE GATE
+  # ===========================================================================
+  ci-gate:
+    name: ci-gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [changes, secret-scan, backend, frontend, website, infra]
+    steps:
+      - name: every upstream job succeeded or was legitimately skipped
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A results=(
+            [changes]="${{ needs.changes.result }}"
+            [secret-scan]="${{ needs.secret-scan.result }}"
+            [backend]="${{ needs.backend.result }}"
+            [frontend]="${{ needs.frontend.result }}"
+            [website]="${{ needs.website.result }}"
+            [infra]="${{ needs.infra.result }}"
+          )
+
+          failed=0
+          for job in "${!results[@]}"; do
+            case "${results[$job]}" in
+              success)  echo "PASS    $job" ;;
+              skipped)  echo "skipped $job (path-scoped out)" ;;
+              *)        echo "FAIL    $job (${results[$job]})"; failed=1 ;;
+            esac
+          done
+
+          # The secret scan is NEVER path-scoped, so `skipped` there means the
+          # job did not run at all — a state that must not be read as a pass.
+          if [ "${results[secret-scan]}" != "success" ]; then
+            echo "FAIL    secret-scan did not succeed; it must run on every change"
+            failed=1
+          fi
+
+          exit $failed

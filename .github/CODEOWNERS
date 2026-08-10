@@ -1,0 +1,49 @@
+# =============================================================================
+# CODEOWNERS — who must review what.
+#
+# The load-bearing entries are the INFRASTRUCTURE ones. 06-FRONTEND-SEPARATION-
+# PLAN.md requires that "proxy configuration [is] in an infrastructure-owned
+# Compose/Caddy include that no application pipeline can write". That is
+# enforced in three layers, and this file is one of them:
+#
+#   1. `docker/caddy` is mounted READ-ONLY into the caddy container.
+#   2. `docker/deploy-app.sh` — the only deployment entry point an application
+#      pipeline has — refuses the service names caddy, postgres, valkey, backup.
+#   3. THIS FILE: a change to the proxy configuration, the production compose
+#      file, the backup scripts or the CI pipelines requires an infrastructure
+#      review. A marketing pull request that edits the Caddyfile cannot merge on
+#      a marketing approval.
+#
+# Layers 1 and 2 are mechanical. This one is a review requirement and depends on
+# branch protection having "require review from Code Owners" enabled — a setting
+# that lives in the repository, not in the repository's files. Without it this
+# file is documentation. Turn it on.
+#
+# Replace the placeholder handles with real ones before this means anything. A
+# CODEOWNERS file naming a team that does not exist matches nothing and requires
+# no review, which is the same class of silently-absent enforcement as an ESLint
+# rule matching zero files.
+# =============================================================================
+
+# --- INFRASTRUCTURE ----------------------------------------------------------
+/docker/                    @infrastructure
+/docker/caddy/              @infrastructure
+/docker/compose.prod.yml    @infrastructure
+/docker/backup/             @infrastructure
+/.github/                   @infrastructure
+/tools/scan-secrets.mjs     @infrastructure
+
+# The migration SQL and the schema: a schema change is a one-way door far more
+# often than the diff suggests.
+/backend/drizzle/           @infrastructure
+/backend/src/platform/db/   @infrastructure
+
+# --- APPLICATIONS ------------------------------------------------------------
+/backend/src/modules/       @backend
+/frontend/                  @product-frontend
+/website/                   @marketing
+
+# --- DOCUMENTS THAT ARE DECISIONS, NOT PROSE ---------------------------------
+/docs/03-DECISION-LOG.md    @infrastructure
+/docs/04-RESILIENCE-PLAN.md @infrastructure
+/docs/runbooks/             @infrastructure

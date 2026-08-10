@@ -1,6 +1,9 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
+  // See frontend/next.config.ts — self-contained server output for a small
+  // production image. No effect on `next dev`.
+  output: 'standalone',
   poweredByHeader: false,
   reactStrictMode: true,
   async headers() {

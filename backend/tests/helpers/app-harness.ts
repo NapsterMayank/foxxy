@@ -8,7 +8,10 @@ import { FakeLogger } from '@/platform/logger/index';
 import { RecordingMail } from '@/platform/mail/index';
 import { createContainer, type Container } from '../../src/app/container';
 import { createServer } from '../../src/app/server';
+import { createFakeLlm, type FakeLlm, type LlmProvider } from '@/platform/llm/index';
 import { createContentModule, type ContentModule } from '../../src/modules/content/index';
+import { createFoxyModule, type ChunkSearch, type FoxyModule } from '../../src/modules/foxy/index';
+import { createRetrievalModule, type RetrievalModule } from '../../src/modules/retrieval/index';
 import { createIdentityModule, type IdentityModule } from '../../src/modules/identity/index';
 import { createLearnerModule, type LearnerModule } from '../../src/modules/learner/index';
 import { createParentModule, type ParentModule } from '../../src/modules/parent/index';
@@ -56,6 +59,43 @@ export interface AppHarness {
   readonly practice: PracticeModule;
   readonly parent: ParentModule;
   readonly notify: NotifyModule;
+  readonly retrieval: RetrievalModule;
+  readonly foxy: FoxyModule;
+  /**
+   * The scripted language model the harness wired.
+   *
+   * Exposed so a test can assert `recorder.callCount() === 0` — which is how
+   * "abstention NEVER calls the model" is proved. That assertion is the single
+   * most important one in the foxy suite, and it is only possible if the test
+   * holds the same object the service does.
+   */
+  readonly llm: FakeLlm;
+  /**
+   * Swaps the scripted model for THIS test.
+   *
+   * ===========================================================================
+   * WHY A SWAP RATHER THAN A SECOND HARNESS.
+   *
+   * Every interesting foxy test needs a different scripted answer — one citing a
+   * real chunk, one citing an invented id, one that dies after two tokens — and
+   * starting a fresh harness per case means a fresh database per case. That is
+   * minutes of CI time for a difference of one string, and a suite that is slow
+   * is a suite people stop running.
+   *
+   * The module is built ONCE, with the production wiring, around a delegating
+   * provider. `reset()` restores the default, so a test that forgets to clean up
+   * cannot leak its script into the next one.
+   * ===========================================================================
+   */
+  useLlm(next: FakeLlm): void;
+  /**
+   * Swaps retrieval for THIS test. `null` restores the real pipeline.
+   *
+   * Needed for exactly one case — `below-threshold` — which the real pipeline
+   * cannot produce while `ABSTAIN_THRESHOLD` ships UNCALIBRATED and INERT. See
+   * `AppHarnessOptions.search`.
+   */
+  useSearch(next: ChunkSearch | null): void;
   readonly clock: FixedClock;
   readonly cache: MemoryCache;
   readonly mail: RecordingMail;
@@ -76,6 +116,15 @@ export interface AppHarness {
  * `chapters`, and `practice_retention` likewise.
  */
 const TABLES = [
+  // foxy's three, children first. `retrieval_traces.message_id` is ON DELETE
+  // cascade and `chat_messages.session_id` likewise, so the order is belt and
+  // braces — but `chat_sessions.chapter_id` is ON DELETE RESTRICT against
+  // `chapters`, which IS truncated below, so a stray session would make
+  // truncating `chapters` fail with an error that reads like a harness bug
+  // rather than the deliberate protection it is (D-043).
+  'retrieval_traces',
+  'chat_messages',
+  'chat_sessions',
   // `tenants` is NOT truncated: migration 0004 seeds the default tenant and
   // every `tenant_id` column references it with ON DELETE RESTRICT, so emptying
   // it between tests would make the next insert fail on a foreign key. A second
@@ -143,6 +192,30 @@ export interface AppHarnessOptions {
    * that the default posture is "absent and loud".
    */
   readonly digest?: DigestSource;
+  /**
+   * The scripted model. Defaults to `createFakeLlm()`.
+   *
+   * Supplied by a test that needs a specific answer — one containing a real
+   * `[chunk:<id>]` marker, or one containing a fabricated id — or that needs the
+   * stream to fail after two tokens.
+   */
+  readonly llm?: FakeLlm;
+  /**
+   * Substitute retrieval.
+   *
+   * DEFAULTS TO THE REAL `retrieval.search`, wired exactly as `app/routes.ts`
+   * wires it, over the real Postgres and the deterministic embedder. Most foxy
+   * tests use that: seeding no chunks for a grade produces a genuine
+   * `no-candidates` abstention through the production path, which is a far
+   * better test than a stub returning `shouldAbstain: true`.
+   *
+   * The override exists for the ONE case the real pipeline cannot currently
+   * produce: `below-threshold`. `ABSTAIN_THRESHOLD` ships UNCALIBRATED and
+   * INERT (it filters nothing, deliberately — see the header of
+   * `retrieval/domain/abstain-threshold.ts`), so no real query can fall under
+   * it until the calibration harness has run against `VOYAGE_API_KEY`.
+   */
+  readonly search?: ChunkSearch;
 }
 
 export async function startAppHarness(options: AppHarnessOptions = {}): Promise<AppHarness> {
@@ -303,6 +376,88 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     audit,
   });
 
+  /**
+   * THE SAME WIRING AS `app/routes.ts`, including the actor retrieval hydrates
+   * chunks as. `content` is the one resource kind `platform/authz` does not
+   * scope by tenant or owner, so this grants exactly what any logged-in student
+   * already has.
+   */
+  const retrieval = createRetrievalModule({
+    db: container.poolFor('retrieval'),
+    embed: container.embed,
+    readChunks: (ids) =>
+      content.service.getChunksByIds(
+        { userId: 'system:retrieval', role: 'student', tenantId: config.tenancy.defaultTenantId },
+        ids,
+      ),
+    clock,
+    logger,
+  });
+
+  const defaultLlm = options.llm ?? createFakeLlm();
+  // The DELEGATE the module actually holds. Swapping `currentLlm` changes what
+  // the already-built module talks to, without rebuilding it or the database.
+  let currentLlm: FakeLlm = defaultLlm;
+  const delegatingLlm: LlmProvider = {
+    stream: (req) => currentLlm.stream(req),
+    complete: (req) => currentLlm.complete(req),
+  };
+
+  /**
+   * THE SAME WIRING AS `app/routes.ts`, and it has to be the same.
+   *
+   * In particular `search` narrows the real retrieval result rather than
+   * stubbing it, and `readTenantOfStudent` reads `users.tenant_id` through
+   * identity rather than echoing `actor.tenantId` — which is the D-091/D-125
+   * mistake and the one `foxy.authz-mutation.test.ts` installs deliberately.
+   */
+  const productionSearch: ChunkSearch = async (query, filters) => {
+    const result = await retrieval.service.search(query, {
+      grade: filters.grade,
+      subject: filters.subject,
+    });
+    return {
+      chunks: result.chunks.map((chunk) => ({
+        id: chunk.id,
+        chunkText: chunk.chunkText,
+        chapterNumber: chunk.chapterNumber,
+        chapterTitle: chunk.chapterTitle,
+        score: chunk.score,
+        rank: chunk.rank,
+      })),
+      shouldAbstain: result.shouldAbstain,
+      confidence: result.confidence,
+      normalisedQuery: result.trace.normalisedQuery,
+      abstainReason: result.trace.abstainReason,
+    };
+  };
+
+  const defaultSearch = options.search ?? productionSearch;
+  let currentSearch: ChunkSearch = defaultSearch;
+
+  const foxy = createFoxyModule({
+    db: container.poolFor('foxy'),
+    clock,
+    logger,
+    llm: delegatingLlm,
+    cache,
+    requireSession: identity.requireSession,
+    search: (query, filters) => currentSearch(query, filters),
+    readTenantOfStudent: (studentUserId) => identity.service.getTenantOfUser(studentUserId),
+    readStudentContext: async (actor, studentUserId) => {
+      const [profile, subjects] = await Promise.all([
+        learner.service.getProfile(actor, studentUserId),
+        learner.service.getSubjects(actor, studentUserId),
+      ]);
+      return { grade: profile.grade, subjects };
+    },
+    readLanguage: async (actor, studentUserId) =>
+      (await learner.service.getProfile(actor, studentUserId)).preferredLanguage,
+    // `billing` does not exist. Same stand-in as `app/routes.ts`.
+    readPlan: (): Promise<null> => Promise.resolve(null),
+    model: 'harness-model',
+  });
+
   const notify = createNotifyModule({
     db: container.poolFor('notify'),
     clock,
@@ -324,7 +479,7 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
   });
 
   const app = await createServer(container, {
-    modules: { identity, learner, content, practice, parent, notify },
+    modules: { identity, learner, content, practice, parent, notify, foxy },
   });
   await app.ready();
 
@@ -338,6 +493,15 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     practice,
     parent,
     notify,
+    retrieval,
+    foxy,
+    llm: defaultLlm,
+    useLlm(next: FakeLlm): void {
+      currentLlm = next;
+    },
+    useSearch(next: ChunkSearch | null): void {
+      currentSearch = next ?? defaultSearch;
+    },
     clock,
     cache,
     mail,
@@ -348,6 +512,11 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
       mail.sent.length = 0;
       logger.lines.length = 0;
       clock.setTo(HARNESS_START);
+      // Restored between tests, so a test that forgets to clean up cannot leak
+      // its scripted answer or its stubbed retrieval into the next one.
+      currentLlm = defaultLlm;
+      currentSearch = defaultSearch;
+      defaultLlm.recorder.requests.length = 0;
     },
     async stop(): Promise<void> {
       await app.close();
