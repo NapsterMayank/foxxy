@@ -1235,3 +1235,229 @@ Adding 0001 broke `learner-content-migration.test.ts`: the superseded 0002's dow
 `npm run db:migrate` reported "Migrations applied." and applied nothing: the local database still carried the nine ledger rows from the superseded 0000-0008 chain, whose recorded timestamps are LATER than the collapsed baseline's, so drizzle skipped 0001 as already-past. `0001_pedagogy`'s journal `when` was set above the last applied row.
 
 Worth knowing before the next migration lands on any database that predates the collapse: **a "Migrations applied." that applied nothing looks exactly like one that applied everything.** The check is the catalogue, not the exit code.
+
+---
+
+## practice module — 10 August 2026
+
+Build step 11. Migration `0002_practice`, `src/modules/practice/`, `platform/tx`.
+D-110..D-121. These implement D-056, D-057 and D-058, which had been settled in
+writing since 9 August and had never been executed.
+
+### D-110 · `question_responses` is RENAMED to `practice_responses`, never dropped and recreated
+**Status:** Active — executes D-057
+
+D-057's words are "one table, `practice_responses` … `question_responses` is
+dropped". The table is empty — nothing has ever written to it — so a drop would
+have been harmless today. It is a rename anyway, for two reasons.
+
+A migration whose safety depends on a table still being empty is one nobody can
+re-read and trust. The reasoning that makes it safe is invisible in the SQL, and
+the next person to copy the pattern will copy it onto a table that is not empty.
+
+And a recreate would have silently discarded every `COMMENT ON COLUMN` the
+baseline attached to the five evidence columns — the only place several of those
+rules are written down at all (D-065). There is a test that reads
+`col_description` back out of the catalogue and asserts the text survived.
+
+`session_id` is added `NOT NULL` with no default, which requires the table to be
+empty. A `DO` block at the top of the migration raises a NAMED error saying what
+to backfill if it ever is not, rather than letting the constraint violation
+arrive with no explanation.
+
+**A finding, from the catalogue rather than from the SQL.** drizzle-kit renames
+the table and every constraint it TRACKS — but an inline single-column PRIMARY
+KEY has no name in the schema definition, so the implicit
+`question_responses_pkey` was not among them. Left alone it is a constraint named
+after a table that no longer exists, invisible to `db:generate` (which cannot see
+a name it never recorded) and therefore permanent. The rename is hand-added to
+the migration and the down file, and the migration test reads
+`pg_constraint` rather than the migration it is testing.
+
+### D-111 · `submitAnswer` accumulates on the session; only `submitSession` writes `practice_responses`
+**Status:** Active
+
+The client's session has an answer step and a submission step, and §8.6 requires
+the responses, the session score, the XP ledger entry and mastery to land in ONE
+transaction. Those two facts are in tension: if `submitAnswer` wrote a response
+row, part of the submission would already be committed before the transaction
+opened, and "all of it lands or none of it does" would be false by construction.
+
+**Decision:** answers accumulate in `practice_sessions.answers`, a jsonb
+accumulator, and submission MATERIALISES them into `practice_responses` inside
+the transaction. `submitAnswer` performs one bounded UPDATE with
+`where submitted_at is null`, so an answer that races a submission is refused
+rather than modifying a completed session.
+
+The cost is stated rather than hidden: the in-flight answers are denormalised
+for the life of the session, and a session abandoned before submission leaves no
+response rows. That is the correct outcome — an abandoned session is not
+evidence — and it is why `practice_sessions` keeps its own row from the moment
+the questions are drawn.
+
+### D-112 · An opaque `TransactionToken`, because D-056's executor cannot legally cross the boundary
+**Status:** Active — resolves the gap between D-056's design and §7.4's enforcement
+
+D-056 says `platform/db` exports an opaque `Executor`, that a public module
+function takes one, and that `modules → platform` is an allowed edge. That is
+true of the ARCHITECTURE and false of the ENFORCEMENT: the `no-restricted-imports`
+rule bans `@/platform/db` from every module file that is not a `*.repository.ts`,
+type-only imports included. `practice.service.ts` and `learner.service.ts` cannot
+name a drizzle executor at all.
+
+Widening the lint rule was rejected. It is what stops a service quietly
+acquiring a query, and it has already caught real violations.
+
+**Decision:** `platform/tx` exports `TransactionToken` — an interface branded
+with a `unique symbol` that is declared and never exported, so it is
+unconstructible outside `platform/db` and carries no methods. `platform/db`
+exports `wrapExecutor` / `unwrapExecutor`, reachable only from a repository.
+
+The result is stronger than what D-056 asked for: a service can HOLD a
+transaction and hand it to another module, and still cannot run a statement with
+it. The boundary is expressed in the type rather than in a convention.
+
+`practice.repository.withTransaction` opens the transaction and hands the token
+up; the SERVICE decides what is inside it, including the call to
+`learner.updateMastery`. No repository opens a transaction it does not hand back.
+
+### D-113 · `learner.updateMastery` gains an optional executor, and it is the only method that does
+**Status:** Active
+
+`chapter_mastery` belongs to `learner`, and `practice` must write it inside its
+own transaction. One optional `executor` on `UpdateMasteryInput`, threaded to one
+repository method, is the whole change to that module.
+
+Deliberately not applied to `createProfile`, which still opens its own
+transaction: it is atomic on its own and nothing needs to enlist it. A module-wide
+"every write takes an executor" refactor would have been a larger diff arguing for
+a generality nobody needs yet.
+
+### D-114 · `remediate_general` is a SEPARATE decision from `remediate_misconception`
+**Status:** Active — a consequence of D-077
+
+The client's Screen 7 branch names four outcomes. `decideNext` returns five.
+
+"Incorrect with a known misconception" requires a code on the chosen distractor,
+and `questions.distractor_misconceptions` is NULL on all 2,741 imported questions.
+Collapsing the two would make the content gap INVISIBLE: the funnel would report
+misconception-driven remediation firing on every wrong answer, the metric would
+look healthy, and nobody would ever author the codes that would make it true.
+Two decisions makes the gap countable.
+
+### D-115 · The hint ladder degrades; it never invents a hint and never reveals the answer
+**Status:** Active — a consequence of D-077
+
+`hint_level_1..3` and `solution_steps` are NULL on all 3,791 source questions, so
+four of the client's five rungs have no data. `resolveHint` reports
+`available: false` with a REASON, and the reasons are distinguished:
+`not_authored` (content to be written) versus `would_reveal_answer` (a one-step
+solution, where the "partial step" IS the answer) versus `above_ladder` (a caller
+error). They need opposite fixes, and one reason for all three would hide the
+content gap behind what looks like a bounds check.
+
+The no-reveal rule is STRUCTURAL rather than reviewed: `QuestionHints` has no
+field for `correct_index`, `explanation` or `options`, so no rung can serve them
+even by mistake. The partial-step rung serves `steps[0]` and only when there is
+more than one step.
+
+**Today the service supplies an all-null `QuestionHints`, so every question
+reports zero available hints.** That is the honest state and it is a seam, not a
+stub: when the pedagogy generation pass of 05-ROADMAP.md §6 authors the columns,
+the rungs light up with no change to the ladder or to the wire contract.
+
+### D-116 · `evidenceLabel` requires two attempts before it will say `strong`
+**Status:** Active
+
+The label is one of four words and never a percentage (§8.7's rule, applied one
+layer earlier). `attempts` is a parameter, and this is the only place it changes
+the answer: a single 100% reads `developing`, not `strong`. One good session is
+evidence of one good session, most of all for the questions a student happened to
+find easy. Without this rule the parameter would be decoration.
+
+`not_assessed` exists so the system can say "we do not know yet" rather than
+rounding an absence up into a judgement, and a parent screen should show it far
+more often than product instinct expects.
+
+### D-117 · Spaced retention is SM-2, not FSRS
+**Status:** Active
+
+05-ROADMAP.md §6 permits either. FSRS's parameters are FITTED to a review history
+and there is no review history yet, so shipping it with published defaults would
+be SM-2 wearing a more impressive name plus seventeen constants nobody here can
+justify. SM-2's three numbers can each be explained in a sentence, which is what
+makes the schedule something a teacher can be shown.
+
+Two sub-decisions. **A failed review does not reduce the ease factor** (SM-2 as
+published): the quality-based adjustment already handles a poor-but-passing
+answer, and compounding a reset on top of it drives a struggling student to the
+floor after two bad days. **The ease factor is rounded to two decimals in the
+domain**, matching `numeric(4,2)`, because a value that differs between what the
+domain computed and what comes back out of the column compounds across reviews
+into a different interval — invisibly, since both numbers are plausible.
+
+### D-118 · Mastery moves by an exponential moving average, and the rate is one number
+**Status:** Active
+
+`chapter_mastery.mastery_score` is a LEVEL, and the learner repository writes it
+outright, so somebody has to decide what the new level is. "The latest score IS
+the mastery" makes it as noisy as a six-question sample — one unlucky session
+takes a student from strong to needs-another-session, a parent sees it, and the
+number stops being believed. A full running mean makes recent evidence weaker
+than old evidence forever, which is backwards for a measure whose job is to say
+where a student is NOW.
+
+`MASTERY_LEARNING_RATE = 0.4`. IRT calibration (roadmap §6, deferred) replaces it
+once there is enough response data to fit one; until then a stated simple rule
+beats an unfitted sophisticated one.
+
+### D-119 · Today's Mission has no encouragement branch
+**Status:** Active
+
+Every reason string is built from the candidate's own row — days overdue from
+`practice_retention.due_at`, the attempt count and evidence LABEL from
+`chapter_mastery`, the chapter number from `chapters` — in both languages, at the
+point of construction (P7, and `notify`'s lesson that an optional Hindi field is
+an empty Hindi field in production).
+
+The single fixed string in the file is `nothing_available`, which says plainly
+that nothing is due and nothing is weak. That is honest; a generic
+encouragement in its place would be the thing a student reads twice and then
+stops reading.
+
+**Days, not dates.** A formatted date needs a timezone and a locale, and neither
+is this layer's decision. "3 days overdue" is the same fact in both languages and
+in every timezone the product ships to.
+
+### D-120 · The three legacy migration tests PEEL 0002 off before they run
+**Status:** Active — the D-106 rule, one migration later
+
+`foundation-hooks-migration`, `tenant-not-null-migration` and
+`learner-content-migration` apply the CURRENT set and then exercise the
+SUPERSEDED 0002-0008 chain, which names `question_responses` throughout. After
+0002_practice they broke — correctly.
+
+Rewriting their assertions to the new name would have made them claim to test SQL
+that does not mention it; editing the superseded files would have destroyed the
+oracle `baseline-collapse.test.ts` diffs the baseline against. Each now applies
+`0002_practice.down.sql` in its `beforeAll`, which is what a real rollback does
+and in the order it does it.
+
+### D-121 · Two anti-cheat findings that only a real submission surfaced
+**Status:** Active — worth knowing before writing any test that submits a session
+
+**A perfect score can trip the "all the same index" rule.** If every question in
+a session happens to have the same `correct_index`, a completely honest full-marks
+attempt stores that index four times and rule 2 fires. The rule is behaving
+exactly as specified — it cannot distinguish that from a tap-through — but it
+means a fixture whose questions all answer to option 1 makes every scoring test
+in the file assert on an INVALID session, and the symptom is a score of 0 with no
+obvious cause. The service fixtures now vary `correct_index` per question and
+state it in the question text.
+
+**A shuffle map that reorders can still fix a position in place.** `[0, 3, 1, 2]`
+is a genuine reordering whose first element is unmoved, so a canonical-index test
+that taps position 0 proves the translation exists exactly as well as no
+translation does. The test now finds a position the map actually MOVED and
+asserts on that; the precondition is asserted first, so the test fails loudly if
+the map ever becomes the identity rather than passing vacuously.

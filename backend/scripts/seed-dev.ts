@@ -92,14 +92,16 @@ function log(message: string): void {
 /**
  * Removes anything a previous run seeded.
  *
- * `question_responses` is cleared FIRST and explicitly. Its question foreign
- * key is ON DELETE RESTRICT, so deleting the chapters would otherwise fail
- * with a constraint error that reads like a bug in this script rather than
- * like the deliberate protection it is.
+ * `practice_responses` (renamed from `question_responses` by migration 0002,
+ * D-057) is cleared FIRST and explicitly. Its question foreign key is ON DELETE
+ * RESTRICT, so deleting the chapters would otherwise fail with a constraint
+ * error that reads like a bug in this script rather than like the deliberate
+ * protection it is. Its own session foreign key CASCADES, so the sessions go
+ * with it and need no separate statement.
  */
 async function clearPreviousSeed(sql: SqlRunner): Promise<void> {
   await sql.query(
-    `delete from question_responses
+    `delete from practice_responses
       where question_id in (
         select q.id from questions q
         join chapters c on c.id = q.chapter_id

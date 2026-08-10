@@ -2,6 +2,7 @@ import { createAccessGuard, type StudentScope } from '@/platform/authz/index';
 import type { Clock } from '@/platform/clock/index';
 import { NotFoundError } from '@/platform/errors/index';
 import type { Logger } from '@/platform/logger/index';
+import type { TransactionToken } from '@/platform/tx/index';
 import type { LanguageCode } from '@/shared/constants/curriculum';
 import type {
   OnboardingRequest,
@@ -69,6 +70,28 @@ export interface UpdateMasteryInput {
   readonly attemptIncrement?: number;
   /** `true` when this update follows an actual practice attempt. */
   readonly practised?: boolean;
+  /**
+   * AN OPEN TRANSACTION, OPENED BY SOMEBODY ELSE — D-056.
+   *
+   * §8.6 requires a quiz submission to write responses, the session and its
+   * score, the XP ledger entry AND mastery in ONE transaction: a partial write
+   * means a student's XP disagrees with their history permanently, with no
+   * retry that can repair it. `chapter_mastery` belongs to this module, so
+   * `practice` cannot write it directly — and if this method opened its own
+   * transaction, `practice` could not enlist it either.
+   *
+   * So the caller's transaction is passed in. D-056's phrasing: "the service
+   * layer opens the transaction; repositories never do."
+   *
+   * OPAQUE ON PURPOSE. `TransactionToken` has no methods and nothing can be
+   * queried through it; only a `*.repository.ts` can unwrap it into an
+   * executor. This file can therefore carry a transaction and still cannot run
+   * a statement, which is exactly what §7.4's boundary wanted.
+   *
+   * Absent for every ordinary caller, which is most of them — the write then
+   * runs on this module's own pool as before.
+   */
+  readonly executor?: TransactionToken;
 }
 
 export interface LearnerService {
@@ -300,6 +323,11 @@ export function createLearnerService(deps: LearnerServiceDeps): LearnerService {
         // read this column.
         practisedAt: (input.practised ?? true) ? now : null,
         now,
+        // D-056: runs inside the caller's transaction when there is one, and on
+        // this module's own pool when there is not. Spread rather than passed
+        // as `undefined` so `exactOptionalPropertyTypes` stays honest about the
+        // difference between "absent" and "explicitly nothing".
+        ...(input.executor === undefined ? {} : { executor: input.executor }),
       });
     },
   };

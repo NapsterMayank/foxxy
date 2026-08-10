@@ -27,7 +27,7 @@
  * no test refers to it, but it is in `information_schema.tables`, which is what
  * anybody auditing the schema reads. A stray table is indistinguishable from a
  * table whose module has not been built yet, and this repository deliberately
- * has several of the latter (`schools`, `question_responses`) — so the stray
+ * has several of the latter (`schools`, `classes`) — so the stray
  * one has to go, or the convention that "an unexplained table is real" breaks.
  *
  * `if exists`, so this is safe on a database that never had it.

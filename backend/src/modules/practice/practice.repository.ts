@@ -1,0 +1,480 @@
+import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
+import type { DbExecutor, DbHandle } from '@/platform/db/index';
+import { schema, unwrapExecutor, wrapExecutor } from '@/platform/db/index';
+import type { TransactionToken } from '@/platform/tx/index';
+import type { Difficulty } from '@/shared/constants/curriculum';
+import type { XpSource } from '@/shared/constants/practice';
+import type {
+  HistoryRecord,
+  RecordedAnswer,
+  RetentionRecord,
+  SessionRecord,
+} from './practice.types';
+
+/**
+ * ALL database access for the practice module — §7, rule 4.
+ *
+ * Enforced by ESLint: `@/platform/db` and `drizzle-orm` are importable only
+ * from a `*.repository.ts` file.
+ *
+ * ===========================================================================
+ * THIS REPOSITORY DOES NOT OPEN THE SUBMISSION TRANSACTION — D-056.
+ *
+ * Every other module in this codebase exposes an atomic operation as ONE
+ * repository method that opens its own transaction, and that is right for them:
+ * it keeps every transaction boundary in a single file.
+ *
+ * It cannot work here. §8.6 requires the responses, the session, the XP ledger
+ * row AND `chapter_mastery` to land together, and `chapter_mastery` belongs to
+ * `learner`. A transaction opened inside this file could never contain a write
+ * that another module performs.
+ *
+ * So this file exposes `withTransaction`, which hands the service an opaque
+ * `TransactionToken`, and every write method takes that token. The SERVICE owns
+ * the boundary — it decides what is inside it and it is where the mastery call
+ * happens — and no repository opens one. That is D-056's rule stated exactly.
+ * ===========================================================================
+ */
+
+const {
+  practiceSessions,
+  practiceResponses,
+  practiceRetention,
+  xpLedger,
+  chapters,
+} = schema;
+
+export type PracticeDbHandle = DbHandle;
+
+/** `numeric` arrives as a string from node-postgres. Converted in one place. */
+function fromNumeric(value: string): number {
+  return Number(value);
+}
+
+interface SessionRow {
+  id: string;
+  studentUserId: string;
+  chapterId: string;
+  tenantId: string;
+  questionIds: string[];
+  optionOrder: unknown;
+  answers: unknown;
+  startedAt: Date;
+  submittedAt: Date | null;
+  scorePercent: number | null;
+  xpEarned: number | null;
+  isValid: boolean | null;
+  invalidReason: string | null;
+}
+
+/**
+ * Maps a session row.
+ *
+ * The two jsonb columns are cast rather than parsed, and that is a deliberate
+ * limit on this layer's job: the SHAPE of `option_order` is checked by
+ * `assertShuffleMap` in the domain, at the point where a wrong shape would do
+ * damage, and re-validating here would put the same rule in two places with one
+ * of them eventually falling behind.
+ */
+function toSessionRecord(row: SessionRow): SessionRecord {
+  return {
+    id: row.id,
+    studentUserId: row.studentUserId,
+    chapterId: row.chapterId,
+    tenantId: row.tenantId,
+    questionIds: row.questionIds,
+    optionOrder: (row.optionOrder ?? {}) as Record<string, number[]>,
+    answers: (row.answers ?? {}) as Record<string, RecordedAnswer>,
+    startedAt: row.startedAt,
+    submittedAt: row.submittedAt,
+    scorePercent: row.scorePercent,
+    xpEarned: row.xpEarned,
+    isValid: row.isValid,
+    invalidReason: row.invalidReason,
+  };
+}
+
+export interface CreateSessionInput {
+  readonly studentUserId: string;
+  readonly tenantId: string;
+  readonly chapterId: string;
+  readonly questionIds: readonly string[];
+  readonly optionOrder: Readonly<Record<string, readonly number[]>>;
+  readonly now: Date;
+}
+
+export interface CompleteSessionInput {
+  readonly sessionId: string;
+  readonly scorePercent: number;
+  readonly xpEarned: number;
+  readonly isValid: boolean;
+  readonly invalidReason: string | null;
+  readonly now: Date;
+}
+
+export interface ResponseInput {
+  readonly sessionId: string;
+  readonly studentUserId: string;
+  readonly tenantId: string;
+  readonly questionId: string;
+  /** CANONICAL (D-058). Translated by the service before it ever gets here. */
+  readonly selectedIndex: number;
+  readonly firstSelectedIndex: number | null;
+  readonly isCorrect: boolean;
+  readonly timeSpentMs: number;
+  readonly hintLevelUsed: number;
+  readonly confidence: string | null;
+  readonly explanationFormatUsed: string | null;
+  readonly authoredDifficulty: Difficulty;
+  readonly now: Date;
+}
+
+export interface XpLedgerInput {
+  readonly studentUserId: string;
+  readonly tenantId: string;
+  readonly source: XpSource;
+  readonly sourceId: string;
+  readonly amount: number;
+  readonly now: Date;
+}
+
+export interface RetentionInput {
+  readonly studentUserId: string;
+  readonly tenantId: string;
+  readonly chapterId: string;
+  readonly dueAt: Date;
+  readonly intervalDays: number;
+  readonly easeFactor: number;
+  readonly repetitions: number;
+  readonly lastReviewedAt: Date;
+  readonly now: Date;
+}
+
+export interface PracticeRepository {
+  /**
+   * Runs `fn` inside one transaction and hands it an opaque token — D-056.
+   *
+   * The service passes the token to every write below AND to
+   * `learner.updateMastery`, which is the reason it is a token rather than an
+   * executor: it crosses a module boundary, and a module that is not a
+   * repository must not be able to run a statement with it.
+   */
+  withTransaction<T>(fn: (tx: TransactionToken) => Promise<T>): Promise<T>;
+
+  createSession(input: CreateSessionInput): Promise<SessionRecord>;
+  findSession(sessionId: string): Promise<SessionRecord | null>;
+  /** Replaces the in-flight answer accumulator. Refuses a submitted session. */
+  saveAnswers(
+    sessionId: string,
+    answers: Readonly<Record<string, RecordedAnswer>>,
+    now: Date,
+  ): Promise<boolean>;
+
+  insertResponses(tx: TransactionToken, rows: readonly ResponseInput[]): Promise<void>;
+  /**
+   * Marks the session complete, ONLY if it is not already.
+   *
+   * Returns null when no row matched — which is what "somebody submitted this
+   * session a moment ago" looks like from inside a concurrent transaction. The
+   * `where submitted_at is null` is the second guard on double submission; the
+   * first is the service's own check, and the third is
+   * `practice_responses_session_question_key`.
+   */
+  completeSession(tx: TransactionToken, input: CompleteSessionInput): Promise<SessionRecord | null>;
+  appendXp(tx: TransactionToken, input: XpLedgerInput): Promise<void>;
+  upsertRetention(tx: TransactionToken, input: RetentionInput): Promise<void>;
+
+  findHistory(studentUserId: string, limit: number): Promise<HistoryRecord[]>;
+  findRetention(studentUserId: string): Promise<RetentionRecord[]>;
+  totalXp(studentUserId: string): Promise<number>;
+  xpSince(studentUserId: string, since: Date): Promise<number>;
+  countCompletedSessions(studentUserId: string): Promise<number>;
+  /** How many of the student's most recent answers in a chapter were wrong, in a row. */
+  consecutiveWrongInChapter(studentUserId: string, chapterId: string): Promise<number>;
+}
+
+export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepository {
+  const { db } = handle;
+
+  /** The executor a write should run on: the caller's transaction, always. */
+  function executorOf(tx: TransactionToken): DbExecutor {
+    const executor = unwrapExecutor(tx);
+    if (executor === undefined) {
+      // Unreachable through the public interface — the parameter is required —
+      // and asserted rather than defaulted to `db`, because defaulting would
+      // turn "the transaction was lost" into "it wrote anyway, outside the
+      // transaction", which is the exact split-brain §8.6 forbids.
+      throw new Error('practice.repository: a write was called without a transaction');
+    }
+    return executor;
+  }
+
+  return {
+    withTransaction<T>(fn: (tx: TransactionToken) => Promise<T>): Promise<T> {
+      return handle.withTransaction((executor) => fn(wrapExecutor(executor)));
+    },
+
+    async createSession(input: CreateSessionInput): Promise<SessionRecord> {
+      const rows = await db
+        .insert(practiceSessions)
+        .values({
+          studentUserId: input.studentUserId,
+          tenantId: input.tenantId,
+          chapterId: input.chapterId,
+          questionIds: [...input.questionIds],
+          optionOrder: input.optionOrder,
+          answers: {},
+          // From the INJECTED clock, never `defaultNow()`: the anti-cheat rules
+          // and the retention schedule both compare against it, and a mix of
+          // application time and database time is a comparison between two
+          // clocks that can differ.
+          startedAt: input.now,
+          createdAt: input.now,
+          updatedAt: input.now,
+        })
+        .returning();
+
+      const row = rows[0];
+      if (row === undefined) {
+        throw new Error('createSession: no row returned');
+      }
+      return toSessionRecord(row);
+    },
+
+    async findSession(sessionId: string): Promise<SessionRecord | null> {
+      const rows = await db
+        .select()
+        .from(practiceSessions)
+        .where(eq(practiceSessions.id, sessionId))
+        .limit(1);
+      const row = rows[0];
+      return row === undefined ? null : toSessionRecord(row);
+    },
+
+    async saveAnswers(
+      sessionId: string,
+      answers: Readonly<Record<string, RecordedAnswer>>,
+      now: Date,
+    ): Promise<boolean> {
+      // `where submitted_at is null` in the UPDATE itself rather than a
+      // read-then-write: two answers arriving either side of a submission would
+      // otherwise both pass a check and one would silently modify a completed
+      // session's accumulator.
+      const rows = await db
+        .update(practiceSessions)
+        .set({ answers, updatedAt: now })
+        .where(
+          and(eq(practiceSessions.id, sessionId), sql`${practiceSessions.submittedAt} is null`),
+        )
+        .returning({ id: practiceSessions.id });
+      return rows.length > 0;
+    },
+
+    async insertResponses(tx: TransactionToken, rows: readonly ResponseInput[]): Promise<void> {
+      if (rows.length === 0) {
+        return;
+      }
+      await executorOf(tx)
+        .insert(practiceResponses)
+        .values(
+          rows.map((row) => ({
+            sessionId: row.sessionId,
+            studentUserId: row.studentUserId,
+            tenantId: row.tenantId,
+            questionId: row.questionId,
+            selectedIndex: row.selectedIndex,
+            firstSelectedIndex: row.firstSelectedIndex,
+            // Derived here rather than accepted from a caller: a CHECK forces
+            // it to agree with the two indices, and a value that can be sent
+            // independently is a value that can be made to disagree.
+            answerChanged:
+              row.firstSelectedIndex === null ? null : row.firstSelectedIndex !== row.selectedIndex,
+            isCorrect: row.isCorrect,
+            timeSpentMs: row.timeSpentMs,
+            hintLevelUsed: row.hintLevelUsed,
+            confidence: row.confidence,
+            explanationFormatUsed: row.explanationFormatUsed,
+            authoredDifficulty: row.authoredDifficulty,
+            createdAt: row.now,
+          })),
+        );
+    },
+
+    async completeSession(
+      tx: TransactionToken,
+      input: CompleteSessionInput,
+    ): Promise<SessionRecord | null> {
+      const rows = await executorOf(tx)
+        .update(practiceSessions)
+        .set({
+          submittedAt: input.now,
+          scorePercent: input.scorePercent,
+          xpEarned: input.xpEarned,
+          isValid: input.isValid,
+          invalidReason: input.invalidReason,
+          updatedAt: input.now,
+        })
+        .where(
+          and(
+            eq(practiceSessions.id, input.sessionId),
+            sql`${practiceSessions.submittedAt} is null`,
+          ),
+        )
+        .returning();
+
+      const row = rows[0];
+      return row === undefined ? null : toSessionRecord(row);
+    },
+
+    async appendXp(tx: TransactionToken, input: XpLedgerInput): Promise<void> {
+      await executorOf(tx).insert(xpLedger).values({
+        studentUserId: input.studentUserId,
+        tenantId: input.tenantId,
+        source: input.source,
+        sourceId: input.sourceId,
+        amount: input.amount,
+        createdAt: input.now,
+      });
+    },
+
+    async upsertRetention(tx: TransactionToken, input: RetentionInput): Promise<void> {
+      await executorOf(tx)
+        .insert(practiceRetention)
+        .values({
+          studentUserId: input.studentUserId,
+          tenantId: input.tenantId,
+          chapterId: input.chapterId,
+          dueAt: input.dueAt,
+          intervalDays: input.intervalDays,
+          easeFactor: input.easeFactor.toFixed(2),
+          repetitions: input.repetitions,
+          lastReviewedAt: input.lastReviewedAt,
+          updatedAt: input.now,
+        })
+        .onConflictDoUpdate({
+          target: [practiceRetention.studentUserId, practiceRetention.chapterId],
+          set: {
+            dueAt: input.dueAt,
+            intervalDays: input.intervalDays,
+            easeFactor: input.easeFactor.toFixed(2),
+            repetitions: input.repetitions,
+            lastReviewedAt: input.lastReviewedAt,
+            updatedAt: input.now,
+          },
+        });
+    },
+
+    async findHistory(studentUserId: string, limit: number): Promise<HistoryRecord[]> {
+      const rows = await db
+        .select({
+          sessionId: practiceSessions.id,
+          chapterId: practiceSessions.chapterId,
+          chapterTitleEn: chapters.titleEn,
+          chapterTitleHi: chapters.titleHi,
+          startedAt: practiceSessions.startedAt,
+          submittedAt: practiceSessions.submittedAt,
+          scorePercent: practiceSessions.scorePercent,
+          xpEarned: practiceSessions.xpEarned,
+          isValid: practiceSessions.isValid,
+          invalidReason: practiceSessions.invalidReason,
+        })
+        .from(practiceSessions)
+        .innerJoin(chapters, eq(chapters.id, practiceSessions.chapterId))
+        .where(eq(practiceSessions.studentUserId, studentUserId))
+        .orderBy(desc(practiceSessions.startedAt))
+        .limit(limit);
+
+      return rows;
+    },
+
+    async findRetention(studentUserId: string): Promise<RetentionRecord[]> {
+      const rows = await db
+        .select()
+        .from(practiceRetention)
+        .where(eq(practiceRetention.studentUserId, studentUserId));
+
+      return rows.map((row) => ({
+        chapterId: row.chapterId,
+        dueAt: row.dueAt,
+        intervalDays: row.intervalDays,
+        easeFactor: fromNumeric(row.easeFactor),
+        repetitions: row.repetitions,
+        lastReviewedAt: row.lastReviewedAt,
+      }));
+    },
+
+    /**
+     * A student's XP: a SUM over the ledger, never a counter column.
+     *
+     * Plan §4 states the rule and the reason in one line — "counters drift;
+     * ledgers do not". `coalesce` because a student with no rows has a total of
+     * zero rather than of null.
+     */
+    async totalXp(studentUserId: string): Promise<number> {
+      const rows = await db
+        .select({ total: sql<string>`coalesce(sum(${xpLedger.amount}), 0)` })
+        .from(xpLedger)
+        .where(eq(xpLedger.studentUserId, studentUserId));
+      return Number(rows[0]?.total ?? 0);
+    },
+
+    async xpSince(studentUserId: string, since: Date): Promise<number> {
+      const rows = await db
+        .select({ total: sql<string>`coalesce(sum(${xpLedger.amount}), 0)` })
+        .from(xpLedger)
+        .where(and(eq(xpLedger.studentUserId, studentUserId), gte(xpLedger.createdAt, since)));
+      return Number(rows[0]?.total ?? 0);
+    },
+
+    async countCompletedSessions(studentUserId: string): Promise<number> {
+      const rows = await db
+        .select({ total: sql<string>`count(*)` })
+        .from(practiceSessions)
+        .where(
+          and(
+            eq(practiceSessions.studentUserId, studentUserId),
+            sql`${practiceSessions.submittedAt} is not null`,
+          ),
+        );
+      return Number(rows[0]?.total ?? 0);
+    },
+
+    /**
+     * The current run of wrong answers in one chapter, most recent first.
+     *
+     * Reads the response log rather than a counter for the same reason the XP
+     * total does: a streak column would have to be reset correctly by every
+     * write path forever, and the first one that forgets leaves a student
+     * permanently flagged for recovery.
+     *
+     * Bounded by the streak threshold plus a little, because the only question
+     * being asked is "is the run at least N long" — reading a whole history to
+     * answer it would get slower every month.
+     */
+    async consecutiveWrongInChapter(studentUserId: string, chapterId: string): Promise<number> {
+      const questionIds = db
+        .select({ id: schema.questions.id })
+        .from(schema.questions)
+        .where(eq(schema.questions.chapterId, chapterId));
+
+      const rows = await db
+        .select({ isCorrect: practiceResponses.isCorrect })
+        .from(practiceResponses)
+        .where(
+          and(
+            eq(practiceResponses.studentUserId, studentUserId),
+            inArray(practiceResponses.questionId, questionIds),
+          ),
+        )
+        .orderBy(desc(practiceResponses.createdAt))
+        .limit(20);
+
+      let streak = 0;
+      for (const row of rows) {
+        if (row.isCorrect) break;
+        streak += 1;
+      }
+      return streak;
+    },
+  };
+}

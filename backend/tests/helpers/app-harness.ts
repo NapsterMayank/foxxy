@@ -11,6 +11,7 @@ import { createServer } from '../../src/app/server';
 import { createContentModule, type ContentModule } from '../../src/modules/content/index';
 import { createIdentityModule, type IdentityModule } from '../../src/modules/identity/index';
 import { createLearnerModule, type LearnerModule } from '../../src/modules/learner/index';
+import { createPracticeModule, type PracticeModule } from '../../src/modules/practice/index';
 import {
   createNotifyModule,
   type DigestSource,
@@ -51,6 +52,7 @@ export interface AppHarness {
   readonly identity: IdentityModule;
   readonly learner: LearnerModule;
   readonly content: ContentModule;
+  readonly practice: PracticeModule;
   readonly notify: NotifyModule;
   readonly clock: FixedClock;
   readonly cache: MemoryCache;
@@ -64,10 +66,12 @@ export interface AppHarness {
 /**
  * Truncated between tests, children before parents.
  *
- * `question_responses` is listed even though no test here writes to it: its
- * question foreign key is ON DELETE RESTRICT, so a stray row would make
- * truncating `questions` fail with an error that reads like a bug in the
- * harness rather than like the deliberate protection it is (D-043).
+ * `practice_responses` (renamed from `question_responses` by migration 0002,
+ * D-057) is listed because its question foreign key is ON DELETE RESTRICT, so a
+ * stray row would make truncating `questions` fail with an error that reads
+ * like a bug in the harness rather than like the deliberate protection it is
+ * (D-043). `practice_sessions` sits above it for the same reason against
+ * `chapters`, and `practice_retention` likewise.
  */
 const TABLES = [
   // `tenants` is NOT truncated: migration 0004 seeds the default tenant and
@@ -85,7 +89,10 @@ const TABLES = [
   // next test's enqueue report `created: false` and look like a duplicate,
   // which is exactly the property several of these tests assert on.
   'jobs',
-  'question_responses',
+  'practice_responses',
+  'xp_ledger',
+  'practice_retention',
+  'practice_sessions',
   'chapter_mastery',
   'student_subjects',
   'students',
@@ -104,7 +111,21 @@ export const HARNESS_ORIGIN = 'http://app.test';
 export const HARNESS_START = '2026-06-01T09:00:00.000Z';
 export { TEST_COOKIE_NAME, TEST_TENANT_ID, OTHER_TENANT_ID, createSecondTenant, sessionCookieFrom };
 
+/**
+ * A deterministic replacement for `Math.random` in the option shuffle.
+ *
+ * The default `() => 0.5` is NOT arbitrary: with four options it produces a map
+ * that genuinely reorders, so every test that goes through a session is
+ * exercising the D-058 translation rather than the identity permutation. A
+ * fixed 0 or a real `Math.random` would each leave the reordering case
+ * untested — one because it never moves anything interesting, the other because
+ * it is not reproducible.
+ */
+export type HarnessRandom = () => number;
+
 export interface AppHarnessOptions {
+  /** Overrides the shuffle randomness. See `HarnessRandom`. */
+  readonly random?: HarnessRandom;
   /**
    * The weekly-digest content seam (§8.7).
    *
@@ -201,6 +222,42 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     requireSession: identity.requireSession,
   });
 
+  const practice = createPracticeModule({
+    db: container.poolFor('practice'),
+    clock,
+    logger,
+    requireSession: identity.requireSession,
+    // The SAME wiring as `app/routes.ts`, and the same omission: only
+    // `getQuestionsForChapter` is passed, so no test can accidentally prove
+    // that practice serves the held-out reserve by handing it the function that
+    // would.
+    readQuestions: (actor, query) => content.service.getQuestionsForChapter(actor, query),
+    readChapter: async (actor, chapterId) => {
+      try {
+        return await content.service.getChapter(actor, chapterId);
+      } catch {
+        return null;
+      }
+    },
+    listChapters: (actor, filter) =>
+      content.service.listChapters(actor, {
+        grade: filter.grade,
+        subject: filter.subjectCode,
+        limit: filter.limit,
+      }),
+    readStudentContext: async (actor, studentUserId) => {
+      const [profile, subjects] = await Promise.all([
+        learner.service.getProfile(actor, studentUserId),
+        learner.service.getSubjects(actor, studentUserId),
+      ]);
+      return { grade: profile.grade, subjects };
+    },
+    readMastery: (actor, studentUserId) => learner.service.getMastery(actor, studentUserId),
+    writeMastery: (actor, input) => learner.service.updateMastery(actor, input),
+    readTenantOfStudent: (studentUserId) => identity.service.getTenantOfUser(studentUserId),
+    random: options.random ?? ((): number => 0.5),
+  });
+
   const notify = createNotifyModule({
     db: container.poolFor('notify'),
     clock,
@@ -218,7 +275,9 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     ...(options.digest === undefined ? {} : { digest: options.digest }),
   });
 
-  const app = await createServer(container, { modules: { identity, learner, content, notify } });
+  const app = await createServer(container, {
+    modules: { identity, learner, content, practice, notify },
+  });
   await app.ready();
 
   return {
@@ -228,6 +287,7 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     identity,
     learner,
     content,
+    practice,
     notify,
     clock,
     cache,

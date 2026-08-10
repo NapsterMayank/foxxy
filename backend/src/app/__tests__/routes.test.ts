@@ -58,7 +58,13 @@ describe('buildModules', () => {
     // deleted from the graph — fails here. Adding `notify` to `buildModules`
     // without adding it to this line is the failure this assertion is for.
     const modules = buildModules(makeContainer());
-    expect(Object.keys(modules).sort()).toEqual(['content', 'identity', 'learner', 'notify']);
+    expect(Object.keys(modules).sort()).toEqual([
+      'content',
+      'identity',
+      'learner',
+      'notify',
+      'practice',
+    ]);
   });
 
   it('hands each module the pool §3.1 assigns it', () => {
@@ -75,6 +81,9 @@ describe('buildModules', () => {
     // notify's HTTP surface is ordinary request traffic. In the WORKER the same
     // module is handed `pools.worker` instead — see `buildModules`' `forWorker`.
     expect(built.poolFor('notify').name).toBe('core');
+    // practice is ordinary request traffic too. It reads `questions` through
+    // `content` and writes four of its own tables, all on `core`.
+    expect(built.poolFor('practice').name).toBe('core');
     // `retrieval` reads the same `rag_chunks` table as `content` and still
     // gets `ai`: the pool follows the CALLER's cost profile, not the table's
     // owner. The row of §3.1 easiest to get backwards.

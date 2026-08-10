@@ -15,13 +15,14 @@
  * from the rest of the schema and is listed first.
  *
  * ===========================================================================
- * THREE OF THESE FILES ARE AHEAD OF THE CODE THAT OWNS THEM. Deliberately.
+ * TWO OF THESE FILES ARE AHEAD OF THE CODE THAT OWNS THEM. Deliberately.
  *
- *   `practice.ts`  ONE table, `question_responses`, well ahead of build step
- *                  11. It is the third one-way door in PROGRESS.md §8, and
- *                  unlike the other two its cost is not a migration but months
- *                  of missing history. Its five EVIDENCE-CAPTURE columns are
- *                  the same argument again, from 05-ROADMAP.md §8.
+ *   `practice.ts`  NO LONGER AHEAD — the module landed at build step 11. Its
+ *                  response log did arrive three steps early, as the third
+ *                  one-way door in PROGRESS.md §8 (history cannot be
+ *                  backfilled), and migration 0002 renamed it from
+ *                  `question_responses` to `practice_responses` per D-057 when
+ *                  the module that owns it was finally built.
  *
  *   `schools.ts`   STUBS. No module, no service, no routes. They exist so
  *                  Phase 1 has something to attach to.

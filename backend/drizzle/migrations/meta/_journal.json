@@ -15,6 +15,13 @@
       "when": 1786500000000,
       "tag": "0001_pedagogy",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786600000000,
+      "tag": "0002_practice",
+      "breakpoints": true
     }
   ]
 }

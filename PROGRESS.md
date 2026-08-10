@@ -18,21 +18,25 @@ Last updated: **10 August 2026**
 | Corpus | **IMPORTED.** 137 chapters · 4,686 chunks · 2,741 questions · 639 concepts · 176 edges · 57 misconception patterns |
 | Architecture | Modular backend + isolated product frontend + marketing/CMS deployable |
 | Team | 1 engineer |
-| Backend modules | **4 of 11 built** (identity, learner, content, notify). Schema for the `practice` response log is applied |
+| Backend modules | **5 of 11 built** (identity, learner, content, notify, **practice**). The `practice` response log is no longer schema-only — it is written on every submission |
 | Backend processes | **2** — `api` and `worker`. The worker exists and runs one real job |
 | Frontend | **scaffolded** - 81 source files under `frontend/src`, committed. Build-order step 0 (the five foundation gaps) not yet closed |
 | Marketing site | **scaffolded** - 32 files under `website/`, committed. Per `06-FRONTEND-SEPARATION-PLAN.md` |
-| Tests | **1,453 passing**, 78 files |
-| Migrations | `0000_baseline` + `0001_pedagogy`. `npm run db:generate` on a clean tree emits nothing |
-| Gates | type-check · lint · build · test · coverage — all green. `platform/authz` 100%, global 93.0% |
-| Estimated remaining | **~116 days ≈ 23 weeks solo** |
+| Tests | **1,684 passing**, 91 files |
+| Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice`. `npm run db:generate` on a clean tree emits nothing, and `db:check` passes |
+| Gates | type-check · lint · build · test · coverage — all green. `platform/authz` 100%, `practice/domain` 100%, `practice.service` 93.9%, global 93.6% |
+| Estimated remaining | **~108 days ≈ 22 weeks solo** |
 | Git | **1 commit** - `0545689`, 441 files, working tree clean. No remote configured |
 
 ---
 
 ## 2. THE NEXT ACTION
 
-> **Build the `embed` and `llm` real adapters (build step 7).** The corpus is imported; retrieval (step 8) is blocked only on a real embedding client, because a query has to be embedded before it can be compared to 4,666 stored vectors.
+> **Build the `embed` and `llm` real adapters (build step 7).** Unchanged by the
+> `practice` work, and now the only thing on the critical path: the corpus is
+> imported and step 11 is closed, so retrieval (step 8) and `foxy` (step 10) are
+> blocked on nothing else. A query has to be embedded before it can be compared
+> to 4,666 stored vectors.
 
 Two things it unblocks immediately, both of which have been waiting:
 
@@ -237,6 +241,78 @@ Build step 6 CLOSED. Migration `0001_pedagogy`, `scripts/import-corpus.ts`,
   because a number cannot be fed back into the regeneration job that has to
   target exactly those ids
 
+### practice module — 10 August 2026
+
+Build step 11 CLOSED. Migration `0002_practice`, `src/modules/practice/` (28
+files), `platform/tx`. Decisions D-110..D-121. **231 new tests; 1,684 passing.**
+
+Six of the client's nine session steps: Today's Mission -> Concept Explanation
+-> Guided Practice (hint ladder) -> Independent Mastery Check -> Evidence-Based
+Decision -> Retention Scheduling. Prerequisite recall, prerequisite recovery and
+teacher alerts are OUT OF SCOPE and were not stubbed — the first two need a
+concept graph whose codes join to nothing (D-105) and the third needs a teacher
+who does not exist.
+
+- **`startSession` · `getSession` · `submitAnswer` · `submitSession` ·
+  `getHistory` · `getProgress` · `getTodaysMission`**, behind seven
+  `/api/v1/practice/…` endpoints. Route handlers are 5-8 lines each: validate,
+  call one service method, format
+- **Ten pure domain modules at 100% statement coverage** (99.1% branch):
+  scoring, xp-rules, anti-cheat, option-shuffle, hint-ladder, evidence,
+  spaced-retention, decide-next, mission, mastery-update. Service 93.9%.
+  `platform/authz` still 100%
+- **Migration `0002_practice`** — `practice_sessions`, `xp_ledger`,
+  `practice_retention`, plus D-057's merge: `question_responses` **RENAMED** to
+  `practice_responses` with the `session_id` the merge exists for. Forward,
+  backward and forward again, verified against real Postgres. **A rename, not a
+  drop-and-recreate** — a recreate would have silently discarded every
+  `COMMENT ON COLUMN` the evidence columns carry, and a migration whose safety
+  depends on a table still being empty is one nobody can trust (D-110)
+- **Submission is ONE transaction and it spans two modules' tables** (D-056,
+  D-112). `platform/tx` exports an opaque `TransactionToken` — brandable only
+  inside `platform/db`, unwrappable only from a `*.repository.ts` — so
+  `practice.service` can HOLD a transaction, hand it to `learner.updateMastery`,
+  and still be unable to run a statement with it. **There is a test that injects
+  a failure at exactly that cross-module seam and asserts that NOTHING lands:
+  no responses, no score, no XP row, no schedule, and the session still
+  submittable**
+- **Every persisted index is the ORIGINAL one** (D-058). The per-session shuffle
+  map lives on `practice_sessions.option_order`; every selection is translated
+  back before anything is written. **Proved with a shuffle that actually
+  reorders AND at a position the map actually moved** — see D-121, because
+  neither precondition is automatic
+- **Held-out questions cannot be served, structurally.** The module is given
+  `content.getQuestionsForChapter`, which has no argument that could return the
+  reserve, and is NOT given `getHeldOutQuestionsForChapter`. It has no way to
+  ask. Two tests: none of the reserve is drawn even when it would fill the
+  requested count, and no response row ever joins to a held-out question
+- **Every evidence column is written on every response** — `first_selected_index`,
+  `answer_changed`, `hint_level_used`, `confidence`, `time_spent_ms`,
+  `authored_difficulty` (D-065). Asserted column by column out of the database,
+  because none of it can be backfilled
+- **An invalid attempt scores zero, records WHICH rule failed, keeps its
+  responses, and still writes a ZERO XP ledger row** — so "awarded nothing" and
+  "never submitted" cannot look the same
+- **Today's Mission states WHY, from real rows** — days overdue from
+  `practice_retention`, the attempt count and evidence LABEL from
+  `chapter_mastery`, the chapter number from `chapters` — in both languages,
+  built together at the point of construction. The only fixed string in the file
+  is "nothing is due and nothing is weak", which is honest (D-119)
+- **The hint ladder degrades rather than pretends** (D-115). With
+  `hint_level_1..3` and `solution_steps` NULL across the corpus, every rung
+  reports `available: false` with a reason that distinguishes "nobody has
+  written this" from "serving it would BE the answer". It never invents a hint,
+  and `QuestionHints` has no field for `correct_index`, `explanation` or
+  `options`, so no rung can reveal the answer even by mistake
+- **`remediate_general` is a separate decision from `remediate_misconception`**
+  (D-114). Collapsing them would make the D-077 content gap read as a healthy
+  metric
+
+**The dev database has NOT had `0002` applied** — see section 7, item 16. The
+corpus was re-counted after all of this and is byte-identical: 137 chapters,
+4,686 chunks, 2,741 questions, 639 concepts, 176 edges, 57 patterns, 773 held
+out.
+
 ### Defects found by tests, not by users
 | Defect | Would have caused |
 |---|---|
@@ -274,8 +350,8 @@ Build order from `docs/01-BACKEND-IMPLEMENTATION-PLAN.md` section 10.
 | ⬜ 8 | `retrieval` + **threshold calibration from measurement** | 8 | step 7 (a query must be embedded before it can be compared) |
 | ✅ 9 | `learner` | — | — |
 | ⬜ 10 | `foxy` | 10 | steps 7, 8 |
-| ⬜ 11 | `practice` | 8 | — **unblocked**: `question_responses` and the seeded question bank both exist |
-| ⬜ 12 | `parent` | 8 | steps 10, 11 |
+| ✅ 11 | **`practice`** — module, migration `0002`, 231 tests, atomic submission across two modules | — | — |
+| ⬜ 12 | `parent` | 8 | step 10 (`practice` is now done) |
 | ⬜ 13 | `billing` | 6 | Razorpay account |
 | ⬜ 14 | `notify` | 3 | Resend key |
 | ⬜ 15 | Integration suite + deployment | 5 | all |
@@ -284,7 +360,7 @@ Build order from `docs/01-BACKEND-IMPLEMENTATION-PLAN.md` section 10.
 | ⬜ + | Feature-flag module (kill switches per resilience plan section 9) | 2 | — |
 | ✅ + | **Wave 1 — half-done foundations closed** (tenancy, snapshot chain, three hardening items) | — | — |
 | ⬜ + | Open items — see section 7 | 0.5 | — |
-| | **Subtotal** | **~70.5** | |
+| | **Subtotal** | **~62.5** | |
 
 ## 5. Remaining — frontend
 
@@ -340,6 +416,7 @@ Deferred until real usage data exists: full IRT calibration, concept-level graph
 | 13 | **The question-level pedagogy layer is confirmed empty in the imported data** — `hint_level_1`, `hint_level_2`, `hint_level_3` and `solution_steps` are NULL on all 3,791 source questions, and `question_hi` on 3,581 of them. `distractor_misconceptions` is NULL on all 2,741 imported questions: the 57 misconception patterns exist but nothing links a pattern to a distractor. Generation, scoped to the pilot chapters, is unavoidable | D-077 | section 6 |
 | 14 | **`misconception_patterns` has no Hindi description, and the source has no such column** — not "usually null", it does not exist. A P7 gap that needs translations written, not a column added | D-098 | with the pedagogy subset |
 | 15 | **The dev database's drizzle ledger predates the baseline collapse**, so `db:migrate` skipped `0001` on timestamp order while reporting success. Worked around by setting 0001's journal `when` above the last applied row. Any other database created from the 0000-0008 chain has the same hazard | D-109 | 30 min, if another such database exists |
+| 16 | **The development database is still on `0001` — `0002_practice` has NOT been applied to it.** Deliberate: applying it needed a `db:migrate` against the database holding the imported corpus, and D-109's hazard (a "Migrations applied." that applies nothing, because the ledger predates the baseline collapse) makes that a step to take deliberately rather than incidentally. Nothing is at risk — `0002` adds three tables and renames an EMPTY one, and its own `DO` block refuses to run if that table has rows. The whole test suite runs against testcontainers and is unaffected. **Check the catalogue, not the exit code**: after `npm run db:migrate`, `select 1 from information_schema.tables where table_name = 'practice_responses'` | D-109, D-110 | 15 min |
 | 10 | **Per-migration drizzle snapshots for `0004`-`0007` do not exist and cannot be reconstructed** — those schema states were never committed. The chain is LINKED (`0008.prevId` = `0003.id`) and `db:generate` emits nothing, which is the property that matters; `drizzle-kit check` passes and is exposed as `npm run db:check`. The alternative that would give a gapless chain is to collapse `0000`-`0008` into one baseline migration plus one snapshot — **a user decision, since it rewrites already-applied migrations** | D-081 | 2 h, if chosen |
 
 **Closed on 10 August:** item 1 (CORS read/write split — D-082), item 2
@@ -360,7 +437,7 @@ by option index, migration `0003`, D-048) and `hnsw.ef_search` (set to 100 on th
 | Reset-token invalidation when a password changes by another route | normal follow-up |
 | Repeated-failed-login lockout and notification | normal follow-up |
 | ~~**`tenant_id` becomes NOT NULL and the guard denies on a missing tenant**~~ | **DONE 10 August**, migration `0008` (D-073). It was mechanical exactly as predicted — the compiler listed every call site, and every one of them was a test |
-| Parent weekly digest job · retention scheduler | the `parent` and `practice` modules. Deliberately NOT stubbed — a registered handler that does nothing lets a job succeed without doing the work, which is worse than the "no handler" error the runner raises |
+| Parent weekly digest job · retention SCHEDULER JOB | the `parent` module. (`practice` has landed: the SM-2 arithmetic, `practice_retention` and the due-review branch of Today's Mission all exist and are exercised. What is missing is a background job that NOTIFIES a student a review has fallen due — today the mission surfaces it when they open the app.) Deliberately NOT stubbed — a registered handler that does nothing lets a job succeed without doing the work, which is worse than the "no handler" error the runner raises |
 | Timezone-aware job scheduling (`09:00 Asia/Kolkata`) | the parent digest. The current scheduler expresses daily-or-coarser only, keyed by UTC date (D-069) |
 
 ---
@@ -376,7 +453,7 @@ yet, and that is the part still outstanding.**
 |---|---|---|
 | **Tag every distractor with a misconception code** | Column `questions.distractor_misconceptions` is a jsonb OBJECT KEYED BY OPTION INDEX (migration `0003`). The CHECK enforces exactly 3 entries, keys in "0".."3", and the correct option's key ABSENT. The shape question raised by D-044 is now SETTLED — see D-048 | Authoring the codes. NULL is permitted and honest until then |
 | **Reserve ~30% of each chapter's questions as check-only** | **DONE, 10 August 2026.** `is_held_out` is true on **773 of 2,741** imported questions — ~30% of each of the 81 chapters that carry at least 15 valid ones, and NONE below that. Chosen before a single question was ever served, which was the requirement. Guarded twice against a re-run releasing any of them (D-104) | Nothing. The door is shut |
-| **Log every response** | Table `question_responses` exists — three build steps ahead of the `practice` module that owns it. `authored_difficulty` is denormalised so a later difficulty correction cannot rewrite history | The `practice` module has to actually write to it |
+| **Log every response** | **DONE, 10 August 2026.** The table arrived three build steps early; `practice` now writes it on every submission, and migration `0002` renamed it to `practice_responses` with the `session_id` D-057 called for. `authored_difficulty` is frozen at answer time, and all five evidence columns are written and asserted column by column out of the database | Nothing. The door is shut |
 
 **Now checked, 10 August 2026.** The precondition was real and the answer is
 mixed: of 137 chapters, **81 carry at least 15 valid questions** and got a
@@ -460,6 +537,7 @@ per-chapter counts are in `.corpus-extract/reports/chapter-readiness.ndjson`.
 | 10 Aug 2026 | **Corpus extraction.** MCP diagnosed as unable to carry 58 MB of vectors through a context window; extracted instead by keyset pagination over a session-pooler connection. 9,349 rows across 5 NDJSON files, every line count checked against a separate database count. A real password had reached a git-tracked `.env.example` and was remediated. D-095..D-097 | 1,396 |
 | 10 Aug 2026 | **Corpus import.** Migration `0001_pedagogy`; 137 chapters, 4,686 chunks, 2,741 questions, 639 concepts, 176 edges, 57 patterns, 773 held out. Idempotency proven by digest comparison across two full runs. **Four of five `Source*` shapes were wrong, three silently** - all 639 concepts and 57 patterns would have imported as zero. D-098..D-109 | 1,453 |
 | 10 Aug 2026 | **Initial commit** `0545689` - 441 files. Repository had survived two near-losses of `PROGRESS.md` with zero commits | 1,453 |
+| 10 Aug 2026 | **`practice` — the session engine.** Migration `0002_practice` (3 tables + D-057's rename of `question_responses` to `practice_responses`, forward/rollback/re-apply proven); 28 module files; 10 pure domain modules at 100% coverage; `platform/tx`'s opaque `TransactionToken`, which lets one transaction span `practice` and `learner` without letting either service run a statement (D-056 executed at last). Held-out questions unreachable by construction; every persisted index canonical, proved with a shuffle that moves things; a partial-failure test that injects at the cross-module seam and asserts nothing lands. **Two findings only a real submission surfaced** — an honest perfect score can trip the all-same-index rule, and a reordering shuffle can still leave position 0 in place, so both tests were measuring less than they claimed (D-121). D-110..D-121 | 1,684 |
 
 ---
 

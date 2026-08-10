@@ -16,6 +16,14 @@
  */
 export { createDb } from './client';
 export type { Database, DbHandle, DbConfig, DbExecutor } from './client';
+/**
+ * D-056 — the opaque executor a service may carry across a module boundary.
+ *
+ * The TOKEN type lives in `platform/tx` (which modules may import); these two
+ * functions, which are the only way to turn a token back into something that
+ * can run a statement, live here, where only a repository may reach them.
+ */
+export { wrapExecutor, unwrapExecutor } from './transaction-token';
 export { createDbPools, POOL_NAMES } from './pools';
 export type {
   DbPools,

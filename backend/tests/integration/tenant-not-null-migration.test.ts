@@ -72,6 +72,21 @@ async function columnDefault(table: string): Promise<string | null> {
 beforeAll(async () => {
   postgres = await startTestPostgres();
   await applyAllMigrations(postgres.client);
+/**
+ * `0002_practice` COMES OFF FIRST — the D-106 rule, one migration later.
+ *
+ * This harness applies the CURRENT migration set, whose newest member renames
+ * `question_responses` to `practice_responses` (D-057). Everything below is
+ * about the world BEFORE that rename — it exercises the superseded 0004-0008
+ * chain, which names the old table throughout and which cannot be edited.
+ *
+ * Peeling the newer migration off is what a real rollback does, in the order a
+ * real rollback does it. The alternatives are both worse: rewriting these
+ * assertions to the new name would make them claim to test SQL that does not
+ * mention it, and editing the superseded files would destroy the oracle
+ * `baseline-collapse.test.ts` diffs the baseline against.
+ */
+  await run(readDownMigration('0002_practice.down.sql'));
 }, 180_000);
 
 afterAll(async () => {

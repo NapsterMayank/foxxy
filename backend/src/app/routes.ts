@@ -3,6 +3,7 @@ import type { LinkStatus } from '../platform/authz/index';
 import { createContentModule, type ContentModule } from '../modules/content/index';
 import { createIdentityModule, type IdentityModule } from '../modules/identity/index';
 import { createLearnerModule, type LearnerModule } from '../modules/learner/index';
+import { createPracticeModule, type PracticeModule } from '../modules/practice/index';
 import {
   createNotifyModule,
   type DigestSource,
@@ -27,6 +28,7 @@ export interface Modules {
   readonly identity: IdentityModule;
   readonly learner: LearnerModule;
   readonly content: ContentModule;
+  readonly practice: PracticeModule;
   readonly notify: NotifyModule;
 }
 
@@ -199,6 +201,78 @@ export function buildModules(container: Container, options: BuildModulesOptions 
     requireSession: identity.requireSession,
   });
 
+  /**
+   * ==========================================================================
+   * practice — THE MOST CONNECTED MODULE, AND STILL ZERO IMPORTS.
+   *
+   * Four edges, to three modules, all visible here: questions and chapters from
+   * `content`, the student's grade/subjects/mastery and the mastery WRITE from
+   * `learner`, and the account tenant from `identity`. That is more than any
+   * other module has, which is exactly why every one of them is an injected
+   * function rather than an import — otherwise this file would stop being the
+   * complete dependency graph on the day practice was built (D-051).
+   *
+   * THE MOST IMPORTANT LINE BELOW IS `readQuestions`. It is bound to
+   * `content.getQuestionsForChapter`, which has NO argument that could return a
+   * held-out question, and `getHeldOutQuestionsForChapter` is deliberately NOT
+   * passed. `practice` therefore cannot serve a reserved question by mistake:
+   * it has no way to ask for one. A question served in ordinary practice may
+   * have been memorised and can never measure anything again, for that student,
+   * permanently — so the protection had to be structural rather than careful.
+   * ==========================================================================
+   */
+  const practice = createPracticeModule({
+    // §3.1: ordinary request traffic, so the `core` pool.
+    db: forWorker ? container.pools.worker : container.poolFor('practice'),
+    clock: container.clock,
+    logger: container.logger,
+    requireSession: identity.requireSession,
+
+    readQuestions: (actor, query) => content.service.getQuestionsForChapter(actor, query),
+    readChapter: async (actor, chapterId) => {
+      try {
+        return await content.service.getChapter(actor, chapterId);
+      } catch {
+        // A withdrawn chapter is a 404 inside `content`; practice wants "there
+        // is no such chapter" as a VALUE, because it has its own message for it
+        // and because a session whose chapter was withdrawn mid-flight must not
+        // surface content's wording.
+        return null;
+      }
+    },
+    listChapters: (actor, filter) =>
+      content.service.listChapters(actor, {
+        grade: filter.grade,
+        subject: filter.subjectCode,
+        limit: filter.limit,
+      }),
+
+    readStudentContext: async (actor, studentUserId) => {
+      const [profile, subjects] = await Promise.all([
+        learner.service.getProfile(actor, studentUserId),
+        learner.service.getSubjects(actor, studentUserId),
+      ]);
+      return { grade: profile.grade, subjects };
+    },
+    readMastery: (actor, studentUserId) => learner.service.getMastery(actor, studentUserId),
+    /**
+     * D-056 — the mastery write, enlisted in practice's SUBMISSION TRANSACTION.
+     *
+     * `input.executor` is an opaque `TransactionToken` that practice's
+     * repository opened and that learner's repository unwraps. Neither service
+     * can run a statement with it, and the transaction spans two modules'
+     * tables — which is the only way §8.6's "all of it lands or none of it
+     * does" can include `chapter_mastery`.
+     */
+    writeMastery: (actor, input) => learner.service.updateMastery(actor, input),
+
+    // The SAME wiring as `learner` above: the resource side of the tenant
+    // comparison, read from `users` through identity rather than from a copy,
+    // and never echoed back off the actor (D-091).
+    readTenantOfStudent: (studentUserId: string): Promise<string | null> =>
+      identity.service.getTenantOfUser(studentUserId),
+  });
+
   const notify = createNotifyModule({
     // §3.1: notify's HTTP surface is ordinary request traffic, so `core`. In
     // the worker it is background work and gets `worker` — the delivery job
@@ -242,7 +316,7 @@ export function buildModules(container: Container, options: BuildModulesOptions 
     ...(options.digest === undefined ? {} : { digest: options.digest }),
   });
 
-  return { identity, learner, content, notify };
+  return { identity, learner, content, practice, notify };
 }
 
 /**
@@ -269,5 +343,6 @@ export async function registerRoutes(
   }
   modules.learner?.registerRoutes(app);
   modules.content?.registerRoutes(app);
+  modules.practice?.registerRoutes(app);
   modules.notify?.registerRoutes(app);
 }

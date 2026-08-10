@@ -1,6 +1,7 @@
 import { asc, eq, sql } from 'drizzle-orm';
 import type { DbExecutor, DbHandle } from '@/platform/db/index';
-import { schema } from '@/platform/db/index';
+import { schema, unwrapExecutor } from '@/platform/db/index';
+import type { TransactionToken } from '@/platform/tx/index';
 import type { Grade, LanguageCode } from '@/shared/constants/curriculum';
 import { fromMasteryColumn, toMasteryColumn } from './domain/mastery';
 import type { ChapterMasteryRecord, OnboardingResult, StudentProfileRecord } from './learner.types';
@@ -120,6 +121,18 @@ export interface UpsertMasteryInput {
   readonly attemptIncrement: number;
   readonly practisedAt: Date | null;
   readonly now: Date;
+  /**
+   * The caller's OPEN TRANSACTION, when there is one — D-056.
+   *
+   * This is the one repository method in the module that accepts an executor,
+   * because it is the one another module has to be able to enlist: `practice`
+   * writes its responses, its session, its XP ledger row and this mastery row
+   * in a single transaction, and a partial write there is unrepairable.
+   *
+   * Absent for every ordinary caller, in which case the write runs on this
+   * module's own pool exactly as before.
+   */
+  readonly executor?: TransactionToken;
 }
 
 export interface LearnerRepository {
@@ -301,7 +314,7 @@ export function createLearnerRepository(handle: LearnerDbHandle): LearnerReposit
     async upsertMastery(input: UpsertMasteryInput): Promise<ChapterMasteryRecord> {
       const score = toMasteryColumn(input.masteryScore);
 
-      const rows = await db
+      const rows = await (unwrapExecutor(input.executor) ?? db)
         .insert(chapterMastery)
         .values({
           studentUserId: input.studentUserId,
