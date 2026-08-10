@@ -1,0 +1,6 @@
+# LF everywhere. Shell scripts, SQL migrations and hook files break subtly on
+# CRLF, and a mixed repo produces diffs that are entirely whitespace.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary

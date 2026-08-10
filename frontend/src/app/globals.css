@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --canvas: 250 249 247;
+  --surface: 255 255 255;
+  --ink: 20 20 32;
+  --muted: 91 91 112;
+  --line: 230 228 236;
+  --brand: 109 66 232;
+  --brand-strong: 84 46 190;
+  --brand-subtle: 244 240 255;
+  --logo: 234 88 12;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color-scheme: light;
+}
+
+[data-theme='student'] {
+  --brand: 109 66 232;
+  --brand-strong: 84 46 190;
+  --brand-subtle: 244 240 255;
+}
+
+[data-theme='parent'] {
+  --brand: 194 65 12;
+  --brand-strong: 154 52 18;
+  --brand-subtle: 255 247 237;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: rgb(var(--canvas));
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(circle at 12% 8%, rgb(109 66 232 / 0.06), transparent 24rem),
+    radial-gradient(circle at 88% 90%, rgb(194 65 12 / 0.06), transparent 24rem),
+    rgb(var(--canvas));
+  color: rgb(var(--ink));
+}
+
+::selection {
+  background: rgb(var(--brand) / 0.18);
+}
+
+.product-anchor {
+  scroll-margin-top: 5rem;
+}
+
+.mobile-product-nav {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+
+  [data-motion] {
+    transform: none !important;
+    transition-duration: 120ms !important;
+    transition-property: color, background-color, border-color, opacity, box-shadow !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --line: 91 91 112;
+  }
+}
