@@ -26,7 +26,7 @@ Last updated: **10 August 2026**
 | Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice`. `npm run db:generate` on a clean tree emits nothing, and `db:check` passes |
 | Gates | type-check · lint · build · test · coverage — all green. `platform/authz` 100%, `practice/domain` 100%, `practice.service` 93.9%, global 93.6% |
 | Estimated remaining | **~108 days ≈ 22 weeks solo** |
-| Git | **1 commit** - `0545689`, 441 files, working tree clean. No remote configured |
+| Git | **3 commits**, latest `94464be`. Working tree clean. No remote configured |
 
 ---
 
@@ -538,6 +538,7 @@ per-chapter counts are in `.corpus-extract/reports/chapter-readiness.ndjson`.
 | 10 Aug 2026 | **Corpus import.** Migration `0001_pedagogy`; 137 chapters, 4,686 chunks, 2,741 questions, 639 concepts, 176 edges, 57 patterns, 773 held out. Idempotency proven by digest comparison across two full runs. **Four of five `Source*` shapes were wrong, three silently** - all 639 concepts and 57 patterns would have imported as zero. D-098..D-109 | 1,453 |
 | 10 Aug 2026 | **Initial commit** `0545689` - 441 files. Repository had survived two near-losses of `PROGRESS.md` with zero commits | 1,453 |
 | 10 Aug 2026 | **`practice` — the session engine.** Migration `0002_practice` (3 tables + D-057's rename of `question_responses` to `practice_responses`, forward/rollback/re-apply proven); 28 module files; 10 pure domain modules at 100% coverage; `platform/tx`'s opaque `TransactionToken`, which lets one transaction span `practice` and `learner` without letting either service run a statement (D-056 executed at last). Held-out questions unreachable by construction; every persisted index canonical, proved with a shuffle that moves things; a partial-failure test that injects at the cross-module seam and asserts nothing lands. **Two findings only a real submission surfaced** — an honest perfect score can trip the all-same-index rule, and a reordering shuffle can still leave position 0 in place, so both tests were measuring less than they claimed (D-121). D-110..D-121 | 1,684 |
+| 10 Aug 2026 | **`practice` session engine** - six of nine client steps: mission with a stated reason, concept explanation, guided practice, mastery check, evidence-based decision, spaced retention. Migration `0002_practice`. Canonical option indexes, per-chapter held-out reserve honoured, one-transaction submission via an opaque `TransactionToken` (D-056 was unimplementable as written). Three defects caught by tests: an honest perfect score tripped anti-cheat; drizzle-kit silently kept a renamed PK; the canonical-index test was measuring nothing. D-110..D-121 | 1,684 |
 
 ---
 
