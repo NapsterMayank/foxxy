@@ -4,7 +4,7 @@ import { FakeLogger } from '../../logger/index';
 import { MemoryMetrics } from '../../metrics/index';
 import { PLATFORM_METRICS } from '../../metrics/metrics.port';
 import { createJobRunner } from '../job-runner';
-import type { FailureOutcome, JobQueue, JobRecord, JobStatus } from '../job.port';
+import type { ClaimedJob, FailureOutcome, JobQueue, JobRecord, JobStatus } from '../job.port';
 
 /**
  * The job runner's LOOP behaviour — 04-RESILIENCE-PLAN.md §12 step 3.
@@ -57,9 +57,17 @@ class FakeQueue implements JobQueue {
   readonly failed: { readonly id: string; readonly error: string }[] = [];
   readonly claims: string[] = [];
   reapCount = 0;
-  private readonly pending: JobRecord[];
+  /**
+   * D-233 — when true, every completion reports that the lease was lost.
+   *
+   * The queue is where the fence lives, so from the RUNNER's side losing the
+   * lease is just an answer: `succeed` returns false and `fail` returns
+   * `lease_lost`. What is under test here is that the runner believes it.
+   */
+  leaseLost = false;
+  private readonly pending: ClaimedJob[];
 
-  constructor(jobs: readonly JobRecord[]) {
+  constructor(jobs: readonly ClaimedJob[]) {
     this.pending = [...jobs];
   }
 
@@ -67,19 +75,21 @@ class FakeQueue implements JobQueue {
     return Promise.resolve({ id: 'x', created: true });
   }
 
-  claim(workerId: string): Promise<JobRecord | null> {
+  claim(workerId: string): Promise<ClaimedJob | null> {
     const job = this.pending.shift();
     if (job !== undefined) this.claims.push(workerId);
     return Promise.resolve(job ?? null);
   }
 
-  succeed(jobId: string): Promise<void> {
-    this.succeeded.push(jobId);
-    return Promise.resolve();
+  succeed(job: ClaimedJob): Promise<boolean> {
+    if (this.leaseLost) return Promise.resolve(false);
+    this.succeeded.push(job.id);
+    return Promise.resolve(true);
   }
 
-  fail(jobId: string, error: string): Promise<FailureOutcome> {
-    this.failed.push({ id: jobId, error });
+  fail(job: ClaimedJob, error: string): Promise<FailureOutcome> {
+    if (this.leaseLost) return Promise.resolve('lease_lost');
+    this.failed.push({ id: job.id, error });
     return Promise.resolve('retry');
   }
 
@@ -92,7 +102,7 @@ class FakeQueue implements JobQueue {
   }
 }
 
-function job(id: string, kind = 'test.job'): JobRecord {
+function job(id: string, kind = 'test.job'): ClaimedJob {
   return {
     id,
     kind,
@@ -102,6 +112,9 @@ function job(id: string, kind = 'test.job'): JobRecord {
     maxAttempts: 5,
     runAt: new Date(0),
     createdAt: new Date(0),
+    // D-233 — the lease a real claim would have returned.
+    lockedBy: 'worker-1',
+    lockedAt: new Date(0),
   };
 }
 
@@ -358,5 +371,73 @@ describe('idle polling', () => {
     await loop;
 
     expect(sleeper.delays.every((delay) => delay === 50)).toBe(true);
+  });
+});
+
+/**
+ * D-233 — THE RUNNER'S HALF OF THE LEASE FENCE.
+ *
+ * The fence itself is SQL and is proved against a real database in
+ * `tests/integration/job-queue.test.ts` ("a stale worker's write does not
+ * land"). What is proved HERE is that the runner believes the answer: when the
+ * queue reports that the completion did not land, the runner must not go on to
+ * record a success or a failure that did not happen.
+ *
+ * That distinction matters because the two halves fail differently. If the SQL
+ * fence broke, the stale write would corrupt another worker's row. If only this
+ * half broke, the row would be correct and the METRICS and LOGS would describe
+ * a completion the database refused — which is the kind of disagreement that
+ * makes an incident unreadable.
+ */
+describe('a completion whose lease was lost is not recorded as one', () => {
+  it('emits job.lease_lost instead of job.completed on the success path', async () => {
+    const queue = new FakeQueue([job('job-1')]);
+    queue.leaseLost = true;
+    const { runner, logger, metrics } = build(queue, { 'test.job': () => Promise.resolve() });
+
+    await runner.runOnce();
+
+    // The success was refused by the database, so nothing may claim it happened.
+    expect(metrics.totalFor(PLATFORM_METRICS.JOB_COMPLETED)).toBe(0);
+    expect(metrics.totalFor(PLATFORM_METRICS.JOB_LEASE_LOST)).toBe(1);
+    expect(logger.lines.some((line) => line.obj.event === 'job.succeeded')).toBe(false);
+
+    const line = logger.lines.find((entry) => entry.obj.event === 'job.lease_lost');
+    expect(line?.obj.intended).toBe('succeeded');
+    expect(line?.obj.jobId).toBe('job-1');
+  });
+
+  it('emits job.lease_lost instead of job.failed on the failure path', async () => {
+    // The more dangerous direction. Unfenced, this stale `failed` would have
+    // been written over whatever the current owner had reached — including over
+    // a `succeeded`, turning a job that worked into one scheduled to run again.
+    const queue = new FakeQueue([job('job-2')]);
+    queue.leaseLost = true;
+    const { runner, logger, metrics } = build(queue, {
+      'test.job': () => Promise.reject(new Error('provider down')),
+    });
+
+    await runner.runOnce();
+
+    expect(metrics.totalFor(PLATFORM_METRICS.JOB_RETRIED)).toBe(0);
+    expect(metrics.totalFor(PLATFORM_METRICS.JOB_DEAD)).toBe(0);
+    expect(metrics.totalFor(PLATFORM_METRICS.JOB_LEASE_LOST)).toBe(1);
+    expect(logger.lines.some((line) => line.obj.event === 'job.failed')).toBe(false);
+    expect(
+      logger.lines.find((entry) => entry.obj.event === 'job.lease_lost')?.obj.intended,
+    ).toBe('failed');
+  });
+
+  it('still counts the job as processed, so the loop cannot spin on it', async () => {
+    // `processed` drives the heartbeat. A completion that was refused is still
+    // a poll that did work, and reporting otherwise would make a worker in this
+    // state look idle while it is busy running other people's jobs twice.
+    const queue = new FakeQueue([job('job-3')]);
+    queue.leaseLost = true;
+    const { runner } = build(queue, { 'test.job': () => Promise.resolve() });
+
+    await runner.runOnce();
+
+    expect(runner.processed()).toBe(1);
   });
 });

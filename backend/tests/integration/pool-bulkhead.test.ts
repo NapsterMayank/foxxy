@@ -77,6 +77,14 @@ beforeAll(async () => {
   pools = createDbPools({
     url: postgres.url,
     ssl: false,
+    // D-238 — verification is on by default now; this URL is plaintext anyway.
+    sslCa: null,
+    sslInsecure: false,
+    // D-228 — the per-process budget. 'api' here because nothing in this
+    // file claims a job, and the ceiling is deliberately above the sum so
+    // the sizes below are what actually gets opened.
+    role: 'api',
+    maxConnections: 100,
     // Deliberately small. The property under test is isolation, not capacity,
     // and saturating 4 connections is as convincing as saturating 8 while
     // taking a fraction of the time.

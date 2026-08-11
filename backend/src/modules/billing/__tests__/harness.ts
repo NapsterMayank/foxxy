@@ -7,6 +7,7 @@ import { CounterIdGen } from '@/platform/id-gen/index';
 import { FakeLogger } from '@/platform/logger/index';
 import { RecordingMail } from '@/platform/mail/index';
 import { createFakePayments, type FakePayments, type Payer } from '@/platform/payments/index';
+import { createRateLimiter, type RateLimiter } from '@/platform/rate-limit/index';
 import { createContainer, type Container } from '../../../app/container';
 import { createServer } from '../../../app/server';
 import { createIdentityModule, type IdentityModule } from '../../identity/index';
@@ -124,6 +125,30 @@ export interface BillingHarness {
   stop(): Promise<void>;
 }
 
+/**
+ * The webhook rejection limiter, built the way `app/routes.ts` builds it — D-258.
+ *
+ * Exported so every construction site in this suite uses ONE spelling. Five
+ * places construct a billing service or module here, and five hand-written
+ * limiters is five chances for one of them to quietly become permissive — which
+ * is the shape of the defect D-258 closed in the first place.
+ *
+ * The clock is the harness's `FixedClock`, so a window is crossed by ADVANCING
+ * TIME rather than by sleeping.
+ */
+export function createBillingTestRateLimiter(
+  cache: MemoryCache,
+  clock: FixedClock,
+  logger: FakeLogger,
+): RateLimiter {
+  return createRateLimiter({
+    cache,
+    clock,
+    logger,
+    fallbackMetric: 'billing.webhook_rate_limit.in_process_fallback',
+  });
+}
+
 export async function startBillingHarness(
   options: BillingHarnessOptions = {},
 ): Promise<BillingHarness> {
@@ -182,6 +207,12 @@ export async function startBillingHarness(
     logger,
     requireSession: identity.requireSession,
     payments,
+    // D-258 — the webhook's rejection budget. A REAL limiter over the harness's
+    // `MemoryCache` and `FixedClock`, not a stub that always allows: the window
+    // arithmetic is the thing under test in `webhook-rejection-budget.test.ts`,
+    // and a permissive stub here would make every other test in this file green
+    // against a limiter that does nothing.
+    rateLimiter: createBillingTestRateLimiter(cache, clock, logger),
     /**
      * THE D-091 WIRING, identical to what `app/routes.ts` must carry.
      *

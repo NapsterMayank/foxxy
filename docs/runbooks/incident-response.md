@@ -244,11 +244,40 @@ $C ps backend-alerts
 $C logs backend-alerts --tail 50 | grep alerts.cycle
 ```
 
-`ALERT EMAIL IS GOING TO STDOUT` in its startup log means `ALERT_MAIL_TRANSPORT`
-is still `console`: page-severity alerts are being written to a container log
-and **will not reach a phone**. That is a deliberate, visible warning rather than
-a silent downgrade, and it is only acceptable while somebody is watching the
-logs.
+### What "the alerts container is not running" means (D-251)
+
+**Its absence is a signal, not a nuisance.** `ALERT_MAIL_TRANSPORT` defaults to
+`smtp`, and with `--mail=smtp` the evaluator **refuses to start** if any of
+`SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD` or `SMTP_FROM` is unset — it will not
+fall back to stdout. So a missing `backend-alerts` container means alerting is
+misconfigured and **you are not being paged right now**. Read its last log line:
+
+```bash
+$C logs backend-alerts --tail 20
+```
+
+Expect one of:
+
+| Startup line | Meaning | Action |
+|---|---|---|
+| `alerts.mail_transport_smtp` | pages go to a real mailbox | none — this is correct |
+| `--mail=smtp was selected but SMTP_… are not set` | container exited; **nobody is being paged** | fill the `SMTP_*` block in `docker/.env.prod`, `$C up -d backend-alerts` |
+| `alert rules watch signals that nothing produces` | a rule cannot observe its signal — usually `--backup-dir` missing | restore the `backup_data:/backup:ro` mount on `backend-alerts` |
+| `ALERT EMAIL IS GOING TO STDOUT` | `ALERT_MAIL_TRANSPORT=console` was chosen | see below |
+
+`console` is a real delivery path for one operator watching `docker compose
+logs`, and it is **not a pager**. It is now something you have to type — the
+default was `console` until D-251, which meant an operator who set nothing got a
+silent pager with no indication of it, and every page raised since the evaluator
+was deployed went to a log nobody read. A monitoring stack that cannot page
+anyone is worse than none, because it is believed: "no page came in" was being
+read as "nothing was wrong", and the two were indistinguishable.
+
+> **Verify the path, do not assume it.** The alert mail rides the same SMTP
+> adapter as signup and password reset (`platform/mail/smtp-mail.ts`). If
+> verification emails are arriving, pages will too — and if users are reporting
+> that verification emails never arrive, **assume you are also not being paged**
+> and treat that as the first incident.
 
 ---
 

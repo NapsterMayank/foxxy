@@ -133,6 +133,17 @@ export const PLATFORM_METRICS = {
   /** §4 — an outbound call exceeded its timeout. */
   PORT_TIMEOUT: 'platform.port.timeout',
   /**
+   * §4 — a guarded call was RETRIED against its `TimeoutRule.retries` budget
+   * (D-237). Tags: port, attempt.
+   *
+   * The budget was unwired for the whole life of the codebase, so a retry has
+   * never been observable. It needs to be for the same reason a timeout does:
+   * a dependency that succeeds on the second attempt every time is a dependency
+   * that is failing every time, and from the outside it looks perfect. This is
+   * the counter that separates "healthy" from "healthy at double the cost".
+   */
+  PORT_RETRIED: 'platform.port.retried',
+  /**
    * §6 — a degradation path was taken: the product is still working, but not
    * the way it is supposed to. Tags: `path`.
    */
@@ -145,6 +156,17 @@ export const PLATFORM_METRICS = {
   JOB_DEAD: 'platform.job.dead',
   /** A stuck `running` job was returned to the queue by the reaper. */
   JOB_RECLAIMED: 'platform.job.reclaimed',
+  /**
+   * A worker finished a job it no longer held the lease on — D-233. Tags:
+   * kind, outcome.
+   *
+   * The completion was REFUSED, which is the correct outcome and is why this is
+   * not an error. Non-zero means the lock timeout is shorter than this kind of
+   * job actually takes, so the handler is running twice on every occurrence.
+   * Before the fence existed these writes landed, and the job's final state
+   * could flip to the loser's answer.
+   */
+  JOB_LEASE_LOST: 'platform.job.lease_lost',
   /** A notification was delivered. Tags: channel, kind. */
   NOTIFY_SENT: 'platform.notify.sent',
   /** A notification could not be delivered. Tags: channel, kind. */

@@ -1,8 +1,16 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ERROR_CODES, isAppError } from '@/platform/errors/index';
-import { LOGIN_RATE_LIMIT, SIGNUP_RATE_LIMIT } from '@/shared/constants/rate-limits';
+import {
+  LOGIN_RATE_LIMIT,
+  LOGOUT_RATE_LIMIT,
+  SIGNUP_RATE_LIMIT,
+} from '@/shared/constants/rate-limits';
 import { LINK_CODE_TTL_MS } from '../domain/link-code';
-import { EMAIL_VERIFICATION_TTL_MS, PASSWORD_RESET_TTL_MS } from '../domain/token';
+import {
+  EMAIL_VERIFICATION_TTL_MS,
+  PASSWORD_RESET_TTL_MS,
+  SESSION_IDLE_TTL_MS,
+} from '../domain/token';
 import type { IdentityService } from '../identity.service';
 import type { RequestContext } from '../identity.types';
 import { TEST_TENANT_ID, startIdentityHarness, type IdentityHarness } from './harness';
@@ -559,10 +567,79 @@ describe('validateSession', () => {
     expect(await countRows('sessions')).toBe(0);
   });
 
-  it('accepts a session one millisecond before its absolute expiry', async () => {
+  it('accepts a session one millisecond before its idle expiry', async () => {
     const { sessionToken } = await signupAndVerify('a@example.test', 'student');
-    harness.clock.advanceMs(30 * 24 * 60 * 60 * 1000 - 1);
+    harness.clock.advanceMs(SESSION_IDLE_TTL_MS - 1);
     await expect(service.validateSession(sessionToken)).resolves.toBeDefined();
+  });
+
+  /**
+   * =========================================================================
+   * D-219 — A SESSION THAT IS USED CONSTANTLY STILL DIES.
+   *
+   * THE defect test. Renewal used to replace `expires_at` with `now + 30 days`
+   * and nothing ever read `created_at`, so a token touched once inside each
+   * renewal interval was a permanent credential — a stolen cookie that never
+   * expired, under a comment claiming a 30-day ceiling.
+   *
+   * This walks a session forward in 25 one-day steps, validating at each one so
+   * that renewal fires every time (`SESSION_RENEW_AFTER_MS` is 24 hours). Under
+   * the defect the session is alive at day 40 and every day after. It must die
+   * at exactly `created_at + 30 days`.
+   *
+   * Re-applying the defect — restoring `expiryFrom(now, absoluteSessionTtlMs)`
+   * as the renewal deadline and dropping the `isPastAbsoluteLifetime` check —
+   * turns this red at the day-30 assertion.
+   * =========================================================================
+   */
+  it('KILLS A CONTINUOUSLY RENEWED SESSION AT THE ABSOLUTE CEILING', async () => {
+    const { sessionToken } = await signupAndVerify('a@example.test', 'student');
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    // Twenty-five days of daily use. Every one of these renews.
+    for (let day = 0; day < 25; day += 1) {
+      harness.clock.advanceMs(DAY_MS);
+      await expect(service.validateSession(sessionToken)).resolves.toBeDefined();
+    }
+
+    // Still alive one millisecond before the ceiling — the sliding window did
+    // its job and an active user was not signed out.
+    harness.clock.advanceMs(5 * DAY_MS - 1);
+    await expect(service.validateSession(sessionToken)).resolves.toBeDefined();
+
+    // And dead AT it, no matter how much it was used.
+    harness.clock.advanceMs(1);
+    await expect(service.validateSession(sessionToken)).rejects.toMatchObject({
+      code: ERROR_CODES.UNAUTHENTICATED,
+    });
+    expect(await countRows('sessions')).toBe(0);
+  });
+
+  it('never writes an expires_at past the absolute ceiling', async () => {
+    const { sessionToken } = await signupAndVerify('a@example.test', 'student');
+    const created = await harness.postgres.client.query<{ created_at: Date }>(
+      'select created_at from sessions',
+    );
+    const ceiling = (created.rows[0]?.created_at.getTime() ?? 0) + 30 * 24 * 60 * 60 * 1000;
+
+    /**
+     * Walked forward in two hops of 13 days rather than one of 25, because the
+     * SLIDING window is 14 days: a single 25-day jump kills the session on the
+     * idle bound and would assert nothing about the clamp. Each hop lands inside
+     * the current idle deadline and renews it — which is the only way to reach
+     * day 26 alive, and day 26 is where a full idle window (day 40) overshoots
+     * the ceiling (day 30) and must be clamped to it.
+     */
+    const THIRTEEN_DAYS_MS = 13 * 24 * 60 * 60 * 1000;
+    harness.clock.advanceMs(THIRTEEN_DAYS_MS);
+    await service.validateSession(sessionToken);
+    harness.clock.advanceMs(THIRTEEN_DAYS_MS);
+    await service.validateSession(sessionToken);
+
+    const after = await harness.postgres.client.query<{ expires_at: Date }>(
+      'select expires_at from sessions',
+    );
+    expect(after.rows[0]?.expires_at.getTime()).toBe(ceiling);
   });
 
   it('does not renew a session used within the last 24 hours', async () => {
@@ -601,24 +678,57 @@ describe('validateSession', () => {
 describe('logout', () => {
   it('deletes the one session', async () => {
     const { sessionToken } = await signupAndVerify('a@example.test', 'student');
-    await service.logout(sessionToken);
+    await service.logout(sessionToken, CONTEXT);
     expect(await countRows('sessions')).toBe(0);
   });
 
   it('is idempotent and silent for an unknown token', async () => {
-    await expect(service.logout('never-existed')).resolves.toBeUndefined();
+    await expect(service.logout('never-existed', CONTEXT)).resolves.toBeUndefined();
   });
 
   it('is silent for a missing token', async () => {
-    await expect(service.logout(undefined)).resolves.toBeUndefined();
+    await expect(service.logout(undefined, CONTEXT)).resolves.toBeUndefined();
   });
 
   it('leaves other sessions of the same user alone', async () => {
     const { sessionToken } = await signupAndVerify('a@example.test', 'student');
     await service.login({ email: 'a@example.test', password: GOOD_PASSWORD }, CONTEXT);
 
-    await service.logout(sessionToken);
+    await service.logout(sessionToken, CONTEXT);
     expect(await countRows('sessions')).toBe(1);
+  });
+
+  /**
+   * D-220 — THE UNTHROTTLED ENDPOINT ON THE `auth` POOL.
+   *
+   * `POST /auth/logout` is unauthenticated on purpose and reached the database
+   * on every call. It was the one endpoint that could empty the pool the whole
+   * product's login path depends on, from one host, with no credentials.
+   *
+   * Re-applying the defect — deleting the `limiter.consume` line at the top of
+   * `logout` — turns this red.
+   */
+  it('RATE LIMITS logout by IP', async () => {
+    const context: RequestContext = { ipHash: 'logout-flood', userAgent: null };
+
+    for (let attempt = 0; attempt < LOGOUT_RATE_LIMIT.limit; attempt += 1) {
+      await expect(service.logout(undefined, context)).resolves.toBeUndefined();
+    }
+
+    await expect(service.logout(undefined, context)).rejects.toMatchObject({
+      code: ERROR_CODES.RATE_LIMIT,
+    });
+  });
+
+  it('keeps each source IP on its own logout budget', async () => {
+    const flooding: RequestContext = { ipHash: 'logout-flood-a', userAgent: null };
+    for (let attempt = 0; attempt < LOGOUT_RATE_LIMIT.limit + 1; attempt += 1) {
+      await service.logout(undefined, flooding).catch(() => undefined);
+    }
+
+    await expect(
+      service.logout(undefined, { ipHash: 'logout-flood-b', userAgent: null }),
+    ).resolves.toBeUndefined();
   });
 });
 

@@ -6,6 +6,7 @@ import type {
   Notification,
   UnreadCountResponse,
 } from '@/shared/contracts/notify.contract';
+import { requireActor as requireRequestActor } from '@/shared/http/require-actor';
 import { notifySchemas, parseInput } from './notify.schema';
 import type { NotifyService } from './notify.service';
 import type { NotificationRecord, NotifyActor } from './notify.types';
@@ -56,18 +57,16 @@ function toNotification(record: NotificationRecord): Notification {
 }
 
 /**
- * Reads the actor the session preHandler attached.
+ * Reads the actor the session preHandler attached — D-263.
  *
- * Throws rather than returning undefined: reaching a handler with no actor
- * means the preHandler was omitted, which is a wiring bug that must fail loudly
- * rather than quietly degrade into an unauthenticated read.
+ * The body used to be a fourth copy of a function that also existed in `parent`,
+ * `billing` and `foxy`, differing only in the module name in the error string.
+ * It now binds `shared/http`'s single implementation; the local name and the
+ * `NotifyActor` return type are kept so every call site below reads unchanged
+ * and so this module still states its own actor type at its own boundary.
  */
 function requireActor(request: FastifyRequest): NotifyActor {
-  const actor = request.actor;
-  if (actor === undefined) {
-    throw new Error('notify routes: missing the requireSession preHandler');
-  }
-  return actor;
+  return requireRequestActor(request, 'notify');
 }
 
 export interface NotifyRoutesDeps {
@@ -84,14 +83,30 @@ export function registerNotifyRoutes(app: FastifyInstance, deps: NotifyRoutesDep
     const actor = requireActor(request);
     const query = parseInput(notifySchemas.listQuery, request.query);
 
+    /**
+     * THE CURSOR IS REBUILT AS A PAIR OR NOT AT ALL — D-259.
+     *
+     * `listNotificationsQuerySchema` has already refused a request carrying only
+     * one half, so `beforeId` is present exactly when `before` is. Testing both
+     * here is what makes that a fact the compiler can see rather than one this
+     * file is trusting the schema for.
+     */
+    const before =
+      query.before === undefined || query.beforeId === undefined
+        ? undefined
+        : { createdAt: new Date(query.before), id: query.beforeId };
+
     const result = await deps.service.listForUser(actor, {
       limit: query.limit,
-      before: query.before === undefined ? undefined : new Date(query.before),
+      before,
     });
 
     const body: ListNotificationsResponse = {
+      // Both halves, or two nulls. They are one value and the schema forbids a
+      // client sending back half of it.
       notifications: result.notifications.map(toNotification),
-      nextBefore: result.nextBefore?.toISOString() ?? null,
+      nextBefore: result.nextCursor?.createdAt.toISOString() ?? null,
+      nextBeforeId: result.nextCursor?.id ?? null,
       unreadCount: result.unreadCount,
     };
     return reply.status(200).send(body);

@@ -100,6 +100,14 @@ beforeAll(async () => {
   pools = createDbPools({
     url: config.db.url,
     ssl: false,
+    // D-238 — verification is on by default now; this URL is plaintext anyway.
+    sslCa: null,
+    sslInsecure: false,
+    // D-228 — the per-process budget. 'api' here because nothing in this
+    // file claims a job, and the ceiling is deliberately above the sum so
+    // the sizes below are what actually gets opened.
+    role: 'api',
+    maxConnections: 100,
     sizes: { auth: 2, core: 2, ai: 2, worker: 2 },
     statementTimeoutMs: 10_000,
     vectorStatementTimeoutMs: 10_000,

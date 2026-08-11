@@ -21,3 +21,7 @@ Entries touching `modules/practice`:
 | **D-190** | Both anti-cheat thresholds are now pinned to literals in this module |
 | **D-191** | The write paths have their own access tests |
 | **D-192** | The per-question shuffle map is tested with maps that genuinely differ |
+| **D-241** | The mastery step is a compare-and-set — the read-modify-write was a lost update |
+| **D-242** | A per-student advisory lock, taken first in the transaction, closes the daily XP cap |
+| **D-246** | Concurrency is proved with a barrier on an injected seam, not with two awaits |
+| **D-247** | Two silent truncations remain here (`limit: 200`, `limit: 100`) — needs a product decision |

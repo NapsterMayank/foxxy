@@ -15,6 +15,21 @@ export interface DbConfig {
   readonly url: string;
   readonly poolMax: number;
   readonly ssl: boolean;
+  /**
+   * The provider's CA, PEM. Optional so a test or script that builds a config
+   * by hand is not obliged to state it; absent means Node's trust store.
+   */
+  readonly sslCa?: string | null;
+  /**
+   * TLS with certificate verification DISABLED — D-238.
+   *
+   * This file used to do that unconditionally whenever `ssl` was on, exactly as
+   * `pools.ts` did. `createDb` is what the MIGRATION RUNNER uses, so the
+   * connection carrying schema changes and the full database credential was the
+   * one with no certificate check at all. Verification is on by default now and
+   * this is the explicit, named opt-out.
+   */
+  readonly sslInsecure?: boolean;
 }
 
 export interface DbHandle {
@@ -28,11 +43,23 @@ export interface DbHandle {
   close(): Promise<void>;
 }
 
+/** See `DbConfig.sslInsecure`. Verification is the default; opting out is named. */
+function sslOptions(cfg: DbConfig): pg.PoolConfig['ssl'] {
+  if (!cfg.ssl) return undefined;
+  if (cfg.sslInsecure === true) return { rejectUnauthorized: false };
+  const ca = cfg.sslCa;
+  return {
+    rejectUnauthorized: true,
+    ...(ca === undefined || ca === null ? {} : { ca }),
+  };
+}
+
 export function createDb(cfg: DbConfig): DbHandle {
+  const ssl = sslOptions(cfg);
   const pool = new pg.Pool({
     connectionString: cfg.url,
     max: cfg.poolMax,
-    ...(cfg.ssl ? { ssl: { rejectUnauthorized: false } } : {}),
+    ...(ssl === undefined ? {} : { ssl }),
   });
 
   const db: Database = drizzle(pool, { schema });

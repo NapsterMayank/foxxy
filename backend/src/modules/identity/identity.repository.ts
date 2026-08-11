@@ -145,6 +145,19 @@ export interface CreateSessionInput {
    * A test caught this. Nothing in production would have.
    */
   readonly lastUsedAt: Date;
+  /**
+   * ALSO from the injected clock, and for a second, sharper reason — D-219.
+   *
+   * `created_at` is now the anchor of the ABSOLUTE session lifetime: every
+   * validation asks whether `created_at + 30 days` has passed. Left to the
+   * column default it would carry the DATABASE's `now()` while the comparison
+   * used the application's, which is the exact two-clocks bug the note on
+   * `lastUsedAt` above describes — except that here the failure is a session
+   * that never expires rather than one that never renews, and no test could
+   * observe it under a `FixedClock` because the anchor would always sit in the
+   * future.
+   */
+  readonly createdAt: Date;
   readonly ipHash: string | null;
   readonly userAgent: string | null;
 }
@@ -488,6 +501,7 @@ export function createIdentityRepository(handle: DbHandle): IdentityRepository {
         tokenHash: input.tokenHash,
         expiresAt: input.expiresAt,
         lastUsedAt: input.lastUsedAt,
+        createdAt: input.createdAt,
         ipHash: input.ipHash,
         userAgent: input.userAgent,
       });
@@ -507,6 +521,10 @@ export function createIdentityRepository(handle: DbHandle): IdentityRepository {
           userId: sessions.userId,
           expiresAt: sessions.expiresAt,
           lastUsedAt: sessions.lastUsedAt,
+          // THE ABSOLUTE-LIFETIME ANCHOR (D-219). `expires_at` slides forward
+          // on every renewal; this does not, and it is the only column that can
+          // answer "how old is this credential".
+          createdAt: sessions.createdAt,
           role: users.role,
           // Joined here rather than fetched on demand: every authenticated
           // request needs the actor's tenant, and this join already exists.
@@ -526,6 +544,7 @@ export function createIdentityRepository(handle: DbHandle): IdentityRepository {
           userId: row.userId,
           expiresAt: row.expiresAt,
           lastUsedAt: row.lastUsedAt,
+          createdAt: row.createdAt,
         },
         userId: row.userId,
         role: row.role as Role,

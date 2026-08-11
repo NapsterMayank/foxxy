@@ -8,7 +8,7 @@ import type {
   OnboardingRequest,
   UpdateProfileRequest,
 } from '@/shared/contracts/learner.contract';
-import { clampMastery } from './domain/mastery';
+import { assertAttemptIncrement, clampMastery } from './domain/mastery';
 import type { LearnerRepository } from './learner.repository';
 import type {
   ChapterMasteryRecord,
@@ -67,6 +67,20 @@ export interface UpdateMasteryInput {
   readonly chapterId: string;
   /** May be outside 0..1; it is clamped by the domain before it is written. */
   readonly masteryScore: number;
+  /**
+   * THE MASTERY THE CALLER COMPUTED `masteryScore` FROM — D-241. REQUIRED.
+   *
+   * `null` means "the caller saw no row for this chapter". The write applies
+   * only if the stored value still equals this one, which is what makes the
+   * caller's read and this write atomic with respect to each other even though
+   * they happen on different connections.
+   *
+   * DELIBERATELY NOT OPTIONAL. An optional field with a permissive default is
+   * how this defect comes back: every existing call site keeps compiling, the
+   * compare-and-set degrades to an unconditional overwrite, and the lost update
+   * returns silently. A required field makes a new caller state what it read.
+   */
+  readonly expectedPreviousScore: number | null;
   readonly attemptIncrement?: number;
   /** `true` when this update follows an actual practice attempt. */
   readonly practised?: boolean;
@@ -104,7 +118,12 @@ export interface LearnerService {
   ): Promise<StudentProfileRecord>;
   getSubjects(actor: LearnerActor, studentUserId: string): Promise<string[]>;
   getMastery(actor: LearnerActor, studentUserId: string): Promise<ChapterMasteryRecord[]>;
-  updateMastery(actor: LearnerActor, input: UpdateMasteryInput): Promise<ChapterMasteryRecord>;
+  /**
+   * `null` when the compare-and-set was refused — the stored mastery is no
+   * longer the value `input.masteryScore` was computed from. See
+   * `UpdateMasteryInput.expectedPreviousScore`.
+   */
+  updateMastery(actor: LearnerActor, input: UpdateMasteryInput): Promise<ChapterMasteryRecord | null>;
 }
 
 /** The default onboarding values, applied when the request omits them. */
@@ -307,7 +326,7 @@ export function createLearnerService(deps: LearnerServiceDeps): LearnerService {
     async updateMastery(
       actor: LearnerActor,
       input: UpdateMasteryInput,
-    ): Promise<ChapterMasteryRecord> {
+    ): Promise<ChapterMasteryRecord | null> {
       const tenantId = await authorise(actor, 'write', input.studentUserId, 'mastery');
 
       const now = clock.now();
@@ -316,7 +335,15 @@ export function createLearnerService(deps: LearnerServiceDeps): LearnerService {
         tenantId,
         chapterId: input.chapterId,
         masteryScore: clampMastery(input.masteryScore),
-        attemptIncrement: input.attemptIncrement ?? 1,
+        // D-241 — the value the caller's `masteryScore` was computed from,
+        // clamped identically so the comparison is against the same
+        // three-decimal form the column holds rather than against a raw read.
+        expectedPreviousScore:
+          input.expectedPreviousScore === null ? null : clampMastery(input.expectedPreviousScore),
+        // D-243 — REFUSED here rather than left to `attempts >= 0`, which only
+        // fires when the result would go below zero and therefore permits a
+        // decrement on any student who has practised more than once.
+        attemptIncrement: assertAttemptIncrement(input.attemptIncrement ?? 1),
         // `null` leaves the existing timestamp untouched. A mastery correction
         // that is not an attempt must not claim the student practised today —
         // the streak and the "last practised" line on the parent digest both

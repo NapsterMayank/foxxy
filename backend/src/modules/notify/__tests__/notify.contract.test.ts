@@ -3,6 +3,7 @@ import {
   NOTIFY_KIND_VALUES,
   bilingualTextSchema,
   listNotificationsQuerySchema,
+  listNotificationsResponseSchema,
   markReadResponseSchema,
   notificationSchema,
   notifyKindSchema,
@@ -76,6 +77,10 @@ describe('both languages are required ON THE WIRE (P7)', () => {
   });
 });
 
+/** One position in `(created_at desc, id desc)` — both halves, named once. */
+const CURSOR_AT = '2026-06-01T09:00:00.000Z';
+const CURSOR_ID = '11111111-1111-4111-8111-111111111111';
+
 describe('list pagination is keyset and bounded', () => {
   it('defaults to a page size a client never has to ask for', () => {
     expect(listNotificationsQuerySchema.parse({}).limit).toBe(20);
@@ -93,13 +98,64 @@ describe('list pagination is keyset and bounded', () => {
     expect(listNotificationsQuerySchema.safeParse({ limit: 0 }).success).toBe(false);
   });
 
-  it('requires the cursor to be a timestamp, not an id', () => {
-    // Keyset over `created_at desc`. An id here would scan nothing and return
-    // an empty page that looks like the end of the list.
-    expect(listNotificationsQuerySchema.safeParse({ before: 'not-a-time' }).success).toBe(false);
+  it('requires the cursor’s timestamp half to be a timestamp', () => {
+    // Keyset over `(created_at desc, id desc)`. A non-timestamp here would scan
+    // nothing and return an empty page that looks like the end of the list.
     expect(
-      listNotificationsQuerySchema.safeParse({ before: '2026-06-01T09:00:00.000Z' }).success,
+      listNotificationsQuerySchema.safeParse({
+        before: 'not-a-time',
+        beforeId: CURSOR_ID,
+      }).success,
+    ).toBe(false);
+    expect(
+      listNotificationsQuerySchema.safeParse({ before: CURSOR_AT, beforeId: CURSOR_ID }).success,
     ).toBe(true);
+  });
+
+  it('requires the cursor’s id half to be a uuid', () => {
+    expect(
+      listNotificationsQuerySchema.safeParse({ before: CURSOR_AT, beforeId: 'not-a-uuid' }).success,
+    ).toBe(false);
+  });
+
+  /**
+   * ==========================================================================
+   * D-259 — THE CURSOR IS BOTH COLUMNS OR NEITHER.
+   *
+   * This case used to assert the OPPOSITE: that `{ before }` alone parses. It
+   * did, and that was the defect. The sort is `(created_at desc, id desc)` and
+   * the cursor named only `created_at`, so two rows sharing a timestamp
+   * straddled the page boundary and the second was returned by no page at all.
+   *
+   * A half-supplied cursor is now a 400 rather than a quiet wrong answer.
+   * Accepting it would mean any client that had not been updated kept asking
+   * the exact question that skipped rows — silently, and forever.
+   * ==========================================================================
+   */
+  it('REFUSES a half-supplied cursor — the question that used to skip rows', () => {
+    expect(listNotificationsQuerySchema.safeParse({ before: CURSOR_AT }).success).toBe(false);
+    expect(listNotificationsQuerySchema.safeParse({ beforeId: CURSOR_ID }).success).toBe(false);
+    // Neither half is the first page, which is always legal.
+    expect(listNotificationsQuerySchema.safeParse({}).success).toBe(true);
+  });
+
+  it('offers both halves of the cursor together, or two nulls', () => {
+    const ended = listNotificationsResponseSchema.safeParse({
+      notifications: [],
+      nextBefore: null,
+      nextBeforeId: null,
+      unreadCount: 0,
+    });
+    expect(ended.success).toBe(true);
+
+    // The response type requires both keys, so a server that emitted only the
+    // timestamp — the shape before D-259 — fails to satisfy its own contract.
+    const halfCursor = listNotificationsResponseSchema.safeParse({
+      notifications: [],
+      nextBefore: CURSOR_AT,
+      unreadCount: 0,
+    });
+    expect(halfCursor.success).toBe(false);
   });
 });
 

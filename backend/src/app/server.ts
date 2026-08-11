@@ -33,6 +33,26 @@ export interface ServerOptions {
 }
 
 /**
+ * The config value in the shape Fastify's option takes — D-227.
+ *
+ * A copy rather than the frozen array, because Fastify's type is a mutable
+ * `string[]` and handing it a frozen one would be a lie the compiler cannot
+ * see. `false` and a hop count pass through unchanged.
+ *
+ * `true` is not reachable from here by construction: `Config['http']`'s union
+ * is `false | readonly string[] | number`, so "believe everyone" is not a value
+ * this function can produce. That is the defect closed in the type rather than
+ * in a review comment.
+ */
+function toFastifyTrustProxy(value: false | readonly string[] | number): boolean | string[] | number {
+  // Narrowed by TYPE rather than by `Array.isArray`, which widens a readonly
+  // tuple to `any[]` and costs the type safety this function exists to keep.
+  if (value === false) return false;
+  if (typeof value === 'number') return value;
+  return [...value];
+}
+
+/**
  * Builds the Fastify instance.
  *
  * Session validation is NOT registered here as a global plugin. It belongs to
@@ -50,7 +70,35 @@ export async function createServer(
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: false,
-    trustProxy: true,
+    /**
+     * WHOSE `X-Forwarded-For` WE BELIEVE — D-227.
+     *
+     * =======================================================================
+     * THIS WAS `true`, AND `true` MEANS "BELIEVE ANY CLIENT".
+     *
+     * `request.ip` is what every IP-keyed rate limit is hashed from — signup
+     * 3/h, login 5/15min, forgot-password 3/h — via `hashIp`. With
+     * `trustProxy: true` Fastify takes the leftmost address of a header the
+     * CLIENT supplies, so a caller that sends a different forged
+     * `X-Forwarded-For` on every request lands in a different bucket on every
+     * request. All three limits collapse to no limit at all, and there is no
+     * error, no log line and no metric: the limiter is still installed, still
+     * counting, and counting a fresh key each time. That is the ninth instance
+     * of this codebase's recurring shape — enforcement that looks present and
+     * enforces nothing.
+     *
+     * =======================================================================
+     * THE DEFAULT IS NOW "TRUST NOBODY", AND THAT IS THE SAFE WRONG ANSWER.
+     *
+     * `config.http.trustProxy` is `false` unless an operator has configured
+     * `TRUSTED_PROXY_CIDRS` or `TRUSTED_PROXY_HOPS`. Unconfigured behind a
+     * proxy, every request keys on the proxy's socket address, so the whole
+     * fleet shares one bucket and the limits are too STRICT. That is a visible,
+     * complainable failure. Trusting a forged header is an invisible one, and
+     * between a default that over-blocks and a default that silently stops
+     * blocking, only one of them gets noticed.
+     */
+    trustProxy: toFastifyTrustProxy(container.config.http.trustProxy),
     bodyLimit: 1_048_576, // 1 MiB
     // §12: a request arriving mid-drain is answered 503 rather than accepted
     // into a server that is closing. This is Fastify's default; it is stated
@@ -107,6 +155,10 @@ export async function createServer(
     env: container.config.env,
     now: () => container.clock.now(),
     checkDatabase: () => container.databaseProbe.check(),
+    // D-230 — readiness covers the cache too. Without it a replica whose
+    // Valkey is gone stays in rotation answering logins on a per-instance
+    // rate-limit fallback that admits N x the configured limit.
+    checkCache: () => container.cacheProbe.check(),
     breakers: () => container.resilience.snapshots(),
     // §5 — the counters behind the breaker states. Read from the live process's
     // memory, never from `metrics_events`: this endpoint has to be answerable

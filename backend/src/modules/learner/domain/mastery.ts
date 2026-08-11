@@ -95,6 +95,70 @@ export function fromMasteryColumn(value: string | number): number {
 }
 
 /**
+ * REFUSES AN ATTEMPT INCREMENT THAT WOULD MOVE THE COUNTER BACKWARDS.
+ *
+ * ===========================================================================
+ * WHY THIS IS A SEPARATE, EXPORTED FUNCTION AND NOT A LINE INSIDE
+ * `nextAttemptCount` — D-243.
+ *
+ * `nextAttemptCount` is the pure arithmetic and it has ALWAYS rejected a
+ * negative increment. It was never called on the write path. The write path is
+ * `learner.service.updateMastery` -> `repository.upsertMastery`, which
+ * increments IN SQL (`attempts + $n`) precisely so that two concurrent writers
+ * cannot lose the update — and SQL will happily add a negative number.
+ *
+ * WHAT THE DATABASE ACTUALLY DOES, MEASURED RATHER THAN ASSUMED. An earlier
+ * draft of this note claimed the `chapter_mastery_attempts_check` CHECK
+ * (`attempts >= 0`) does not close the hole, on the reasoning that it fires
+ * only when the RESULT goes below zero — so `attempts = 7` with an increment of
+ * `-3` would land 4 and be accepted. THAT IS FALSE FOR THIS STATEMENT, and the
+ * probe is one line:
+ *
+ *     insert into t (..., attempts) values (..., -3)
+ *       on conflict (...) do update set attempts = t.attempts + -3;
+ *     -- ERROR: new row violates check constraint
+ *     -- DETAIL: Failing row contains (1, 1, -3).
+ *
+ * Postgres evaluates a CHECK when it FORMS the tuple, before it detects the
+ * conflict, and `upsertMastery` puts the raw increment in the INSERT's VALUES.
+ * So a negative increment trips the constraint every time, whatever the stored
+ * count is.
+ *
+ * WHICH LEAVES A REAL, SMALLER REASON — and it is worth stating precisely,
+ * because a guard justified by a gap that does not exist is a guard the next
+ * reader deletes:
+ *
+ *   1. WITHOUT this, the failure is an unhandled driver error escaping the
+ *      repository — a 500 naming an internal constraint. WITH it, the caller
+ *      gets a named `ValidationError`, which is a 400 that says what was wrong.
+ *      "Attempts cannot go backwards" is a fact about the domain, and the
+ *      domain is where it should be stated.
+ *   2. The constraint's protection is INCIDENTAL TO THE STATEMENT'S SHAPE. It
+ *      holds because the increment happens to travel in the INSERT's VALUES;
+ *      rewrite `upsertMastery` as a plain UPDATE — a perfectly reasonable
+ *      change once every row is guaranteed to exist — and `7 + (-3) = 4`
+ *      really would be accepted, silently, with the evidence label a parent
+ *      reads computed from the smaller count.
+ *
+ * So the refusal lives HERE, at the domain boundary, where every caller of
+ * `updateMastery` passes through it whether or not the row already exists and
+ * whatever shape the statement underneath it takes.
+ * ===========================================================================
+ *
+ * Returns the increment so it can be used inline at a call site, which is what
+ * makes "the value that was validated is the value that was written" true by
+ * construction rather than by two adjacent statements agreeing.
+ */
+export function assertAttemptIncrement(increment: number): number {
+  if (!Number.isInteger(increment) || increment < 0) {
+    throw new ValidationError('An attempt increment cannot be negative.', {
+      message: `assertAttemptIncrement received increment=${String(increment)}`,
+    });
+  }
+  return increment;
+}
+
+/**
  * The attempt counter after one more attempt.
  *
  * Trivial, and named anyway: it is the one place that decides whether an
@@ -107,10 +171,5 @@ export function nextAttemptCount(current: number, increment = 1): number {
       message: `nextAttemptCount received current=${String(current)}`,
     });
   }
-  if (!Number.isInteger(increment) || increment < 0) {
-    throw new ValidationError('An attempt increment cannot be negative.', {
-      message: `nextAttemptCount received increment=${String(increment)}`,
-    });
-  }
-  return current + increment;
+  return current + assertAttemptIncrement(increment);
 }

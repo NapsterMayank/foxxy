@@ -36,6 +36,15 @@ export type {
 export { MODULE_POOLS, poolFor } from './module-pools';
 export type { ModuleName } from './module-pools';
 export { createDatabaseProbe } from './health';
-export type { DatabaseHealth, DatabaseProbe } from './health';
+export type {
+  DatabaseFailure,
+  DatabaseHealth,
+  DatabaseProbe,
+  DatabaseProbeOptions,
+} from './health';
+export { evaluateMigrationState, readMigrationManifest } from './migration-manifest';
+export type { MigrationManifest, MigrationState } from './migration-manifest';
+export { poolBudgetTotal, resolvePoolSizes } from './pool-budget';
+export type { ProcessRole } from './pool-budget';
 export { citext, vector } from './column-types';
 export * as schema from './schema/index';

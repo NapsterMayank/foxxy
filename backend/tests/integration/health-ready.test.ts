@@ -78,18 +78,46 @@ describe('GET /health/ready — against a real migrated database', () => {
     expect(response.statusCode).toBe(200);
   });
 
-  it('reports every check as passing', async () => {
+  /**
+   * D-229 — THE BODY IS A STATUS AND NOTHING ELSE, and that is the assertion.
+   *
+   * This used to read `toMatchObject({ status, checks: { database, migrations,
+   * config } })` and it is stale by DESIGN, not by accident: the `checks` map
+   * and its sibling `database` object were REMOVED because they rendered the
+   * raw pg error — carrying the host, the port and the database username — to
+   * any unauthenticated caller the moment the database went down. Restoring
+   * either of them to make this file green would re-open the leak the fix
+   * closed, so the assertion is inverted instead: the shape is now pinned as
+   * EXACTLY `{ status }`, which makes a future re-widening a failing test
+   * rather than a silent regression.
+   *
+   * The three detail legs moved to the `/health/deps` block below, which is the
+   * endpoint that exists for that question — with ONE exception, recorded
+   * honestly rather than faked:
+   *
+   *   `checks.config` HAS NO HOME ON `/health/deps` and has not been recreated.
+   *   It was vacuous where it stood: config is parsed by `parseConfig` at boot
+   *   and a process whose config did not parse never binds a socket, so nothing
+   *   can reach this route to be told `config: false`. It could only ever
+   *   report `true`. `/health/deps` reports live dependency state, and config is
+   *   not a live dependency; the boot gates in `createContainer` are what
+   *   assert it, at the only time the answer can be anything but `true`.
+   */
+  it('returns a status and NOTHING else — no checks map, no vendor detail', async () => {
     const response = await app.inject({ method: 'GET', url: '/health/ready' });
-    expect(response.json()).toMatchObject({
-      status: 'ready',
-      checks: { database: true, migrations: true, config: true },
-    });
+    expect(response.json()).toEqual({ status: 'ready' });
   });
 
-  it('reports no error', async () => {
+  it('leaks no host, port or database username on the ready path', async () => {
+    // The concrete property behind D-229, asserted against the connection
+    // string this very test is using rather than against a pattern.
     const response = await app.inject({ method: 'GET', url: '/health/ready' });
-    const body: { database: { error?: string } } = response.json();
-    expect(body.database.error).toBeUndefined();
+    const body = response.body;
+    const { hostname, port, username } = new URL(postgres.url);
+    expect(body).not.toContain(hostname);
+    expect(body).not.toContain(port);
+    expect(body).not.toContain(username);
+    expect(body).not.toMatch(/error|password|ECONNREFUSED/i);
   });
 });
 
@@ -99,6 +127,43 @@ describe('GET /health/deps — against a real migrated database', () => {
     expect(response.json()).toMatchObject({
       database: { reachable: true, migrationsApplied: true },
     });
+  });
+
+  /**
+   * `checks.database` / `checks.migrations` from the old `/health/ready` body,
+   * rehomed. Same two facts, on the endpoint whose job it is to carry them.
+   */
+  it('carries the per-dependency detail that readiness deliberately dropped', async () => {
+    const response = await app.inject({ method: 'GET', url: '/health/deps' });
+    expect(response.json()).toMatchObject({
+      database: { reachable: true, migrationsApplied: true, failure: null },
+      cache: { reachable: true, failure: null },
+    });
+  });
+
+  /**
+   * The old `reports no error` case. `failure` replaced the free-text `error`
+   * string and is a CLOSED UNION — 'unreachable' | 'timeout' |
+   * 'schema_incomplete' — which is why it cannot grow a hostname: it is not a
+   * string field. This asserts both halves: healthy is `null`, and the field
+   * is incapable of carrying vendor text.
+   */
+  it('names WHICH dependency is unhealthy, never WHY in vendor terms', async () => {
+    const response = await app.inject({ method: 'GET', url: '/health/deps' });
+    const body: {
+      database: { failure: string | null; error?: string };
+      cache: { failure: string | null; error?: string };
+    } = response.json();
+
+    expect(body.database.failure).toBeNull();
+    expect(body.cache.failure).toBeNull();
+    // The free-text field is gone from both, not merely empty.
+    expect(body.database).not.toHaveProperty('error');
+    expect(body.cache).not.toHaveProperty('error');
+
+    const { hostname, username } = new URL(postgres.url);
+    expect(response.body).not.toContain(hostname);
+    expect(response.body).not.toContain(username);
   });
 
   it('reports live counts for all four pools', async () => {
@@ -131,10 +196,28 @@ describe('the migration bookkeeping is what readiness actually checks', () => {
     // against an unmigrated-looking database.
     await postgres.client.query('alter schema drizzle rename to drizzle_parked');
     try {
+      // READINESS: the status code and the coarse status word. That is the
+      // whole contract — a load balancer reads the code and nothing else, and
+      // D-229 removed the body detail because the body reached anyone who
+      // could open a socket, at exactly the moment it had most to give away.
       const response = await app.inject({ method: 'GET', url: '/health/ready' });
       expect(response.statusCode).toBe(503);
-      expect(response.json()).toMatchObject({
-        checks: { database: true, migrations: false },
+      expect(response.json()).toEqual({ status: 'not_ready' });
+
+      // DEPS: the same distinction the old `checks: { database: true,
+      // migrations: false }` drew, rehomed — and strictly sharper, because it
+      // also pins WHICH classification the probe chose. `database: true,
+      // migrations: false` and `schema_incomplete` say the same thing; only
+      // the latter separates "unmigrated" from "unreachable" and "timeout",
+      // which are three different runbook pages.
+      const deps = await app.inject({ method: 'GET', url: '/health/deps' });
+      expect(deps.statusCode).toBe(200);
+      expect(deps.json()).toMatchObject({
+        database: {
+          reachable: true,
+          migrationsApplied: false,
+          failure: 'schema_incomplete',
+        },
       });
     } finally {
       await postgres.client.query('alter schema drizzle_parked rename to drizzle');

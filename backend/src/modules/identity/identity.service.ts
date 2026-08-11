@@ -9,6 +9,7 @@ import type { CachePort } from '@/platform/cache/index';
 import type { Clock } from '@/platform/clock/index';
 import {
   AppError,
+  DependencyError,
   ERROR_CODES,
   ForbiddenError,
   UnauthenticatedError,
@@ -17,12 +18,13 @@ import {
   isAppError,
 } from '@/platform/errors/index';
 import type { Logger } from '@/platform/logger/index';
-import type { MailPort } from '@/platform/mail/index';
+import type { MailMessage, MailPort } from '@/platform/mail/index';
 import {
   FORGOT_PASSWORD_RATE_LIMIT,
   LINK_CODE_RATE_LIMIT,
   LINK_SUBMIT_RATE_LIMIT,
   LOGIN_RATE_LIMIT,
+  LOGOUT_RATE_LIMIT,
   SIGNUP_RATE_LIMIT,
   TOKEN_ENDPOINT_RATE_LIMIT,
 } from '@/shared/constants/rate-limits';
@@ -43,11 +45,14 @@ import { checkPasswordStrength, normaliseEmail } from './domain/password';
 import {
   EMAIL_VERIFICATION_TTL_MS,
   PASSWORD_RESET_TTL_MS,
+  SESSION_IDLE_TTL_MS,
+  createIpHasher,
   expiryFrom,
   generateToken,
-  hashIp,
   hashToken,
   isExpired,
+  isPastAbsoluteLifetime,
+  sessionDeadline,
   shouldRenewSession,
   type RandomBytes,
 } from './domain/token';
@@ -130,6 +135,24 @@ const TOKEN_FAILURE_MESSAGE = 'This link is invalid or has expired.';
 /** The constant signup response body. Identical for new and existing. */
 export const SIGNUP_MESSAGE = 'Check your email to finish setting up your account.';
 
+/**
+ * Emitted when a mail send failed with `DependencyError` and was dropped rather
+ * than failing the request. ALERT ON IT: it means outbound email is degraded and
+ * users are completing signups whose verification link never arrived.
+ */
+export const MAIL_DEFERRED_METRIC = 'identity.mail.deferred';
+
+/**
+ * Emitted when a mail send failed with something that is NOT a
+ * `DependencyError` — i.e. a programming error, not an outage.
+ *
+ * A SEPARATE metric from the one above, and that separation is the whole point.
+ * "The mail provider is down" and "we constructed a message the mailer cannot
+ * accept" are different pages in a runbook, and folding the second into the
+ * first is how a permanent bug hides inside a transient-failure dashboard.
+ */
+export const MAIL_FAILED_METRIC = 'identity.mail.unexpected_failure';
+
 export interface IdentityServiceDeps {
   readonly repository: IdentityRepository;
   /**
@@ -185,8 +208,23 @@ export interface IdentityServiceDeps {
    * insert path.
    */
   readonly defaultTenantId: string;
-  /** Absolute session lifetime, from config. */
+  /**
+   * THE ABSOLUTE session lifetime, from config — the ceiling, not the window.
+   *
+   * `created_at + sessionTtlDays` is the instant a session dies no matter how
+   * often it is used. The SLIDING window inside it is `SESSION_IDLE_TTL_MS`.
+   * See D-219 and the two bounds documented on `domain/token.ts`.
+   */
   readonly sessionTtlDays: number;
+  /**
+   * THE SALT FOR EVERY IDENTIFIER HASH IN THIS MODULE — D-221.
+   *
+   * Required, not optional. Threaded from the composition edge rather than
+   * defaulted anywhere, because a default salt is the same as no salt: it would
+   * be in the source, and the digest it produces would be the one an attacker
+   * precomputed. See `hashIp`.
+   */
+  readonly ipHashSalt: string;
   /** Where the links in outbound email point. */
   readonly urls: {
     /** Backend origin — the verify endpoint lives here. */
@@ -200,7 +238,11 @@ export interface IdentityService {
   signup(input: SignupRequest, context: RequestContext): Promise<void>;
   verifyEmail(token: string, context: RequestContext): Promise<AuthenticatedResult>;
   login(input: LoginRequest, context: RequestContext): Promise<AuthenticatedResult>;
-  logout(token: string | undefined): Promise<void>;
+  /**
+   * Rate limited by IP, and the context is REQUIRED for that reason (D-220).
+   * An optional context would make the limit optional at every call site.
+   */
+  logout(token: string | undefined, context: RequestContext): Promise<void>;
   logoutAll(actor: SessionActor): Promise<number>;
   validateSession(token: string | undefined): Promise<SessionActor>;
   requestPasswordReset(input: ForgotPasswordRequest, context: RequestContext): Promise<void>;
@@ -261,8 +303,80 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
     logger,
     ...(deps.metrics === undefined ? {} : { metrics: deps.metrics }),
   });
-  const sessionTtlMs = deps.sessionTtlDays * 24 * 60 * 60 * 1000;
+  /** The ABSOLUTE ceiling. The sliding window is `SESSION_IDLE_TTL_MS`. */
+  const absoluteSessionTtlMs = deps.sessionTtlDays * 24 * 60 * 60 * 1000;
   const audit: AuditPort = deps.audit ?? createNoopAudit();
+  const metrics: MetricsSink = deps.metrics ?? { increment: (): void => undefined };
+  /** Every identifier hash in this module. Salted once, here — D-221. */
+  const hashIdentifier = createIpHasher(deps.ipHashSalt);
+
+  /**
+   * ============================================================================
+   * MAIL LEAVES THE REQUEST PATH — D-217 and D-218, two defects, one shape.
+   *
+   * `mail.send` used to be awaited bare at three call sites, with the user row
+   * already committed. Two things followed from that, and both were live:
+   *
+   *  1. A PROVIDER BLIP MADE SIGNUP RETURN 500 *AFTER* CREATING THE ACCOUNT.
+   *     The address was then taken, so the user could neither sign in nor sign
+   *     up again — the single worst outcome in the funnel. `guarded-mail.ts` and
+   *     `container.ts` both state the contract in as many words ("a mail outage
+   *     must degrade to 'verification queued', never 'signup fails'") and BOTH
+   *     described a catch that was never written. The comments were the whole
+   *     implementation.
+   *
+   *  2. IT WAS A LATENCY ORACLE. `requestPasswordReset` returned immediately for
+   *     an unknown address and did an SMTP round trip for a known one. The two
+   *     response BODIES are byte-identical — a test asserts it — and the TIMING
+   *     was not, which defeats the enumeration defence the endpoint exists to
+   *     provide. Signup had the same asymmetry.
+   *
+   * Deferring closes both at once, and closes the second one properly: the send
+   * no longer contributes to the response time of EITHER branch, so there is
+   * nothing left to equalise.
+   *
+   * WHAT "DEFERRED" MEANS HERE, precisely, because it is weaker than a queue and
+   * should not be mistaken for one: the send is started and not awaited, and the
+   * process may exit before it completes. That is acceptable because the
+   * RECOVERY PATH ALREADY EXISTS AND DOES NOT DEPEND ON IT — the verification and
+   * reset tokens are committed rows, so a resend re-mails the token that is
+   * already persisted. Losing a send costs one email, never an account.
+   * `platform/jobs` is the right home the day a resend endpoint is not enough;
+   * that is a cross-module change and is reported rather than smuggled in here.
+   *
+   * A NON-`DependencyError` IS NOT SWALLOWED. `DependencyError` means the
+   * provider failed — expected, transient, `warn`. Anything else is a
+   * programming error in OUR message, and it is logged at `error` under its own
+   * metric so it surfaces as a bug rather than as weather. It cannot surface as
+   * a 500 any more, because nothing is waiting for it; that is the price of
+   * taking mail off the request path and it is paid deliberately.
+   */
+  function deferMail(message: MailMessage, event: string): void {
+    void mail.send(message).then(
+      () => undefined,
+      (error: unknown) => {
+        if (error instanceof DependencyError) {
+          logger.warn(
+            // NEVER the recipient and never `message.data` — the data carries
+            // the verification token, which is a live credential.
+            { event, template: message.template, dependency: error.dependency },
+            'mail send failed; the request completed and the token is persisted for a resend',
+          );
+          metrics.increment(MAIL_DEFERRED_METRIC, { template: message.template });
+          return;
+        }
+        logger.error(
+          {
+            event,
+            template: message.template,
+            err: error instanceof Error ? error.message : 'non-error thrown by the mail port',
+          },
+          'mail send failed for a reason that is not a dependency outage',
+        );
+        metrics.increment(MAIL_FAILED_METRIC, { template: message.template });
+      },
+    );
+  }
 
   /**
    * Builds the access guard for ONE decision, with the link status read now.
@@ -309,13 +423,17 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
     const now = clock.now();
     // §6.10, session fixation: a FRESH token on every login. Nothing is reused.
     const { token, hash } = generateToken(deps.randomBytes);
-    const expiresAt = expiryFrom(now, sessionTtlMs);
+    // `now` is also the row's `created_at` (the insert below carries no explicit
+    // one, and the column defaults to the transaction clock), so at issue time
+    // the sliding window is the binding bound and the ceiling is 30 days out.
+    const expiresAt = sessionDeadline(now, now, SESSION_IDLE_TTL_MS, absoluteSessionTtlMs);
 
     await repository.createSession({
       userId: user.id,
       tokenHash: hash,
       expiresAt,
       lastUsedAt: now,
+      createdAt: now,
       ipHash: context.ipHash,
       userAgent: context.userAgent,
     });
@@ -366,11 +484,18 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
       } catch (error) {
         if (isAppError(error) && error.code === ERROR_CODES.CONFLICT) {
           // The address is taken. Tell its owner, tell the caller nothing.
-          await mail.send({
-            to: email,
-            template: 'signup-attempt-on-existing-account',
-            data: { appUrl: urls.appBaseUrl },
-          });
+          //
+          // DEFERRED, exactly like the branch below. If this one waited for the
+          // mailer and the other did not, the identical-body defence would be
+          // undone by the clock — see `deferMail`.
+          deferMail(
+            {
+              to: email,
+              template: 'signup-attempt-on-existing-account',
+              data: { appUrl: urls.appBaseUrl },
+            },
+            'signup.existing_address_mail_failed',
+          );
           logger.info(
             { event: 'signup.existing_address' },
             'signup attempted on an existing address',
@@ -388,13 +513,18 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
         expiresAt: expiryFrom(now, EMAIL_VERIFICATION_TTL_MS),
       });
 
-      await mail.send({
-        to: email,
-        template: 'email-verification',
-        data: {
-          verifyUrl: `${urls.apiBaseUrl}/api/v1/auth/verify?token=${encodeURIComponent(token)}`,
+      // The token row is COMMITTED above, so a send that never happens is
+      // recoverable by a resend. That ordering is what makes deferring safe.
+      deferMail(
+        {
+          to: email,
+          template: 'email-verification',
+          data: {
+            verifyUrl: `${urls.apiBaseUrl}/api/v1/auth/verify?token=${encodeURIComponent(token)}`,
+          },
         },
-      });
+        'signup.verification_mail_failed',
+      );
 
       logger.info({ event: 'signup.created', role: input.role }, 'account created');
     },
@@ -454,7 +584,7 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
      */
     async login(input: LoginRequest, context: RequestContext): Promise<AuthenticatedResult> {
       const email = normaliseEmail(input.email);
-      const emailKey = hashIp(email);
+      const emailKey = hashIdentifier(email);
 
       await limiter.consume(rateLimitKeys.loginByIp(context.ipHash), LOGIN_RATE_LIMIT);
       await limiter.consume(rateLimitKeys.loginByEmail(emailKey), LOGIN_RATE_LIMIT);
@@ -496,8 +626,23 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
      * Deliberately silent when the token is absent or unknown: logout is
      * idempotent, and reporting "that session did not exist" would turn the
      * endpoint into a token oracle.
+     *
+     * RATE LIMITED BY IP, AND THE ORDER OF THE NEXT FOUR LINES IS THE FIX —
+     * D-220. This is the only endpoint that is both unauthenticated (by design:
+     * logging out of a dead session must succeed, not 401) and able to reach the
+     * database, and the database it reaches is the `auth` POOL — the one pool
+     * §3.1's bulkhead exists to keep free so that login always has a connection.
+     * Unthrottled, a loop from one host with no credentials starved the pool
+     * that authentication depends on.
+     *
+     * The limiter runs FIRST and the empty-token return runs SECOND, so a flood
+     * is counted whether or not it carries a cookie. The empty-token return is
+     * before any repository call, so a cookie-less request touches the cache and
+     * NOTHING ELSE — it consumes no `auth` connection at all. A test asserts
+     * exactly that, against a repository that fails on any call.
      */
-    async logout(token: string | undefined): Promise<void> {
+    async logout(token: string | undefined, context: RequestContext): Promise<void> {
+      await limiter.consume(rateLimitKeys.logoutByIp(context.ipHash), LOGOUT_RATE_LIMIT);
       if (token === undefined || token.length === 0) return;
       await repository.deleteSessionByTokenHash(hashToken(token));
     },
@@ -533,9 +678,11 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
      * routes start reading fields off it, and control over what gets loaded is
      * lost one convenient property at a time.
      *
-     * Sliding renewal: when the session has not been touched for 24 hours, its
-     * absolute expiry is pushed out. Active users are never logged out; an
-     * abandoned session still dies on the 30-day ceiling.
+     * Sliding renewal INSIDE an absolute ceiling (D-219): when the session has
+     * not been touched for 24 hours its idle deadline is pushed out, so an
+     * active user is never logged out — but the push is clamped to
+     * `created_at + 30 days`, and that ceiling is checked independently on every
+     * request. A credential that is used constantly still dies on schedule.
      */
     async validateSession(token: string | undefined): Promise<SessionActor> {
       if (token === undefined || token.length === 0) {
@@ -552,16 +699,46 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
       }
 
       const now = clock.now();
-      if (isExpired(found.session.expiresAt, now)) {
+
+      /**
+       * TWO BOUNDS, AND THE SECOND ONE IS THE FIX — D-219.
+       *
+       *   the SLIDING bound   `expires_at`, which renewal below pushes forward.
+       *   the ABSOLUTE bound  `created_at + 30 days`, which nothing moves.
+       *
+       * Only the sliding bound existed. Renewal replaced `expires_at` with
+       * `now + 30 days` and no code path ever read `created_at`, so a stolen
+       * token used once per 24-hour renewal interval was a PERMANENT credential
+       * — while the comment three lines above claimed "an abandoned session
+       * still dies on the 30-day ceiling". The ceiling was never checked.
+       *
+       * The absolute check is first and is evaluated independently of
+       * `expires_at`, because every session issued before this fix carries an
+       * unclamped `expires_at` that may sit past its own ceiling. Clamping the
+       * write alone would leave those rows immortal.
+       */
+      const pastCeiling = isPastAbsoluteLifetime(found.session.createdAt, now, absoluteSessionTtlMs);
+      if (pastCeiling || isExpired(found.session.expiresAt, now)) {
         // Reap it rather than leave a dead row that will be looked up again.
         await repository.deleteSessionByTokenHash(hashToken(token));
         throw new UnauthenticatedError('Authentication required.', {
-          message: 'Session expired',
+          // Log-side only. Which bound fired is a real operational difference —
+          // "signed out after two weeks idle" and "signed out at 30 days" are
+          // different support conversations — and neither reaches the client.
+          message: pastCeiling
+            ? 'Session past its absolute lifetime'
+            : 'Session expired (idle window)',
         });
       }
 
       if (shouldRenewSession(found.session.lastUsedAt, now)) {
-        await repository.renewSession(found.session.id, now, expiryFrom(now, sessionTtlMs));
+        // CLAMPED to the ceiling. Renewal may extend the idle window; it may
+        // never extend the lifetime.
+        await repository.renewSession(
+          found.session.id,
+          now,
+          sessionDeadline(found.session.createdAt, now, SESSION_IDLE_TTL_MS, absoluteSessionTtlMs),
+        );
       }
 
       return { userId: found.userId, role: found.role, tenantId: found.tenantId };
@@ -573,16 +750,39 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
      *
      * The rate limit is keyed by IP and by email so that this cannot be turned
      * into a mail bomb aimed at one address.
+     *
+     * IT WAS A LATENCY ORACLE — D-218. The bodies were byte-identical (a test
+     * asserts it) and the TIMING was not: an unknown address returned after one
+     * indexed SELECT, a known one after a token insert AND a synchronous SMTP
+     * round trip. Hundreds of milliseconds, measurable from anywhere, on the
+     * exact question the identical body exists to hide.
+     *
+     * Two changes close it, in order of how much they matter:
+     *
+     *  1. THE SEND IS OFF THE REQUEST PATH (`deferMail`). It was the dominant
+     *     term by two orders of magnitude, and equalising it was never possible
+     *     — there is no address to mail on the unknown branch.
+     *  2. THE TOKEN IS GENERATED ON BOTH BRANCHES, before the branch, in the
+     *     same spirit as login's dummy Argon2 verification. It costs one
+     *     `randomBytes` call and one SHA-256 either way.
+     *
+     * What remains is ONE indexed INSERT on the known branch — sub-millisecond,
+     * and far below the jitter of any network an attacker would measure across.
+     * A median-ratio test pins the property the same way login's does.
      */
     async requestPasswordReset(
       input: ForgotPasswordRequest,
       context: RequestContext,
     ): Promise<void> {
       const email = normaliseEmail(input.email);
-      const emailKey = hashIp(email);
+      const emailKey = hashIdentifier(email);
 
       await limiter.consume(rateLimitKeys.forgotByIp(context.ipHash), FORGOT_PASSWORD_RATE_LIMIT);
       await limiter.consume(rateLimitKeys.forgotByEmail(emailKey), FORGOT_PASSWORD_RATE_LIMIT);
+
+      const now = clock.now();
+      // BEFORE the lookup's branch, on both paths. See point 2 above.
+      const { token, hash } = generateToken(deps.randomBytes);
 
       const user = await repository.findUserByEmail(email);
       if (user === null) {
@@ -590,21 +790,22 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
         return;
       }
 
-      const now = clock.now();
-      const { token, hash } = generateToken(deps.randomBytes);
       await repository.createPasswordResetToken({
         userId: user.id,
         tokenHash: hash,
         expiresAt: expiryFrom(now, PASSWORD_RESET_TTL_MS),
       });
 
-      await mail.send({
-        to: email,
-        template: 'password-reset',
-        data: { resetUrl: `${urls.appBaseUrl}/reset-password?token=${encodeURIComponent(token)}` },
-      });
+      deferMail(
+        {
+          to: email,
+          template: 'password-reset',
+          data: { resetUrl: `${urls.appBaseUrl}/reset-password?token=${encodeURIComponent(token)}` },
+        },
+        'forgot_password.mail_failed',
+      );
 
-      logger.info({ event: 'forgot_password.sent' }, 'reset email sent');
+      logger.info({ event: 'forgot_password.sent' }, 'reset email queued');
     },
 
     /**

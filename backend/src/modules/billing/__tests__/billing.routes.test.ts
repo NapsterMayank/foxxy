@@ -10,6 +10,7 @@ import { WEBHOOK_PATH_PATTERN } from '../../../app/plugins/origin-check';
 import { createServer } from '../../../app/server';
 import { BILLING_WEBHOOK_PATH, createBillingModule } from '../index';
 import {
+  createBillingTestRateLimiter,
   HARNESS_ORIGIN,
   TEST_COOKIE_NAME,
   onboard,
@@ -352,6 +353,8 @@ describe('rule 4 — a failure returns 5xx so the provider retries', () => {
       readTenantOfUser: (userId) => harness.identity.service.getTenantOfUser(userId),
       resolvePayer: (subjectUserId) => Promise.resolve({ kind: 'user', id: subjectUserId }),
       audit: harness.audit,
+      // D-258 — a real limiter, built exactly as the composition root builds it.
+      rateLimiter: createBillingTestRateLimiter(harness.cache, harness.clock, harness.logger),
     });
 
     brokenApp = await createServer(harness.container, { modules: { identity: harness.identity } });

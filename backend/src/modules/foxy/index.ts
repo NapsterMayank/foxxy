@@ -114,13 +114,24 @@ export interface FoxyModuleDeps {
   readonly readStudentContext: StudentContextReader;
   readonly readLanguage: LanguageReader;
   /**
-   * `billing.getEntitlements`, once it exists.
+   * `billing.getEntitlements`, translated into an allowance.
    *
-   * Defaults to a reader that reports no subscription, which the service reads
-   * as `free`. STATED AS A DEFAULT rather than hidden as one: the day billing
-   * lands, `app/routes.ts` supplies the real reader and nothing else changes.
+   * ==========================================================================
+   * REQUIRED, NOT OPTIONAL, AND THAT IS THE STRUCTURAL HALF OF D-257.
+   *
+   * It was optional, defaulting to a reader that reported no subscription —
+   * i.e. the free tier — and `app/routes.ts` then ALSO passed an explicit
+   * `() => null` with a comment saying billing was a later build step. Billing
+   * shipped; neither line was revisited; every paying customer kept the
+   * 20-message free cap and nothing anywhere reported it.
+   *
+   * An optional dependency whose default is "the cheapest tier" is a silent
+   * revenue defect waiting for somebody to forget one line. Making it required
+   * means a construction site that has not answered the question DOES NOT
+   * COMPILE — which is the only form of "don't forget" this codebase trusts.
+   * ==========================================================================
    */
-  readonly readPlan?: PlanReader;
+  readonly readPlan: PlanReader;
   /**
    * The model id stamped on every trace row.
    *
@@ -149,7 +160,7 @@ export function createFoxyModule(deps: FoxyModuleDeps): FoxyModule {
     readTenantOfStudent: deps.readTenantOfStudent,
     readStudentContext: deps.readStudentContext,
     readLanguage: deps.readLanguage,
-    readPlan: deps.readPlan ?? ((): Promise<null> => Promise.resolve(null)),
+    readPlan: deps.readPlan,
     model: deps.model,
   });
 

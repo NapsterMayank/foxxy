@@ -9,6 +9,8 @@ export {
   createRateLimiter,
   InProcessRateLimitCounters,
   DEFAULT_FALLBACK_METRIC,
+  RATE_LIMIT_COUNTER_EVICTED_METRIC,
+  WindowDeadlines,
   type MetricsSink,
   type RateLimiter,
   type RateLimiterDeps,

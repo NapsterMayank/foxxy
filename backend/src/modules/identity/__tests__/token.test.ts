@@ -1,16 +1,22 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { FixedClock } from '@/platform/clock/index';
 import {
   EMAIL_VERIFICATION_TTL_MS,
   PASSWORD_RESET_TTL_MS,
+  SESSION_IDLE_TTL_MS,
   SESSION_RENEW_AFTER_MS,
   TOKEN_BYTE_LENGTH,
   TOKEN_STRING_LENGTH,
+  absoluteSessionDeadline,
+  createIpHasher,
   expiryFrom,
   generateToken,
   hashIp,
   hashToken,
   isExpired,
+  isPastAbsoluteLifetime,
+  sessionDeadline,
   shouldRenewSession,
 } from '../domain/token';
 
@@ -199,20 +205,89 @@ describe('shouldRenewSession — the 24-hour sliding window', () => {
 });
 
 describe('hashIp', () => {
+  const SALT = 'test-salt';
+
   it('never returns the address it was given', () => {
-    expect(hashIp('203.0.113.9')).not.toContain('203.0.113.9');
+    expect(hashIp('203.0.113.9', SALT)).not.toContain('203.0.113.9');
   });
 
   it('is deterministic, so it can key a rate-limit counter', () => {
-    expect(hashIp('203.0.113.9')).toBe(hashIp('203.0.113.9'));
+    expect(hashIp('203.0.113.9', SALT)).toBe(hashIp('203.0.113.9', SALT));
   });
 
   it('differs between addresses', () => {
-    expect(hashIp('203.0.113.9')).not.toBe(hashIp('203.0.113.10'));
+    expect(hashIp('203.0.113.9', SALT)).not.toBe(hashIp('203.0.113.10', SALT));
   });
 
   it('is a fixed 32 hex characters regardless of address length', () => {
-    expect(hashIp('::1')).toMatch(/^[0-9a-f]{32}$/);
-    expect(hashIp('2001:0db8:0000:0000:0000:ff00:0042:8329')).toMatch(/^[0-9a-f]{32}$/);
+    expect(hashIp('::1', SALT)).toMatch(/^[0-9a-f]{32}$/);
+    expect(hashIp('2001:0db8:0000:0000:0000:ff00:0042:8329', SALT)).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  /**
+   * D-221 — THE SALT MUTATION.
+   *
+   * `hashIp` was `sha256(ip)`. The four assertions above all pass against that
+   * version: it is deterministic, it differs between addresses, it is 32 hex
+   * characters, and it does not contain the input. Every property a hash is
+   * supposed to have, and none of them is the one that matters — 2^32 IPv4
+   * addresses is a table you build over lunch.
+   *
+   * These two assertions are the ones that go red if the salt is dropped from
+   * the digest, and they are the reason the parameter has no default value.
+   */
+  it('IS NOT THE BARE SHA-256 OF THE ADDRESS', () => {
+    const unsalted = createHash('sha256').update('203.0.113.9', 'utf8').digest('hex').slice(0, 32);
+    expect(hashIp('203.0.113.9', SALT)).not.toBe(unsalted);
+  });
+
+  it('produces a different digest under a different salt, so rotation works', () => {
+    expect(hashIp('203.0.113.9', SALT)).not.toBe(hashIp('203.0.113.9', 'a-different-salt'));
+  });
+
+  it('cannot be constructed with an empty salt', () => {
+    expect(() => createIpHasher('')).toThrow(RangeError);
+  });
+
+  it('createIpHasher binds the salt and agrees with hashIp', () => {
+    expect(createIpHasher(SALT)('203.0.113.9')).toBe(hashIp('203.0.113.9', SALT));
+  });
+});
+
+describe('the two session bounds — D-219', () => {
+  const ABSOLUTE = 30 * 24 * 60 * 60 * 1000;
+  const IDLE = SESSION_IDLE_TTL_MS;
+  const CREATED = new Date('2026-06-01T00:00:00.000Z');
+
+  it('keeps the sliding window shorter than the ceiling, or renewal means nothing', () => {
+    expect(IDLE).toBeLessThan(ABSOLUTE);
+  });
+
+  it('writes the sliding deadline while there is room under the ceiling', () => {
+    const deadline = sessionDeadline(CREATED, CREATED, IDLE, ABSOLUTE);
+    expect(deadline.getTime()).toBe(CREATED.getTime() + IDLE);
+  });
+
+  it('CLAMPS the sliding deadline to the ceiling near the end of life', () => {
+    // Twenty-five days in, a full idle window would land five days past the
+    // ceiling. It must land ON the ceiling instead.
+    const now = new Date(CREATED.getTime() + 25 * 24 * 60 * 60 * 1000);
+    const deadline = sessionDeadline(CREATED, now, IDLE, ABSOLUTE);
+    expect(deadline.getTime()).toBe(CREATED.getTime() + ABSOLUTE);
+    expect(deadline.getTime()).toBeLessThan(now.getTime() + IDLE);
+  });
+
+  it('the ceiling is a function of created_at alone and never moves', () => {
+    expect(absoluteSessionDeadline(CREATED, ABSOLUTE).getTime()).toBe(
+      CREATED.getTime() + ABSOLUTE,
+    );
+  });
+
+  it('reports the ceiling as passed at exactly the ceiling, and not before', () => {
+    const ceiling = absoluteSessionDeadline(CREATED, ABSOLUTE);
+    expect(
+      isPastAbsoluteLifetime(CREATED, new Date(ceiling.getTime() - 1), ABSOLUTE),
+    ).toBe(false);
+    expect(isPastAbsoluteLifetime(CREATED, ceiling, ABSOLUTE)).toBe(true);
   });
 });

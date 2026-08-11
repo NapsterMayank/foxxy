@@ -131,6 +131,7 @@ describe('createProfile — onboarding is idempotent (§8.2)', () => {
       studentUserId: student.userId,
       chapterId,
       masteryScore: 0.6,
+      expectedPreviousScore: null,
     });
 
     await harness.learner.service.createProfile(actorOf(student), ONBOARDING);
@@ -427,9 +428,10 @@ describe('updateMastery — the clamp, against a real CHECK constraint', () => {
       studentUserId: student.userId,
       chapterId,
       masteryScore: 0.42,
+      expectedPreviousScore: null,
     });
-    expect(record.masteryScore).toBe(0.42);
-    expect(record.attempts).toBe(1);
+    expect(record?.masteryScore).toBe(0.42);
+    expect(record?.attempts).toBe(1);
   });
 
   it('CLAMPS an above-range score to 1 instead of hitting the constraint', async () => {
@@ -440,8 +442,9 @@ describe('updateMastery — the clamp, against a real CHECK constraint', () => {
       studentUserId: student.userId,
       chapterId,
       masteryScore: 1.4,
+      expectedPreviousScore: null,
     });
-    expect(record.masteryScore).toBe(1);
+    expect(record?.masteryScore).toBe(1);
   });
 
   it('clamps a below-range score to 0', async () => {
@@ -449,8 +452,9 @@ describe('updateMastery — the clamp, against a real CHECK constraint', () => {
       studentUserId: student.userId,
       chapterId,
       masteryScore: -0.5,
+      expectedPreviousScore: null,
     });
-    expect(record.masteryScore).toBe(0);
+    expect(record?.masteryScore).toBe(0);
   });
 
   it('ACCUMULATES attempts across calls rather than overwriting them', async () => {
@@ -461,15 +465,17 @@ describe('updateMastery — the clamp, against a real CHECK constraint', () => {
       studentUserId: student.userId,
       chapterId,
       masteryScore: 0.3,
+      expectedPreviousScore: null,
     });
     const second = await harness.learner.service.updateMastery(actorOf(student), {
       studentUserId: student.userId,
       chapterId,
       masteryScore: 0.5,
+      expectedPreviousScore: 0.3,
     });
 
-    expect(second.attempts).toBe(2);
-    expect(second.masteryScore).toBe(0.5);
+    expect(second?.attempts).toBe(2);
+    expect(second?.masteryScore).toBe(0.5);
   });
 
   it('stamps last_practised_at from the injected clock', async () => {
@@ -477,8 +483,9 @@ describe('updateMastery — the clamp, against a real CHECK constraint', () => {
       studentUserId: student.userId,
       chapterId,
       masteryScore: 0.3,
+      expectedPreviousScore: null,
     });
-    expect(record.lastPractisedAt?.toISOString()).toBe(harness.clock.now().toISOString());
+    expect(record?.lastPractisedAt?.toISOString()).toBe(harness.clock.now().toISOString());
   });
 
   it('leaves last_practised_at alone for a correction that is not an attempt', async () => {
@@ -488,6 +495,7 @@ describe('updateMastery — the clamp, against a real CHECK constraint', () => {
       studentUserId: student.userId,
       chapterId,
       masteryScore: 0.3,
+      expectedPreviousScore: null,
     });
     const practisedAt = harness.clock.now().toISOString();
 
@@ -496,12 +504,13 @@ describe('updateMastery — the clamp, against a real CHECK constraint', () => {
       studentUserId: student.userId,
       chapterId,
       masteryScore: 0.35,
+      expectedPreviousScore: 0.3,
       attemptIncrement: 0,
       practised: false,
     });
 
-    expect(corrected.lastPractisedAt?.toISOString()).toBe(practisedAt);
-    expect(corrected.attempts).toBe(1);
+    expect(corrected?.lastPractisedAt?.toISOString()).toBe(practisedAt);
+    expect(corrected?.attempts).toBe(1);
   });
 
   it('DENIES writing mastery onto another student', async () => {
@@ -511,6 +520,7 @@ describe('updateMastery — the clamp, against a real CHECK constraint', () => {
         studentUserId: student.userId,
         chapterId,
         masteryScore: 1,
+        expectedPreviousScore: null,
       }),
     ).rejects.toBeInstanceOf(ForbiddenError);
   });
@@ -538,6 +548,7 @@ describe('getMastery', () => {
         studentUserId: student.userId,
         chapterId,
         masteryScore: number / 10,
+        expectedPreviousScore: null,
       });
     }
 
@@ -822,6 +833,7 @@ describe('every write carries the actor tenant, not the column default', () => {
       studentUserId: student.userId,
       chapterId,
       masteryScore: 0.5,
+      expectedPreviousScore: null,
     });
 
     expect(await tenantOfRow('chapter_mastery', 'student_user_id', student.userId)).toBe(

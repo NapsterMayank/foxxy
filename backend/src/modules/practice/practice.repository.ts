@@ -51,6 +51,18 @@ function fromNumeric(value: string): number {
   return Number(value);
 }
 
+/**
+ * The advisory-lock NAMESPACE for a practice submission — D-242.
+ *
+ * Postgres advisory locks live in one global space shared by the whole
+ * database. The two-argument form splits that space into (classid, objid), so
+ * this constant is what stops a lock on a student id here from colliding with
+ * some future lock on the same student id somewhere else. An arbitrary value,
+ * fixed forever: changing it would let an old connection and a new one hold
+ * "the same" lock simultaneously.
+ */
+const PRACTICE_SUBMISSION_LOCK_CLASS = 8_106;
+
 interface SessionRow {
   id: string;
   studentUserId: string;
@@ -161,6 +173,18 @@ export interface PracticeRepository {
    */
   withTransaction<T>(fn: (tx: TransactionToken) => Promise<T>): Promise<T>;
 
+  /**
+   * SERIALISES EVERY CONCURRENT SUBMISSION BY ONE STUDENT — D-242.
+   *
+   * Held until the transaction ends. Two submissions by the SAME student queue;
+   * submissions by different students never touch each other, because the key
+   * is derived from the student id.
+   *
+   * See the long note at the implementation for why the daily XP cap cannot be
+   * enforced without this.
+   */
+  lockStudent(tx: TransactionToken, studentUserId: string): Promise<void>;
+
   createSession(input: CreateSessionInput): Promise<SessionRecord>;
   findSession(sessionId: string): Promise<SessionRecord | null>;
   /** Replaces the in-flight answer accumulator. Refuses a submitted session. */
@@ -185,9 +209,18 @@ export interface PracticeRepository {
   upsertRetention(tx: TransactionToken, input: RetentionInput): Promise<void>;
 
   findHistory(studentUserId: string, limit: number): Promise<HistoryRecord[]>;
-  findRetention(studentUserId: string): Promise<RetentionRecord[]>;
+  /**
+   * `tx` reads inside the caller's transaction. Supplied by `submitSession`,
+   * which must see the schedule as it stands under the student lock rather than
+   * as it stood before the transaction opened.
+   */
+  findRetention(studentUserId: string, tx?: TransactionToken): Promise<RetentionRecord[]>;
   totalXp(studentUserId: string): Promise<number>;
-  xpSince(studentUserId: string, since: Date): Promise<number>;
+  /**
+   * `tx` reads inside the caller's transaction — REQUIRED for the daily cap.
+   * See `lockStudent` and D-242.
+   */
+  xpSince(studentUserId: string, since: Date, tx?: TransactionToken): Promise<number>;
   countCompletedSessions(studentUserId: string): Promise<number>;
   /** How many of the student's most recent answers in a chapter were wrong, in a row. */
   consecutiveWrongInChapter(studentUserId: string, chapterId: string): Promise<number>;
@@ -209,9 +242,55 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
     return executor;
   }
 
+  /** The caller's transaction when there is one, this module's pool otherwise. */
+  function readerOf(tx: TransactionToken | undefined): DbExecutor {
+    return (tx === undefined ? undefined : unwrapExecutor(tx)) ?? db;
+  }
+
   return {
     withTransaction<T>(fn: (tx: TransactionToken) => Promise<T>): Promise<T> {
       return handle.withTransaction((executor) => fn(wrapExecutor(executor)));
+    },
+
+    /**
+     * ===========================================================================
+     * THE PER-STUDENT SUBMISSION LOCK — D-242, AND WHY A READ ALONE CANNOT FIX
+     * THE DAILY XP CAP.
+     *
+     * The cap is `min(earned, 200 - alreadyEarnedToday)`, and `xp_ledger` is
+     * append-only, so `alreadyEarnedToday` is a SUM over rows. Two submissions
+     * arriving together both summed the same day, both found the same room, and
+     * both wrote — 200 became 400. A double-tap on a flaky connection is enough.
+     *
+     * MOVING THE SUM INSIDE THE TRANSACTION DOES NOT FIX IT. Under READ
+     * COMMITTED — Postgres's default, and this application's — a transaction
+     * cannot see another transaction's uncommitted insert no matter when it
+     * looks. Both would still sum the same total. The fix has to make the two
+     * submissions take turns, and nothing about an append-only table does that
+     * on its own: there is no row to lock, because the row that matters has not
+     * been inserted yet.
+     *
+     * SO THE LOCK IS EXPLICIT. `pg_advisory_xact_lock` is held to COMMIT or
+     * ROLLBACK — there is no unlock to forget and no path, including a thrown
+     * error, that leaks it. Keyed by the student, so two students never wait on
+     * each other; the same student's concurrent submissions do, which is
+     * precisely the case being made correct.
+     *
+     * THE CLASSID IS A NAMESPACE, not decoration. `pg_advisory_xact_lock` shares
+     * one global 64-bit space across the whole database, so a bare `hashtext` of
+     * a user id would collide with any other feature that happened to lock on
+     * the same id — a collision that manifests as unrelated requests blocking
+     * each other and is essentially undiagnosable. The two-argument form keys
+     * the lock by (this use, this student).
+     *
+     * `statement_timeout` is set on every pool (§4), so a pathological queue
+     * fails loudly rather than hanging.
+     * ===========================================================================
+     */
+    async lockStudent(tx: TransactionToken, studentUserId: string): Promise<void> {
+      await executorOf(tx).execute(
+        sql`select pg_advisory_xact_lock(${PRACTICE_SUBMISSION_LOCK_CLASS}, hashtext(${studentUserId}))`,
+      );
     },
 
     async createSession(input: CreateSessionInput): Promise<SessionRecord> {
@@ -387,8 +466,11 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
       return rows;
     },
 
-    async findRetention(studentUserId: string): Promise<RetentionRecord[]> {
-      const rows = await db
+    async findRetention(
+      studentUserId: string,
+      tx?: TransactionToken,
+    ): Promise<RetentionRecord[]> {
+      const rows = await readerOf(tx)
         .select()
         .from(practiceRetention)
         .where(eq(practiceRetention.studentUserId, studentUserId));
@@ -418,8 +500,17 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
       return Number(rows[0]?.total ?? 0);
     },
 
-    async xpSince(studentUserId: string, since: Date): Promise<number> {
-      const rows = await db
+    /**
+     * The XP a student has earned since an instant.
+     *
+     * READ INSIDE THE SUBMISSION TRANSACTION, under `lockStudent` — D-242. The
+     * lock is what makes the answer stable long enough to act on; reading here
+     * without it returns a number that another submission may already have
+     * invalidated. `getProgress` passes no transaction and does not need one:
+     * it displays the total, it does not decide anything from it.
+     */
+    async xpSince(studentUserId: string, since: Date, tx?: TransactionToken): Promise<number> {
+      const rows = await readerOf(tx)
         .select({ total: sql<string>`coalesce(sum(${xpLedger.amount}), 0)` })
         .from(xpLedger)
         .where(and(eq(xpLedger.studentUserId, studentUserId), gte(xpLedger.createdAt, since)));

@@ -2,9 +2,11 @@ import { createPostgresAudit, type AuditPort } from '../platform/audit/index';
 import { createAccessGuard, type AccessGuard } from '../platform/authz/index';
 import {
   MemoryCache,
+  createCacheProbe,
   createGuardedCache,
   createValkeyCache,
   type CachePort,
+  type CacheProbe,
 } from '../platform/cache/index';
 import { createSystemClock, type Clock } from '../platform/clock/index';
 import type { Config } from '../platform/config/index';
@@ -16,6 +18,7 @@ import {
   type DbPools,
   type ModuleName,
   type NamedDbHandle,
+  type ProcessRole,
 } from '../platform/db/index';
 import {
   createDeterministicEmbed,
@@ -33,7 +36,13 @@ import {
   type LlmProvider,
 } from '../platform/llm/index';
 import { createLogger, type Logger } from '../platform/logger/index';
-import { createConsoleMail, createGuardedMail, type MailPort } from '../platform/mail/index';
+import {
+  createConsoleMail,
+  createGuardedMail,
+  createNodemailerTransport,
+  createSmtpMail,
+  type MailPort,
+} from '../platform/mail/index';
 import {
   MemoryMetrics,
   createPostgresMetricsSink,
@@ -163,6 +172,23 @@ export interface Container {
   readonly resilience: ResilienceRegistry;
   readonly databaseProbe: DatabaseProbe;
   /**
+   * THE CACHE HALF OF READINESS — D-230.
+   *
+   * `/health/ready` probed the database and nothing else, so a replica whose
+   * Valkey connection was gone stayed in the load balancer's rotation and
+   * served logins on the in-process rate-limit fallback — per instance, reset
+   * on restart, N x the configured limit across N replicas. The limiter's own
+   * header calls that a silent security downgrade; this is what stops it being
+   * silent, by taking the degraded replica out of rotation.
+   *
+   * It probes the RAW cache, not the guarded one. A readiness check that went
+   * through the breaker would report "unreachable" for as long as the breaker
+   * stayed open after the cache came back, so the replica would stay out of
+   * rotation waiting for traffic it is no longer receiving — a probe that
+   * cannot observe a recovery it is gating.
+   */
+  readonly cacheProbe: CacheProbe;
+  /**
    * WHERE EVERY RESILIENCE SIGNAL GOES — 04-RESILIENCE-PLAN.md §5.
    *
    * Built FIRST, before the resilience registry, because the registry needs it:
@@ -199,6 +225,23 @@ export interface Container {
 }
 
 export interface ContainerOverrides {
+  /**
+   * WHICH PROCESS THIS IS — D-228. Not an adapter substitution; a fact.
+   *
+   * `main.ts` and `worker-main.ts` both call this function, so both built all
+   * four pools at full size and a single-replica deployment held 88 connections
+   * of a default `max_connections=100` before anything went wrong. An api
+   * process only ever ENQUEUES onto the `worker` pool and a worker serves no
+   * login, so the role trims what each can actually use before
+   * `DATABASE_POOL_MAX` is applied on top.
+   *
+   * Defaults to `'api'`, which is the conservative reading: it is the role that
+   * keeps `auth` at full size, and a worker mislabelled as an api merely runs
+   * with more auth connections than it needs. The reverse — an api trimmed to
+   * two auth connections — would throttle login, so it must be stated
+   * explicitly and never inferred.
+   */
+  readonly role?: ProcessRole;
   readonly logger?: Logger;
   readonly clock?: Clock;
   readonly idGen?: IdGen;
@@ -264,10 +307,23 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
   const clock = overrides.clock ?? createSystemClock();
   const idGen = overrides.idGen ?? createUuidGen();
 
+  /**
+   * THE POOLS, SIZED FOR THIS PROCESS — D-228.
+   *
+   * `role` and `maxConnections` are the two fields that were missing. Without
+   * them `createDbPools` opened the full four-pool profile in every process,
+   * `DATABASE_POOL_MAX` was parsed and read by nothing, and the only budget in
+   * existence was a comment that counted one process out of two.
+   */
+  const role: ProcessRole = overrides.role ?? 'api';
   const pools = createDbPools({
     url: config.db.url,
     ssl: config.db.ssl,
+    sslCa: config.db.sslCa,
+    sslInsecure: config.db.sslInsecure,
     sizes: config.db.pools,
+    role,
+    maxConnections: config.db.poolMax,
     statementTimeoutMs: config.timeouts.postgres.totalMs,
     vectorStatementTimeoutMs: config.timeouts.postgresVector.totalMs,
     connectTimeoutMs: config.timeouts.postgres.connectMs,
@@ -331,9 +387,84 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
     guard: resilience.guard('http'),
   });
 
-  // Resend adapter lands with the identity module (build step 4). Until then
-  // the dev adapter prints to stdout, so signup works with no API key.
-  const mail = createGuardedMail(overrides.mail ?? createConsoleMail(), resilience.guard('mail'));
+  /**
+   * THE MAIL ADAPTER CHOICE — D-226, and the worst defect this codebase has had.
+   *
+   * There was no real adapter at all. This line read
+   * `overrides.mail ?? createConsoleMail()` WITH NO ENVIRONMENT GATE, so a
+   * production deployment printed every verification link and every
+   * password-reset link to stdout and delivered nothing. Signup and password
+   * reset were both dead, `mail.send` resolved, the breaker never opened, and
+   * every probe stayed green — the failure had no symptom anywhere except in
+   * users who could not create an account. `RESEND_API_KEY` was being passed by
+   * the deployment and silently ignored, which is why its presence read as
+   * evidence that mail was configured.
+   *
+   * A BOOT FAILURE, exactly like `embed`, `llm` and `payments` above, and for
+   * the same reason: the degraded mode is not "slower mail", it is "no mail,
+   * reported as success". A console mailer in production is not a degraded
+   * mode. It is a silent total failure of the acquisition funnel.
+   *
+   * The check names WHICH variable is missing. All four are required together
+   * and `SMTP_FROM` is genuinely separate from `SMTP_USER` — Google Workspace
+   * allows sending as an alias — so "I set the credentials" and "I set the From
+   * address" are different states and the error has to say which one this is.
+   */
+  const smtpMissing =
+    config.mail.smtpHost === null
+      ? 'SMTP_HOST'
+      : config.mail.smtpUser === null
+        ? 'SMTP_USER'
+        : config.mail.smtpPassword === null
+          ? 'SMTP_PASSWORD'
+          : config.mail.smtpFrom === null
+            ? 'SMTP_FROM'
+            : null;
+
+  /**
+   * The four settings as ONE value that is either wholly present or null.
+   *
+   * Narrowed here rather than at the call site, for the same reason as the
+   * Razorpay credentials: a `?? ''` per field would produce an SMTP config that
+   * type-checks and then opens a connection to an empty host.
+   */
+  const smtpConfig =
+    config.mail.smtpHost !== null &&
+    config.mail.smtpUser !== null &&
+    config.mail.smtpPassword !== null &&
+    config.mail.smtpFrom !== null
+      ? {
+          host: config.mail.smtpHost,
+          port: config.mail.smtpPort,
+          user: config.mail.smtpUser,
+          password: config.mail.smtpPassword,
+          from: config.mail.smtpFrom,
+        }
+      : null;
+
+  if (config.isProduction && overrides.mail === undefined && smtpMissing !== null) {
+    throw new Error(
+      `${smtpMissing} is required in production. Without the SMTP settings the console mail ` +
+        'adapter would be used, and it PRINTS verification and password-reset links to stdout ' +
+        'and sends nothing — signup and password reset are both dead while every probe stays ' +
+        'green. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD and SMTP_FROM, or run with ' +
+        'NODE_ENV=development.',
+    );
+  }
+
+  const mail = createGuardedMail(
+    overrides.mail ??
+      (smtpConfig === null
+        ? // Development only — the boot check above has already thrown by the
+          // time this line can run in production. It masks the recipient and
+          // prints no field values (D-179).
+          createConsoleMail()
+        : createSmtpMail({
+            transport: createNodemailerTransport(smtpConfig),
+            from: smtpConfig.from,
+          })),
+    resilience.guard('mail'),
+  );
 
   /**
    * THE EMBEDDING ADAPTER CHOICE — see `Container.embed`.
@@ -543,6 +674,47 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
    */
   const jobQueue = createPostgresJobQueue({ db: pools.worker });
 
+  /**
+   * THE READINESS PROBES, BUILT HERE SO THE JOURNAL CAN BE CHECKED AT BOOT.
+   *
+   * `createDatabaseProbe` reads `drizzle/migrations/meta/_journal.json` ONCE,
+   * at construction, and that file is what "fully migrated" is compared
+   * against (D-231). If the image does not carry it, the probe silently falls
+   * back to the old, useless rule — "at least one row in the migrations table"
+   * — which is precisely the check that let a half-applied deploy report ready.
+   *
+   * So production refuses to boot without it. A fallback that is correct in
+   * development and wrong in production, with no way to tell which one you are
+   * running, is the same defect wearing a different hat.
+   */
+  const databaseProbe = createDatabaseProbe({
+    pools,
+    timeoutMs: config.timeouts.postgres.totalMs,
+    migrationsDir: config.db.migrationsDir,
+  });
+
+  if (config.isProduction && !databaseProbe.manifest.known) {
+    throw new Error(
+      'the drizzle migration journal could not be read, so readiness cannot tell a fully ' +
+        'migrated database from a half-migrated one and would accept both. Ship the ' +
+        '`drizzle/migrations` folder with the image (the Dockerfile COPYs it) or set ' +
+        'DRIZZLE_MIGRATIONS_DIR to where it lives.',
+    );
+  }
+
+  /**
+   * D-230 — the probe runs against the RAW cache, deliberately.
+   *
+   * See `Container.cacheProbe`: probing through the guard would report the
+   * breaker's state rather than the cache's, so a replica could not observe the
+   * recovery that would return it to rotation.
+   */
+  const cacheProbe = createCacheProbe({
+    cache: rawCache,
+    timeoutMs: config.timeouts.cache.totalMs,
+    clock,
+  });
+
   return {
     config,
     logger,
@@ -568,7 +740,8 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
     notify,
     channels,
     jobQueue,
-    databaseProbe: createDatabaseProbe(pools, config.timeouts.postgres.totalMs),
+    databaseProbe,
+    cacheProbe,
     async shutdown(): Promise<void> {
       // FLUSH FIRST, AND SEQUENTIALLY. The ordering is load-bearing rather
       // than tidy: buffered observations need a live connection to be written,
@@ -579,6 +752,12 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
       //
       // `flush` swallows its own failures, so this cannot throw and cannot
       // prevent the pools closing.
+      //
+      // The interval timer is stopped FIRST (D-232), so nothing can arm a new
+      // one between the flush and the pools closing — a timer that fired after
+      // `pools.close()` would attempt an insert on a closed pool and log a
+      // write failure on every clean shutdown.
+      metricsSink.stop();
       await metricsSink.flush();
       // `allSettled`: a cache that is already gone must not stop the pools
       // being closed. Shutdown is not the place to be strict.

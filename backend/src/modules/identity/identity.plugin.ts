@@ -39,12 +39,23 @@ export interface SessionPluginDeps {
  * | `secure`   | true  | never sent over plaintext |
  * | `sameSite` | lax   | CSRF defence; `lax` rather than `strict` so that following the verification link from an email arrives authenticated |
  * | `path`     | /     | the whole API |
- * | `maxAge`   | 30 d  | matches the absolute session lifetime in the database |
+ * | `maxAge`   | 30 d  | the ABSOLUTE session lifetime — see below |
  *
- * `maxAge` on the cookie is a convenience for the browser and NOTHING MORE.
- * The authority on whether a session is alive is `sessions.expires_at` in the
- * database, checked on every request. A client that keeps a stale cookie gains
- * nothing.
+ * WHICH DEADLINE `maxAge` IS, now that there are two — D-219.
+ *
+ * The server keeps a SLIDING idle deadline (`sessions.expires_at`, 14 days,
+ * pushed forward on use) inside an ABSOLUTE ceiling (`created_at + 30 days`,
+ * which nothing moves). The cookie carries the ABSOLUTE one, and it must:
+ * a cookie set to the idle deadline would be discarded by the browser two weeks
+ * in, logging out an active user whose server-side session was alive and
+ * renewing. The cookie has to outlive every renewal; it must not outlive the
+ * ceiling. `maxAge = ttlDays` is exactly that, and the two therefore AGREE —
+ * `expires_at` is clamped to the same ceiling, so it is never later than
+ * `maxAge`.
+ *
+ * THE SERVER IS AUTHORITATIVE REGARDLESS. `maxAge` is a hint to the browser and
+ * nothing more; a client that keeps a stale cookie gains nothing, because
+ * `validateSession` checks both bounds against the database on every request.
  */
 export function buildCookieOptions(options: SessionCookieOptions): {
   httpOnly: true;

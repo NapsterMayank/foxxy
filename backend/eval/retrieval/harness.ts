@@ -53,6 +53,14 @@ export function createHarness(options: HarnessOptions): Harness {
   const pools = createDbPools({
     url: options.databaseUrl,
     ssl: false,
+    // D-238 — verification is on by default now; this URL is plaintext anyway.
+    sslCa: null,
+    sslInsecure: false,
+    // D-228 — the per-process budget. 'api' here because nothing in this
+    // file claims a job, and the ceiling is deliberately above the sum so
+    // the sizes below are what actually gets opened.
+    role: 'api',
+    maxConnections: 100,
     sizes: { auth: 1, core: 2, ai: 4, worker: 1 },
     statementTimeoutMs: 30_000,
     vectorStatementTimeoutMs: 30_000,

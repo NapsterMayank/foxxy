@@ -45,6 +45,47 @@ const CONTENT_TABLES = [
   'chapters',
 ] as const;
 
+/**
+ * THE PRODUCTION GUARD — D-234.
+ *
+ * ===========================================================================
+ * `seed-dev.ts` HAS HAD ONE SINCE IT WAS WRITTEN. THIS FILE DID NOT.
+ *
+ * And this is by far the more dangerous of the two. Seeding production adds six
+ * fake chapters: embarrassing, and reversible in one statement. This TRUNCATEs
+ * six content tables `cascade` — which reaches `chapter_mastery`, i.e. every
+ * student's learning history — with no confirmation step and no backup step.
+ *
+ * The realistic accident is not somebody typing this at a production shell. It
+ * is `DATABASE_URL` still exported in a terminal from an earlier task, or a
+ * `.env` that points at staging-which-is-actually-production, and the command
+ * then running EXACTLY AS DESIGNED against the wrong database.
+ *
+ * The corpus this protects is 137 chapters, 4,686 rag chunks and 2,741
+ * questions, and producing it cost a paid embedding run.
+ *
+ * ===========================================================================
+ * A SEPARATE EXPORTED FUNCTION, NOT AN `if` INSIDE `main`.
+ *
+ * `main` is not exported and cannot be called from a test without also
+ * connecting to a database — so an inline check would be a guard with no test,
+ * which is the exact shape of every defect in this codebase's audit history. As
+ * a pure function it can be mutated and shown to turn a named test red.
+ *
+ * It checks `NODE_ENV` because that is the signal `seed-dev` uses and the one
+ * `createContainer`'s boot gates use. One answer in this codebase to "is this
+ * production", rather than three.
+ */
+export function assertNotProduction(env: string): void {
+  if (env === 'production') {
+    throw new Error(
+      'clear-content refuses to run against NODE_ENV=production. It TRUNCATEs the entire ' +
+        'content corpus and cascades into chapter_mastery, which is student learning history. ' +
+        'If this really is what you want, do it deliberately with a restore plan in place.',
+    );
+  }
+}
+
 export async function clearContent(client: pg.ClientBase): Promise<Record<string, number>> {
   const before: Record<string, number> = {};
 
@@ -80,6 +121,10 @@ async function main(): Promise<void> {
   // for its one exported function. A top-level import made loading this file
   // kill the test runner.
   const { config } = await import('../src/platform/config/index');
+
+  // D-234 — BEFORE a connection is opened, let alone a TRUNCATE issued.
+  assertNotProduction(config.env);
+
   const client = new pg.Client({ connectionString: config.db.url });
   await client.connect();
   try {

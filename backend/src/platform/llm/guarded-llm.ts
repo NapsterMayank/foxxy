@@ -48,8 +48,32 @@ export function createGuardedLlm(inner: LlmProvider, options: GuardedLlmOptions)
         // `run` would release it at the first token, which would let an
         // unbounded number of open streams sit behind a limit of 20.
         const release = guard.limiter.acquire();
+
+        /**
+         * D-262, step 2 of 3 — ONE CONTROLLER PER STREAM, ABORTED IN THE SAME
+         * `finally` THAT RELEASES THE SLOT.
+         *
+         * The pairing is the fix, not the abort on its own. The bug was that
+         * releasing the slot and stopping the work were two different events
+         * with only one of them implemented, so the limiter's count and the
+         * number of live vendor streams drifted apart with nothing to report
+         * it. Making them the same statement means they cannot drift: every
+         * path out of this generator — the total-budget `return`, the
+         * first-token timeout, an exhausted iterator, a thrown breaker
+         * rejection, and the `.return()` the runtime calls when the student
+         * disconnects mid-turn and `foxy`'s `for await` unwinds — runs this
+         * `finally`, and now every one of them cancels.
+         *
+         * NOT `withTimeout`'s controller. That one is per-`next()` and is
+         * aborted when a single token wait expires, which is a different event
+         * from "this stream is over": aborting the fetch on the first-token
+         * deadline would kill a stream the total budget still allows.
+         */
+        const cancellation = new AbortController();
         try {
-          const iterator = inner.stream(req)[Symbol.asyncIterator]();
+          const iterator = inner.stream({ ...req, signal: cancellation.signal })[
+            Symbol.asyncIterator
+          ]();
           const startedAt = clock.now().getTime();
 
           // The first token is the part that fails, so it is the part the
@@ -75,6 +99,11 @@ export function createGuardedLlm(inner: LlmProvider, options: GuardedLlmOptions)
             yield next.value;
           }
         } finally {
+          // ABORT BEFORE RELEASE, deliberately. The slot must not become
+          // available to a waiting caller until the work it accounted for has
+          // been told to stop; the other order re-opens the same over-admission
+          // window this fix exists to close, just narrower.
+          cancellation.abort();
           release();
         }
       }

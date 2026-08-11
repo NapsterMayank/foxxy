@@ -84,22 +84,64 @@ export type Notification = z.infer<typeof notificationSchema>;
 /**
  * Keyset pagination, not offset.
  *
- * `before` is the `createdAt` of the oldest row the client already has. Offset
- * pagination over a list that grows at the HEAD silently repeats and skips
- * rows: a notification arriving between page one and page two shifts every
+ * Offset pagination over a list that grows at the HEAD silently repeats and
+ * skips rows: a notification arriving between page one and page two shifts every
  * later row down by one. The read index is `(recipient_user_id, created_at
  * desc)`, so a keyset scan is also the only shape that stays cheap.
+ *
+ * ===========================================================================
+ * THE CURSOR IS COMPOSITE — `(before, beforeId)` — AND D-259 IS WHY.
+ *
+ * It used to be `before` alone, a `created_at`, while the server's ORDER BY was
+ * and always has been `(created_at desc, id desc)`. A cursor that names fewer
+ * columns than the sort DOES NOT IDENTIFY A POSITION IN THAT SORT. Two rows
+ * sharing a timestamp straddle the page boundary: the first page ends on one of
+ * them, the next page asks for rows STRICTLY OLDER than that timestamp, and its
+ * twin — which sorts after it and was never returned — is skipped. Permanently,
+ * and with no error anywhere.
+ *
+ * Identical timestamps are not exotic. A bulk send writes a batch inside one
+ * statement, and the whole test suite runs on an INJECTED CLOCK that returns the
+ * same instant until it is advanced, so ties are the normal case rather than the
+ * rare one.
+ *
+ * ---------------------------------------------------------------------------
+ * BOTH FIELDS OR NEITHER, ENFORCED HERE AS A 400.
+ *
+ * A client that remembered to send `before` and forgot `beforeId` would be
+ * asking the exact question that skipped rows. The refinement makes that a loud
+ * validation error at the edge instead of a quiet wrong answer from the
+ * database — a half-supplied cursor is not a cursor.
+ *
+ * (The considered alternative was one opaque base64 token, which cannot be
+ * half-supplied at all. It was not taken because an operator reading an access
+ * log or reproducing a report by hand can read an ISO timestamp and a uuid, and
+ * cannot read a token; the refinement buys the same guarantee at the boundary.)
  */
-export const listNotificationsQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).default(20),
-  before: z.string().datetime().optional(),
-});
+export const listNotificationsQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(100).default(20),
+    /** The `createdAt` of the oldest row the client already has. */
+    before: z.string().datetime().optional(),
+    /** That same row's `id` — the tiebreaker. See the block above. */
+    beforeId: z.string().uuid().optional(),
+  })
+  .refine((query) => (query.before === undefined) === (query.beforeId === undefined), {
+    message: 'A page cursor needs both `before` and `beforeId`, or neither.',
+    path: ['beforeId'],
+  });
 export type ListNotificationsQuery = z.infer<typeof listNotificationsQuerySchema>;
 
 export const listNotificationsResponseSchema = z.object({
   notifications: z.array(notificationSchema),
-  /** The cursor for the next page, or null when this is the last one. */
+  /**
+   * The cursor for the next page, or null when this is the last one.
+   *
+   * BOTH HALVES ARE NULL TOGETHER, always — they are one value rendered as two
+   * fields, and the query schema above refuses a request that carries only one.
+   */
   nextBefore: z.string().datetime().nullable(),
+  nextBeforeId: z.string().uuid().nullable(),
   unreadCount: z.number().int().min(0),
 });
 export type ListNotificationsResponse = z.infer<typeof listNotificationsResponseSchema>;

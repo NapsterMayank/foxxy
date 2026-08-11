@@ -1,4 +1,4 @@
-import type { Clock } from '../clock/index';
+import type { Clock, Sleeper } from '../clock/index';
 import {
   createCircuitBreaker,
   type BreakerMetrics,
@@ -62,15 +62,18 @@ export interface ResilienceRegistryOptions {
    * WHERE EVERY RESILIENCE SIGNAL GOES — 04-RESILIENCE-PLAN.md §5.
    *
    * This is the parameter that makes the second half of §5 true. Supplying it
-   * wires FOUR emissions at once, and they are four because that is the list
+   * wires FIVE emissions at once, and they are five because that is the list
    * §5 and §3.3 and §4 actually name:
    *
    *   breaker transitions      §5  — "emitted as a metric"
    *   breaker rejections       §5  — how much the open breaker cost
    *   concurrency rejections   §3.3 — a degraded feature that looks healthy
    *   port timeouts            §4  — the slow-dependency window before the trip
+   *   port retries             §4  — the budget D-237 wired; a dependency that
+   *                                  always succeeds on attempt two is failing
+   *                                  every time and looks perfect
    *
-   * All four are wired HERE rather than at six call sites, for the same reason
+   * All five are wired HERE rather than at six call sites, for the same reason
    * the guards are composed here: six ports each remembering to emit is five
    * chances to forget, and the one that forgets is discovered during an
    * incident.
@@ -80,6 +83,17 @@ export interface ResilienceRegistryOptions {
    * registries by the dozen and have nothing to say about metric names.
    */
   readonly metrics?: MetricsPort;
+  /**
+   * How the §4 retry budget waits between attempts — D-237.
+   *
+   * Optional, defaulting to the real sleeper inside `createPortGuard`. A test
+   * that asserts the retry BEHAVIOUR passes a `RecordingSleeper` and reads the
+   * jittered sequence back without any wall-clock time passing, which is what
+   * §9.5's ban on `sleep` in tests requires there to be a seam for.
+   */
+  readonly sleeper?: Sleeper;
+  /** Injected so a test can assert the exact jittered delay sequence. */
+  readonly random?: () => number;
 }
 
 export function createResilienceRegistry(
@@ -119,6 +133,20 @@ export function createResilienceRegistry(
           metrics.counter(PLATFORM_METRICS.PORT_TIMEOUT, 1, {
             port: name,
             timeoutMs: String(timeoutMs),
+          });
+        },
+        /**
+         * D-237 — the FIFTH emission wired here, for the same reason as the
+         * other four: six ports each remembering to emit is five chances to
+         * forget. A retry that nobody counts turns "this dependency is failing
+         * half the time" into "this dependency is fine, and slow".
+         */
+        ...(options.sleeper === undefined ? {} : { sleeper: options.sleeper }),
+        ...(options.random === undefined ? {} : { random: options.random }),
+        onRetry: (name, info) => {
+          metrics.counter(PLATFORM_METRICS.PORT_RETRIED, 1, {
+            port: name,
+            attempt: String(info.attempt),
           });
         },
       }),

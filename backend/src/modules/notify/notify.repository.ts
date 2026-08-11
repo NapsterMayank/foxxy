@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { DbHandle } from '@/platform/db/index';
 import { schema } from '@/platform/db/index';
 import { isNotifyKind } from './domain/kinds';
@@ -147,12 +147,24 @@ export interface OwnerRef {
   readonly tenantId: string;
 }
 
+/**
+ * One position in the `(created_at desc, id desc)` sort — D-259.
+ *
+ * BOTH COLUMNS, because the sort has two and a cursor naming fewer than the
+ * sort does not identify a position in it. See `list` below for what the
+ * one-column version cost.
+ */
+export interface ListCursor {
+  readonly createdAt: Date;
+  readonly id: string;
+}
+
 export interface ListInput {
   readonly recipientUserId: string;
   readonly tenantId: string;
   readonly limit: number;
-  /** Keyset cursor: rows strictly older than this. */
-  readonly before?: Date | undefined;
+  /** Keyset cursor: rows strictly after this position in the sort order. */
+  readonly before?: ListCursor | undefined;
 }
 
 export interface ScopedInput {
@@ -232,17 +244,54 @@ export function createNotifyRepository(handle: NotifyDbHandle): NotifyRepository
       return { recipientUserId: row.recipientUserId, tenantId: row.tenantId ?? '' };
     },
 
+    /**
+     * ========================================================================
+     * THE CURSOR PREDICATE MATCHES THE SORT, COLUMN FOR COLUMN — D-259.
+     *
+     * It used to read `lt(notifications.createdAt, input.before)` while the
+     * ORDER BY below was, and still is, `(created_at desc, id desc)`. A cursor
+     * over one column against a sort over two does not name a row; it names a
+     * TIMESTAMP, and every row sharing that timestamp is on the wrong side of
+     * `<`. So a page that ended on one of a pair of same-instant notifications
+     * asked next for rows STRICTLY OLDER than that instant, and the twin — which
+     * sorts immediately after and had never been returned — was skipped. For
+     * good, silently, with a perfectly plausible-looking page either side of it.
+     *
+     * Ties are not a curiosity here. A bulk send inserts a batch within one
+     * statement and `now()` does not move inside a transaction; every test in
+     * the suite runs on an injected clock that returns one instant until it is
+     * advanced. The tie is the normal case.
+     *
+     * ------------------------------------------------------------------------
+     * WHY THE ROW-VALUE FORM RATHER THAN THE EXPANDED `or`.
+     *
+     * `(created_at, id) < (:ts, :id)` is one comparison Postgres evaluates
+     * lexicographically, and it is the shape the planner can drive a composite
+     * btree with. The hand-expanded equivalent — `created_at < :ts or
+     * (created_at = :ts and id < :id)` — is three predicates that mean the same
+     * thing only if all three stay in step, and the failure mode of getting one
+     * of them wrong is this exact defect again.
+     *
+     * The CASTS are explicit because a row-value comparison gives the planner no
+     * column to infer a parameter's type from, and an untyped parameter here is
+     * `text` — which compares `created_at` as a STRING and would order rows by
+     * their printed form.
+     * ========================================================================
+     */
     async list(input: ListInput): Promise<NotificationRecord[]> {
+      const cursor = input.before;
       const where =
-        input.before === undefined
+        cursor === undefined
           ? scopedTo(input.recipientUserId, input.tenantId)
           : and(
               scopedTo(input.recipientUserId, input.tenantId),
-              lt(notifications.createdAt, input.before),
+              sql`(${notifications.createdAt}, ${notifications.id}) < (${cursor.createdAt}::timestamptz, ${cursor.id}::uuid)`,
             );
 
       // Newest first, which is the only order this list is ever read in and the
-      // order `notifications_recipient_created_idx` is built for.
+      // order `notifications_recipient_created_idx` is built for. `id desc` is
+      // the tiebreaker the cursor above is matched to — the two must never be
+      // edited apart.
       const rows = await db
         .select()
         .from(notifications)

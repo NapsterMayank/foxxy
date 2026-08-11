@@ -1,7 +1,7 @@
 import type { Clock, Sleeper } from '../clock/index';
 import type { Logger } from '../logger/index';
 import { PLATFORM_METRICS, createNoopMetrics, type MetricsPort } from '../metrics/index';
-import type { JobHandler, JobQueue, JobRecord } from './job.port';
+import type { ClaimedJob, JobHandler, JobQueue } from './job.port';
 
 /**
  * The job runner — the loop the worker process spends its life in.
@@ -138,7 +138,34 @@ export function createJobRunner(options: JobRunnerOptions): JobRunner {
   /** The single in-progress shutdown, so a second signal joins rather than restarts. */
   let stopRun: Promise<void> | undefined;
 
-  async function execute(job: JobRecord): Promise<void> {
+  /**
+   * The job outran its lock timeout and was reclaimed under it — D-233.
+   *
+   * One helper for both completion paths so the two lines cannot drift into
+   * saying different things about the same event.
+   */
+  function logReclaimedCompletion(
+    intended: 'succeeded' | 'failed',
+    job: ClaimedJob,
+    startedAt: number,
+  ): void {
+    metrics.counter(PLATFORM_METRICS.JOB_LEASE_LOST, 1, { kind: job.kind, outcome: intended });
+    logger.warn(
+      {
+        event: 'job.lease_lost',
+        kind: job.kind,
+        jobId: job.id,
+        attempts: job.attempts,
+        intended,
+        durationMs: clock.now().getTime() - startedAt,
+        lockTimeoutMs,
+      },
+      'this job was reclaimed while its handler was still running; the completion was refused ' +
+        'so it could not overwrite the state of the worker that owns it now',
+    );
+  }
+
+  async function execute(job: ClaimedJob): Promise<void> {
     const handler = handlers[job.kind];
     const startedAt = clock.now().getTime();
 
@@ -149,13 +176,31 @@ export function createJobRunner(options: JobRunnerOptions): JobRunner {
         { event: 'job.no_handler', kind: job.kind, jobId: job.id },
         'no handler registered for this job kind; the worker is behind the enqueuer',
       );
-      await queue.fail(job.id, `no handler registered for kind "${job.kind}"`, clock.now());
+      await queue.fail(job, `no handler registered for kind "${job.kind}"`, clock.now());
       return;
     }
 
     try {
       await handler(job);
-      await queue.succeed(job.id, clock.now());
+      const landed = await queue.succeed(job, clock.now());
+      if (!landed) {
+        /**
+         * THE LEASE WAS LOST WHILE THE HANDLER RAN — D-233.
+         *
+         * The reaper reclaimed this job past its lock timeout and another
+         * worker owns it now, so the completion was refused rather than allowed
+         * to overwrite that worker's state. The WORK still happened, possibly
+         * twice — which is the documented at-least-once edge and is why
+         * handlers are required to be idempotent — but the queue's bookkeeping
+         * is not this process's to write any more.
+         *
+         * `warn`, not `error`: nothing is broken. It does mean the lock timeout
+         * is shorter than this kind of job actually takes, which is worth
+         * seeing, and `job.reclaimed` alone would not say which job it was.
+         */
+        logReclaimedCompletion('succeeded', job, startedAt);
+        return;
+      }
       metrics.counter(PLATFORM_METRICS.JOB_COMPLETED, 1, { kind: job.kind, outcome: 'succeeded' });
       logger.info(
         {
@@ -169,7 +214,16 @@ export function createJobRunner(options: JobRunnerOptions): JobRunner {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown job failure';
-      const outcome = await queue.fail(job.id, message, clock.now());
+      const outcome = await queue.fail(job, message, clock.now());
+
+      if (outcome === 'lease_lost') {
+        // Same race as above, on the failure path — and the more dangerous
+        // direction: without the fence this stale `failed` would have been
+        // written over the state of whoever owns the job now, including over a
+        // `succeeded` it had already reached.
+        logReclaimedCompletion('failed', job, startedAt);
+        return;
+      }
 
       metrics.counter(PLATFORM_METRICS.JOB_COMPLETED, 1, { kind: job.kind, outcome });
       metrics.counter(

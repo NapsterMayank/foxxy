@@ -3526,3 +3526,1402 @@ With the Voyage key working, the threshold was calibrated on 54 in-corpus and 20
 The midpoint was rejected: refusing 24% of answerable questions contradicts the asymmetry the calibration module's own header argues for. The budget rule was added alongside rather than replacing it, and the chosen policy is recorded in the provenance.
 
 **This is a product decision sitting in a constant.** 35% off-syllabus rejection means the threshold is a floor, not a relevance detector — Foxy's grounding instruction owns the rest. Assessment should confirm the 5% budget is the right trade.
+
+---
+
+## Production boot, alerting and destructive-guard wave — 11 August 2026
+
+Range D-249 to D-256, assigned before the agent was spawned (the D-213 rule, applied). Five defects, all of one shape: **a mechanism that was present, correct-looking and enforcing nothing.** Two of them would have stopped production booting at all; two more would have been discovered only by an outage nobody was paged for, or by a customer's failed payment.
+
+### D-249 · The destructive migration guard checked four tables out of thirty-four
+**Status:** Fixed — `backend/scripts/ops/migration-round-trip.ts`
+
+`db:round-trip` DROPS EVERY TABLE in `public`. Its only safeguard counted rows in a hardcoded list: `chapters`, `rag_chunks`, `questions`, `users`. Those were the tables that existed and mattered on the day it was written.
+
+The schema has thirty-four. **None of the other thirty was guarded** — `jobs`, `metrics_events`, `notifications`, `subscriptions`, `payment_events`, `audit_log`, `xp_ledger`, `sessions`. A database holding a year of billing rows, or the append-only record of every privileged action, passed the guard cleanly and was then dropped table by table.
+
+This is **D-075 in a new costume**, and the header of `listMigrations()` — nine lines above the guard — already said D-075 had been found four times in this repository, twice inside the code written to prevent it. This was the fifth.
+
+The distinguishing property: **a hardcoded list fails OPEN.** A table nobody added to it is a table the guard is silent about, and silence is indistinguishable from "checked and empty". The list is gone; the catalogue is asked which tables exist and any row anywhere is a refusal. One exclusion, `__drizzle_migrations`, named explicitly rather than matched by a `__%` pattern so a future `__anything` is guarded rather than accidentally exempt.
+
+**Proven by regression, not by reading.** `.github/workflows/backend-ci.yml` now builds a database in exactly the shape the old guard waved through — one row in `audit_log`, all four of the old names EMPTY — and fails if the script accepts it or refuses without naming the table. Reverting the guard to the four-name behaviour locally made that step report `FAIL`, and the reverted guard printed `guard inspected 4 table(s); 0 hold rows` and proceeded to drop.
+
+**A consequence worth stating:** migration 0004 seeds the default tenant, so an *already-migrated* scratch database now trips the guard. That is deliberate. The alternative is a list of rows the guard is willing to ignore, which is the defect again — it cannot tell a seeded tenant from a real one, and the permissive guess is the one that drops the development corpus. The error names the fix (`drop database` / `create database`), which is what CI already does.
+
+### D-250 · Production could not boot, and it would have read as a crash
+**Status:** Fixed — `docker/compose.prod.yml`
+
+`compose.prod.yml`'s backend environment block ended at `RESEND_API_KEY`. It passed no Razorpay credentials and no plan ids. `src/app/container.ts` throws in production without all three Razorpay credentials. So `backend-api` and `backend-worker` would have thrown inside `createContainer`, exited, and been restarted forever by `restart: unless-stopped`.
+
+The refusal is correct and stays — the payments fake happily creates subscriptions and happily verifies webhooks signed with a secret we chose. **The problem was never the refusal; it was what the refusal looks like.** Two containers cycling every few seconds reads as a crash, a bad image, or postgres not being ready. The one line naming the variable scrolls past inside a restart storm, in a log stream the restarts themselves are truncating.
+
+Every required credential is now `${VAR:?message}` rather than `${VAR:-}`. That difference is the whole fix: `:-` supplies an empty string, which reaches the container, fails `z.string().min(1)`, and rebuilds the crash loop; `:?` makes **compose itself** refuse, naming the variable, creating nothing. It runs before an image is pulled and cannot be skipped, because interpolation happens on every compose invocation including `deploy-app.sh`'s `up -d --no-deps`.
+
+The trade is deliberate: a `.env.prod` missing a Razorpay key now blocks a *marketing* deploy too, because interpolation is whole-file. A deployment where one of these is unset is a deployment that must not be shipping anything.
+
+**Inverse hazard, recorded because it is easy to reintroduce.** The bare `KEY:` form is load-bearing for every OPTIONAL variable and is *not* the same as `${KEY:-}`: measured with `docker compose config`, `LLM_MODEL: ${LLM_MODEL:-}` SETS an empty string in the container while `LLM_MODEL:` passes it through or omits it. These are `.optional()`, optional means ABSENT, and an empty string is a present value that fails `min(1)` — so `:-` on an optional variable is this same crash loop rebuilt out of its own fix.
+
+### D-251 · The alerting stack could not page anyone, and that was the default
+**Status:** Fixed — `backend/scripts/ops/alert-evaluator-main.ts`, `docker/compose.prod.yml`
+
+`--mail` defaulted to `console`. The only other value, `resend`, threw, because no Resend adapter was ever written. **There was exactly one reachable transport and it was stdout.** Every page-severity alert the evaluator has ever raised was written to a container log and read by nobody.
+
+Separately, the `backend-alerts` container had **no backup-volume mount and no `--backup-dir`**, so `producibleSignals()` omitted `backup.age_hours` and the `backup_stale` rule could never fire — "there has never been a backup" reported identically to "backups are fine".
+
+A monitoring stack that cannot page anyone is **worse than none, because it is believed.** "No page came in" was being read as "nothing was wrong", and the two were indistinguishable — the worst property any piece of software can have, and the exact property D-123 made the embedding key a boot failure over.
+
+Three changes:
+
+1. **`smtp` is the default, not `console`.** The old default made the quiet outcome the automatic one. The loud outcome is automatic now: with no SMTP configured the evaluator throws and the container fails to start, so **its absence from `docker compose ps` is itself the signal**. It uses `platform/mail`'s SMTP adapter — the same one signup and password reset use, not a second SMTP client written for ops, because a monitoring path built from different parts can succeed while the product's fails.
+2. **`console` remains selectable and still warns on every start.** It is a genuinely real delivery path for one operator watching `docker compose logs`; it is simply not a pager, and choosing it now means typing it into `.env.prod` where a reviewer sees it. `resend` is removed, with an error naming `smtp` rather than "unknown transport".
+3. **`backup_data:/backup:ro` is mounted and `--backup-dir=/backup` passed.** Read-only: the evaluator stats mtimes and must never be able to write, rotate or delete a backup whose age it is judging.
+
+A dead `if (backupDir === undefined) logger.warn(...)` was **removed rather than left**: `assertRulesAreSatisfiable` has already thrown by that line, so the branch was unreachable — and a reader finding it would conclude that running without a backup directory is a degraded-but-permitted mode. It is not.
+
+Proven by breaking it four ways: missing SMTP settings, `--mail=resend`, an unknown transport, and a missing `--backup-dir` each refuse to start with a message naming the cause.
+
+### D-252 · The required-variable list was TypeScript, the supplied list was YAML, and nothing related them
+**Status:** Fixed — `backend/scripts/ops/env-contract.ts`, `env-contract-check.ts`, `preflight-env.ts`, the `preflight` compose service
+
+D-250 was not carelessness. It is what happens structurally when the list of variables an application REQUIRES lives in `src/` and the list a deployment SUPPLIES lives in a compose file, and no mechanism compares them. Adding the missing lines fixes today. Two mechanisms stop it recurring:
+
+**The CI gate (`npm run ops:env-contract`).** Extracts the production boot refusals from `backend/src` and every variable from `config.schema.ts`, then fails if any is not passed by `compose.prod.yml`, or not documented in `docker/.env.prod.example` and `backend/.env.example`. Variables production deliberately does not pass live in an explicit `NOT_PASSED_BY_DESIGN` allow-list with the reason each schema default is right — the ergonomics are intended to be mildly uncomfortable, because the default answer for a new variable is "compose must pass it" and opting out should mean writing down why.
+
+**The runtime pre-flight (the `preflight` service).** A one-shot container running the same image and the same config parser as the API, depended on by api, worker and alerts through `service_completed_successfully`. It catches what interpolation cannot see, because to compose a value is just a string: present-but-blank, and a malformed `RAZORPAY_PLAN_IDS` (D-253). It reports **every** problem at once rather than the first, so a new deployment is one list instead of five deploys. It performs **no I/O** and declares no `depends_on`, so it can never be the reason a recovery is slow.
+
+Why both, and why the runtime one carries a *cached* list: the authority is `container.ts`, which throws — and the Dockerfile copies `dist/` and `dist-ops/` and deliberately leaves `src/` behind, so nothing in the production image can read it. **A copy that can drift silently is the defect; a copy whose drift fails the build is a cache.** The drift window is one CI run, not one production incident.
+
+Both gates **self-test**, because a check whose pattern has stopped matching reports a pass. Every extraction asserts a plausible minimum on what it found (at least 20 schema variables, 50 source files, 1 boot refusal) and fails loudly otherwise. Two gates in this repository were previously found green while enforcing nothing — an ESLint rule whose `files` pattern matched no file, and `ci.yml`'s shell-syntax loop, which iterated over an empty `git ls-files` and reported success on a script containing a deliberate syntax error.
+
+### D-253 · `RAZORPAY_PLAN_IDS` discarded what it could not parse and returned success
+**Status:** FULLY CLOSED by D-272 — the open half ("the parser should refuse rather than shrug") is done; the pre-flight is retained because it also checks the map against `purchasablePlans()`.
+
+`config.schema.ts`'s `parsePlanIds` drops any pair it cannot understand and returns what is left. So `RAZORPAY_PLAN_IDS=monthly=plan_x` — an `=` where a `:` belongs — becomes `{}`: a value the type system is perfectly happy with, that boots, that reports healthy, and that fails at the checkout of the first customer who tries to pay us.
+
+`container.ts` argues, correctly, that the plan map is not one of its boot refusals because an empty map is a **loud** failure — `createSubscription` refuses a code it cannot resolve — whereas missing credentials are a **silent** fallback, and only the silent one needs a boot gate. The gap that reasoning leaves is **who** the failure is loud to. `{}` is loud to a paying customer, in a paid funnel, on a deployment that has reported itself healthy since it started. Moving it to boot costs nothing and changes the audience from a customer to an operator.
+
+The pre-flight now refuses on a malformed pair, an empty entry (a stray or trailing comma), a duplicated plan code (the later pair wins silently, so half the variable is decoration and the value does not show which half), and a purchasable plan with no mapping — **naming the offending entry** in each case. The required codes are **discovered** from `purchasablePlans()`, the same catalogue checkout resolves against, so a third paid plan starts being required on the commit that adds it, with nothing for anyone to remember (D-075, applied rather than evaded).
+
+The raw string reaches the script as a command-line ARGUMENT, because `config` exposes only the parsed map and the parse is precisely what discards the bad pair. A plan id is an identifier, not a credential.
+
+**Open, for the config owner:** `parsePlanIds` still silently drops malformed pairs for every other caller. The pre-flight makes that unreachable in a deployed stack — the container never starts — but the parser should refuse rather than shrug. That change is in `backend/src/` and was not made here.
+
+### D-254 · The SMTP settings were guessed, and one of the guesses was wrong
+**Status:** Fixed — `docker/compose.prod.yml`, `docker/.env.prod.example`
+
+While the SMTP adapter was being written in parallel under `src/platform/mail`, compose passed the SMTP variables with **soft `${VAR:-}` defaults on purpose**: marking a *guessed* name required would restart-loop production on a variable that does not exist, which is D-250 rebuilt from the other direction.
+
+The adapter landed. The names are settled (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`), `container.ts` grew its own refusal for them, and all four required ones are now `${VAR:?}`. One guess had been wrong — see D-255.
+
+`SMTP_PORT` is deliberately **not** required: it has a schema default of 587, the adapter derives `secure` from the port (465 is implicit TLS, everything else STARTTLS), and there is no third setting to get wrong. `SMTP_FROM` is a separate variable from `SMTP_USER` because Workspace allows sending as an alias, and the envelope sender and the visible From are not the same thing to a receiving spam filter.
+
+The four are also in `PRODUCTION_REQUIRED`, which put the pre-flight ahead of the composition-root refusal for a short window. That ordering was deliberate rather than a race: the pre-flight is a separate container that exits non-zero and blocks api, worker and alerts, so the stack already refused to start without them, and when the `container.ts` refusal landed the contract check extracted it, found it already present, and passed. The two converged instead of colliding.
+
+### D-255 · The environment-contract gate's first catch was `SMTP_USERNAME`
+**Status:** Fixed — the reason the gate in D-252 pays for itself immediately
+
+`compose.prod.yml` and `docker/.env.prod.example` passed **`SMTP_USERNAME`**. `config.schema.ts` declares **`SMTP_USER`**.
+
+Compose would have set a variable nothing reads and left the real one absent. `config.mail.smtpUser` would be `null`, SMTP authentication impossible, and **every verification email and every password reset undeliverable** — the entire acquisition funnel dead, behind green probes, with `mail.send` resolving and the breaker never opening. It is the D-226 failure with the fix in place and the name misspelt.
+
+**Nobody would have found this by reading either file.** Both are internally consistent and both look right. It was found by a program comparing them, on the first run, before the code shipped. That is the argument for the gate stated as cheaply as it can be stated.
+
+### D-256 · Four schema variables production passed by accident of their defaults
+**Status:** Fixed — `docker/compose.prod.yml`
+
+The contract check flags a variable that `config.schema.ts` declares and `compose.prod.yml` neither passes nor explains. It found four. Two were genuinely fine and are now recorded as decisions rather than omissions; two were live defects.
+
+**`TRUSTED_PROXY_HOPS` — a defect.** Left unset, `trustProxy` is `false`, so `request.ip` is **caddy's container address for every request**. Every IP-keyed rate limit — signup 3/h, login 5/15min, forgot-password 3/h — would key on one shared bucket: the first few users of the hour exhaust it and everyone else is refused, while an attacker is metered alongside them rather than separately. A limiter that is installed, green, and metering the wrong thing. Exactly one proxy fronts the API in this stack, so the value is 1. `TRUSTED_PROXY_CIDRS` would identify the proxy rather than count hops and is generally preferable, but Docker's bridge address for the caddy container is not stable across a `down`/`up`, and a CIDR that stops matching **fails open** to the socket address with no error. A hop count cannot go stale that way.
+
+**`DRIZZLE_MIGRATIONS_DIR` — latent.** The schema default `./drizzle/migrations` is correct only while the process's working directory is `/app`. That is true of every command in the file today and it is a *deployment* fact, not a code fact: a `working_dir:` added to one service later would make the readiness check report "no migrations found" — a health endpoint lying about schema state. Now passed as an absolute path.
+
+**`DATABASE_SSL_CA` / `DATABASE_SSL_INSECURE` — passed through, unset.** Postgres is a container on an `internal: true` network with no published port and no route out, so `DATABASE_SSL=false` is a statement about this topology. Passing the pair explicitly (bare `KEY:` form, so absent stays absent) means the escape hatches are visible at the moment someone moves the database to a managed host. Verification is on by default; the only way to the old `rejectUnauthorized: false` behaviour is to type `DATABASE_SSL_INSECURE` into `.env.prod`, where a reviewer reads it. **The `rejectUnauthorized: false` hazard itself is already fixed in `src/platform/db/pools.ts` under D-238 and was not reintroduced here** — no file in this wave sets it.
+
+### D-241 · The mastery read-modify-write was a lost update; the write is now a compare-and-set
+**Status:** Active
+`chapter_mastery.mastery_score` is a LEVEL, not a tally: `practice.submitSession` read the current value, blended the session into it with an EMA, and wrote the result outright. The read happened before the transaction opened. Two submissions on the same chapter therefore both blended from the same prior value and the second write discarded the first — **one EMA step where two occurred**.
+
+Meanwhile `attempts` incremented in SQL (`attempts + $n`) and was correct throughout. So the row ended up permanently disagreeing with itself: two attempts recorded, one attempt's worth of movement, every number individually plausible. No error, no log line, no failing test. A student on a flaky connection whose client retries, or one with two tabs, produces it.
+
+**The fix keeps the read where it is and makes the WRITE conditional.** `upsertMastery` takes `expectedPreviousScore` — the value the caller computed from — and its `ON CONFLICT DO UPDATE` carries `setWhere mastery_score = <that value>`. Postgres takes the row lock and re-reads the row before evaluating that predicate, so a concurrent transaction's committed write IS visible to it: the loser matches nothing, writes nothing, and is told. `expectedPreviousScore === null` means "the caller saw no row", so the conflict branch is refused outright (`where false`) — reaching it means somebody inserted first.
+
+**The read deliberately stays outside the transaction.** `readMastery` is bound to `learner.service.getMastery`, which runs on the same `core` pool the submission transaction already holds a connection from. Issuing it inside would hold two `core` connections per submission, and enough concurrent submissions would deadlock the pool against itself. The compare-and-set is what makes the pair atomic without nesting a connection inside a transaction.
+
+`expectedPreviousScore` is **required, not optional**. An optional field with a permissive default is how this defect comes back: every existing call site keeps compiling, the compare-and-set degrades to an unconditional overwrite, and the lost update returns silently.
+
+A refused set throws `StaleMasteryError` rather than returning, because returning would COMMIT the responses, the session and the XP row around a mastery step that never landed. The throw rolls the attempt back; `submitOnce` re-reads, recomputes and retries up to three times, then returns a 409 the client can retry. D-056 is intact — the mastery write is still enlisted in practice's single submission transaction through the opaque `TransactionToken`, and no second transaction is opened.
+
+### D-242 · The daily XP cap could be exceeded by concurrent submissions; a per-student advisory lock closes it
+**Status:** Active
+The cap is `min(earned, 200 - alreadyEarnedToday)` and `xp_ledger` is append-only, so `alreadyEarnedToday` is a SUM over rows. That sum was taken **before the transaction opened**. Two submissions arriving together both summed the same day, both found the same room, and both wrote it — 200 became 400.
+
+**Moving the sum inside the transaction is not sufficient, and this is the part worth recording.** Under READ COMMITTED — Postgres's default and this application's — a transaction cannot see another's uncommitted insert no matter when it looks. Both would still sum the same total. There is no row to lock either, because the row that matters has not been inserted yet.
+
+So the fix is an explicit `pg_advisory_xact_lock`, taken as the **first statement in the transaction, before any read that is acted on**, keyed by `(PRACTICE_SUBMISSION_LOCK_CLASS, hashtext(student_user_id))`. Held to COMMIT or ROLLBACK, so there is no unlock to forget and no path — including a throw — that leaks it. Two students never wait on each other; one student's concurrent submissions do, which is exactly the case being made correct. The two-argument form is a namespace: advisory locks share one global 64-bit space, and a bare `hashtext` of a user id would collide with any future feature locking on the same id, presenting as unrelated requests blocking each other.
+
+Both halves are load-bearing and both were mutation-proved. Removing the lock while keeping the in-transaction read turns the test red (280 against a 200 cap, 6 runs out of 6). Keeping the lock and moving the read back outside the transaction also turns it red.
+
+The retention schedule is read under the same lock for the same reason: SM-2 state is a function of the previous schedule, and two submissions reading the same one produce one review step for two sessions.
+
+### D-243 · A negative attempt increment is refused at the domain boundary
+**Status:** Active
+`nextAttemptCount` has always rejected a negative increment and was **never on the write path**. The write path is `learner.service.updateMastery` -> `repository.upsertMastery`, which increments in SQL precisely so concurrent writers cannot lose the update — and SQL adds a negative number without complaint.
+
+`assertAttemptIncrement` now runs in the service, on every call, whether or not the row already exists, and returns the increment so it can be used inline — which makes "the value that was validated is the value that was written" true by construction rather than by two adjacent statements agreeing.
+
+See **D-245** for a correction to the reasoning originally recorded under this entry.
+
+### D-244 · A PATCH that changes nothing writes nothing
+**Status:** Active
+`students.updated_at` moved on every `updateProfile` call, including a PATCH with an empty body and a PATCH re-sending the values already stored. Both are the NORMAL case on a mobile client: a settings screen posts its whole form on save whether or not a field was touched, and a dropped connection makes the app resend it.
+
+The cost is not the write. It is that `updated_at` stops meaning "when this profile last changed" and starts meaning "when it was last saved over" — and it is read as the former. Nothing fails; the column simply becomes a timestamp of client behaviour.
+
+Two guards, because there are two shapes of no-op. An empty PATCH issues **no statement at all**. A PATCH that mentions fields adds `or(<field> IS DISTINCT FROM <value>)` to the WHERE, so the UPDATE matches nothing when every value is already stored. `IS DISTINCT FROM` rather than `<>`: the columns are NOT NULL today, but `<>` on a null is null, which a WHERE reads as false, so a nullable column added later would silently become unpatchable. The UPDATE matching nothing is ambiguous — "no such student" and "nothing to change" look identical — so a fallback SELECT disambiguates them, and it runs only on that path.
+
+### D-245 · The stated reason for D-243 was wrong; the database was measured instead
+**Status:** Active
+D-243's original note claimed the `chapter_mastery_attempts_check` CHECK (`attempts >= 0`) does not close the hole, reasoning that it fires only when the RESULT goes below zero — so `attempts = 7` with an increment of `-3` would land 4 and be accepted. **That is false for the statement this code actually issues**, and the probe is one line:
+
+```
+insert into t (..., attempts) values (..., -3)
+  on conflict (...) do update set attempts = t.attempts + -3;
+-- ERROR: new row violates check constraint
+-- DETAIL: Failing row contains (1, 1, -3).
+```
+
+Postgres evaluates a CHECK when it FORMS the tuple, before it detects the conflict, and `upsertMastery` puts the raw increment in the INSERT's VALUES. A negative increment therefore trips the constraint every time, whatever the stored count is.
+
+**The guard is still right, for two smaller and true reasons.** Without it the failure is an unhandled driver error escaping the repository — a 500 naming an internal constraint — where with it the caller gets a named `ValidationError`, a 400 that states the rule. And the constraint's protection is incidental to the statement's shape: rewrite `upsertMastery` as a plain UPDATE, which is a reasonable change once every row is guaranteed to exist, and `7 + (-3) = 4` really would be accepted silently, with the evidence label a parent reads computed from the smaller count.
+
+**This is the ninth-instance pattern inverted, and it is worth naming.** The catalogued failure mode (D-214) is enforcement that looks installed and enforces nothing. This was the mirror image: a rationale asserting a gap that did not exist, used to justify a guard that is worth having anyway. It is just as dangerous, because the next reader who verifies the claim finds it false and may delete the guard along with the reasoning. **A decision note is a factual claim about the system and is subject to the same standard as a test.**
+
+### D-246 · Concurrency is proved with a barrier on an injected seam, not with two awaits
+**Status:** Active
+Both D-241 and D-242 are invisible to a serial submission by construction: a lost update needs two readers of the same value, and a jointly-exceeded cap needs two submissions. Every pre-existing test submitted one session at a time, which is why both defects shipped under a green suite. A test that `await`s one submission and then the next proves only that the arithmetic is right, which was never in doubt.
+
+`practice.concurrency.test.ts` makes the interleaving happen on purpose. Three things hold together:
+
+1. **A real pool with real connections** — `createDb` with `poolMax` above the party count, so each submission holds its own backend and its own transaction. One connection would serialise them at the driver and every assertion would pass vacuously.
+2. **`Promise.all`**, never awaited in turn.
+3. **A barrier on `readMastery`** — an already-injected seam, and the last thing a submission does before opening its transaction. It releases only once all parties have arrived, so no submission can commit before another has taken the read it will compute from.
+
+**No `sleep` and no timeout.** The barrier is a promise resolved by the Nth arrival, so it is as fast as the database and cannot flake on a slow machine — the two failure modes a `setTimeout` would have. It **trips once and then passes through**, because D-241's fix retries and a retry re-reads mastery through the same seam; a barrier that re-armed would deadlock the retry against a party that is never coming.
+
+The assertions are chosen so that one step and two steps are different numbers. Both sessions score zero from a seeded mastery of 1.000, so one EMA step lands 0.600 and two land 0.360 — and `attempts` is asserted in the same expectation, because the defect's real signature is the disagreement between the two columns.
+
+The file builds its own `DbHandle` rather than starting the app container, and the D-242 case uses three DIFFERENT chapters on purpose: on one chapter D-241's compare-and-set would also force a retry, and the cap would come out right for a reason that has nothing to do with the cap.
+
+### D-247 · Two silent truncations remain inside `practice`, reported rather than changed
+**Status:** **Needs decision**
+`practice.service.ts` passes two fixed limits into `content`, and both are silent partial results of the kind this audit was looking for:
+
+- `questionsOf` requests `limit: 200` to hydrate a session's questions, commenting that this is "the whole chapter". A chapter with more than 200 active practice questions would fail to hydrate some of a session's questions, and the loop **silently skips** any id it cannot find. The student then gets a 404 on a question that is genuinely part of their session.
+- `getTodaysMission` requests `limit: 100` per subject. A subject with more than 100 chapters silently omits the rest from the mission candidate set, so a due review on chapter 101 could never be chosen.
+
+Neither is fixed here, deliberately. The obvious fix to the first — assert that every `session.questionIds` entry was hydrated and fail loudly — **changes behaviour for a case that is currently tolerated**: a question withdrawn mid-session is presently skipped, and would become a hard failure for the entire session. That is a product call about which failure is worse, not a defect fix, and it should not be made silently inside a concurrency audit. The corpus today holds 2,741 questions across 137 chapters, so neither limit is currently reachable.
+
+### D-248 · Three unbounded reads in `content` are handed to that module's owner
+**Status:** **Open — owned by another agent**
+Found while tracing `practice`'s injected edges. All three are in `src/modules/content` and `src/shared/contracts`, which this change does not own, so they are reported rather than edited:
+
+- `content.repository.findChunksByIds` builds `inArray(ragChunks.id, ids)` with **no cap on `ids`**. Its only caller is `retrieval`, so the bound is currently whatever the retrieval depth happens to be — an implicit limit, not a stated one.
+- `content.service.getQuestionsForChapter` and `getHeldOutQuestionsForChapter` take `limit?: number` and default to `DEFAULT_QUESTION_LIMIT` (20), but apply **no ceiling** to a supplied value. `practice` passes 200 today (see D-247).
+- `content.contract.ts` caps the chapter list at `max(200)` with `default(100)` and offers **no cursor**. A grade/subject with more than 200 chapters returns a silently partial list: the response carries no indication that it was truncated. Either paginate it or make the truncation visible in the response body.
+
+
+## Identity security remediation — 11 August 2026
+
+*Five confirmed defects in `src/modules/identity/`, plus what fixing them uncovered. Every fix in this section was mutation-proven: the defect was re-applied and a NAMED test was shown to go red. The result is recorded on each entry, because a fix nobody broke on purpose is a fix nobody has evidence for.*
+
+### D-217 · A mail outage returned 500 on signup, after the account was already created
+**Status:** Active
+`identity.service.ts` awaited `mail.send` bare at three call sites — signup verification, the existing-address notice, and the reset request — with the user row committed at the line above. A provider blip therefore produced a **502 after the INSERT**: the address was taken, the caller was told the signup failed, and retrying with the same address hit the unique index. The single worst outcome in the funnel, from a transient third-party failure.
+
+Two files stated the opposite contract in as many words — `container.ts` and `guarded-mail.ts` both promise "a mail outage must degrade to 'verification queued', never 'signup fails'". **The catch they described was never written.** The comments were the entire implementation, which is another instance of the D-214 pattern.
+
+Every send is now issued through `deferMail`, which starts it and does not await it. `DependencyError` — and only that class — is logged at `warn` and counted under `identity.mail.deferred`; anything else is a programming error in OUR message and is logged at `error` under a **separate** metric, `identity.mail.unexpected_failure`. Folding the second into the first would hide a permanent bug inside a transient-failure dashboard.
+
+**What "deferred" means, precisely, because it is weaker than a queue:** the send is fire-and-forget and the process may exit before it completes. That is acceptable ONLY because the recovery path does not depend on it — the verification and reset tokens are committed rows, so a resend re-mails a token that is already persisted. Losing a send costs one email, never an account. `platform/jobs` is the right home the day a resend endpoint is not enough; that is a cross-module change and was reported, not smuggled in.
+
+**Mutation proof:** restoring `await mail.send(...)` at the signup call site turns `SIGNUP STILL SUCCEEDS WHEN THE PROVIDER IS DOWN, and the token is persisted` red (a 502 escapes), along with four sibling assertions; doing the same in `requestPasswordReset` turns `RESET REQUESTS SURVIVE THE SAME OUTAGE, with the reset token persisted` red.
+
+### D-218 · `requestPasswordReset` and `signup` were latency oracles
+**Status:** Active
+Both endpoints return a **byte-identical** body whether or not the address has an account, and a test has asserted that for a long time. The **timing** was not identical: an unknown address returned after one indexed SELECT, a known one after a token INSERT **and a synchronous SMTP round trip**. Hundreds of milliseconds, measurable from anywhere on the internet, answering exactly the question the identical body exists to withhold. `login` has had a real median-ratio timing test since it was written; signup and forgot-password had none.
+
+Closed by the same change as D-217 plus one addition: the reset token is now generated **before** the existence branch, on both paths, in the same spirit as login's dummy Argon2 verification. With the send off the request path there is no longer a term worth equalising — it was the dominant one by two orders of magnitude, and it could never have been equalised anyway, since the unknown branch has no address to mail.
+
+**The residual is named rather than hidden.** Signup's new-account path still performs two INSERTs where the taken path performs one that fails on the unique index: about six milliseconds in the container harness, against a 150 ms defect signal. The test bounds separate the residual from the defect with two orders of magnitude of daylight, deliberately — a bound tightened to the currently-measured number is a bound that goes red on a slow agent and gets deleted within a week.
+
+**Mutation proof:** awaiting the send in `requestPasswordReset` turns `ANSWERS A KNOWN AND AN UNKNOWN ADDRESS IN THE SAME TIME` red at a 163 ms delta against a 50 ms bound; awaiting it in `signup` turns `ANSWERS A NEW AND AN ALREADY-REGISTERED ADDRESS IN THE SAME TIME` red at 178 ms.
+
+### D-219 · Sessions had no absolute lifetime, so a stolen token used regularly never expired
+**Status:** Active
+§6.1 states two rules that only mean something together — "lifetime 30 days absolute" and "extend when used and older than 24 hours" — and only the second was implemented. Renewal **replaced** `expires_at` with `now + 30 days` and **no code path ever read `created_at`**. A stolen cookie touched once inside each 24-hour renewal interval was therefore a **permanent credential**, under a comment in `validateSession` claiming an abandoned session "still dies on the 30-day ceiling". The ceiling was never checked.
+
+There are now two bounds, and they are different kinds of thing:
+
+| bound | value | stored where | moves? |
+|---|---|---|---|
+| sliding / idle | `SESSION_IDLE_TTL_MS`, 14 days | `sessions.expires_at` | pushed forward on use |
+| absolute | `sessionTtlDays`, 30 days, from config | derived from `sessions.created_at` | **never** |
+
+`created_at` is now selected on every validation and written from the **injected clock** rather than left to the column default — otherwise the anchor would carry the database's `now()` while the comparison used the application's, which is a two-clocks bug whose symptom is a session that never expires and which no `FixedClock` test could observe.
+
+The rule is enforced **twice on purpose**: every write is clamped to the ceiling (`sessionDeadline`), and every validation checks the ceiling independently (`isPastAbsoluteLifetime`). The clamp protects rows written by this version of the code; the check protects rows already in the table, every one of which carries an unclamped `expires_at`. A clamp alone would leave the existing sessions immortal.
+
+**The cookie's `Max-Age` now has a stated authority.** It carries the **absolute** deadline, and it must: a cookie set to the idle deadline would be discarded by the browser two weeks in, signing out an active user whose server-side session was alive and renewing. The two therefore agree, because `expires_at` is clamped to the same ceiling and can never be later. The **server is authoritative regardless** — `maxAge` is a hint, and `validateSession` checks both bounds against the database on every request.
+
+**Also found:** the first draft of the ceiling test advanced the clock 25 days in ONE hop and then asserted the clamp. With a 14-day idle window that session is dead on the idle bound long before the clamp matters, so the test asserted nothing about the thing it was named for. It now walks forward in two 13-day hops, each of which renews.
+
+**Mutation proof:** dropping the `isPastAbsoluteLifetime` check and restoring the unclamped renewal deadline turns `KILLS A CONTINUOUSLY RENEWED SESSION AT THE ABSOLUTE CEILING` red (the session is still alive past day 30) and `never writes an expires_at past the absolute ceiling` red (day 40 written where day 30 was required).
+
+### D-220 · `POST /auth/logout` was unauthenticated, unthrottled, and reached the `auth` pool
+**Status:** Active
+Logout is deliberately not behind `requireSession` — logging out of an already-dead session must succeed, not 401 — which made it the one endpoint that is simultaneously anonymous and able to reach the database. The database it reaches is the **`auth` pool**, the pool §3.1's bulkhead exists to keep free so that login always has a connection. A loop from one host with no credentials could empty it.
+
+It is now rate limited by IP at 30/hour, and **the order of two lines is the fix**: the limiter runs FIRST and the empty-token return runs SECOND, so a flood is counted whether or not it carries a cookie, while a cookie-less request touches the cache and nothing else — it consumes no `auth` connection at all.
+
+The counter has its **own key namespace** rather than sharing `login:ip:`. A shared counter would let a flood of anonymous logouts spend the budget a real user needs to sign IN: throttling the cheap unauthenticated endpoint must never be able to lock anybody out of the expensive authenticated one.
+
+**Mutation proof:** deleting the `limiter.consume` line turns `RATE LIMITS logout by IP` red.
+
+### D-221 · `hashIp` was unsalted, so the hash was decorative
+**Status:** Active
+`sessions.ip_hash` was `sha256(ip)`. There are 2^32 IPv4 addresses; a plain SHA-256 over that space is enumerable end to end on a laptop, so anyone holding the column held the addresses — pseudonymised in name only. The same digest was also a rate-limit **cache key**, which made it a **stable cross-store correlator**: a cache dump and a database dump join on it perfectly.
+
+The salt is now a **required parameter with no default**, threaded from the composition edge through `createIpHasher` so that no request-path call site holds the secret. A default would be the regression: one call site omitting it would silently reproduce the original digest and every test would still pass.
+
+**Rotation resets every rate-limit counter and orphans every stored `ip_hash`. That is accepted.** It is the same loss a process restart already causes for the in-process fallback counters; the counters are 15-minute and 1-hour windows whose worst case is one extra window's budget for an attacker who cannot observe the rotation, and `ip_hash` is diagnostic data — not a credential and not a foreign key. Rotate at will; do not rotate hourly.
+
+**Mutation proof:** dropping the salt from the digest turns `IS NOT THE BARE SHA-256 OF THE ADDRESS` and `produces a different digest under a different salt, so rotation works` red. Note that the four pre-existing `hashIp` assertions — deterministic, differs between addresses, 32 hex characters, does not contain the input — **all pass against the unsalted version**. Every property a hash is supposed to have, and not one of them was the property that mattered.
+
+### D-222 · The salt separator was a raw NUL byte in a source file
+**Status:** Active
+The first cut of D-221 concatenated salt and value with a **literal NUL control character** in the template literal. The domain separation is right and is kept: without a separator, `('ab', 'c')` and `('a', 'bc')` produce the same digest, so a rotated salt can collide with the salt it replaced, and NUL is the one byte that occurs in neither an IP string nor an email address.
+
+The **encoding** was wrong. A raw NUL makes `git` and `grep` classify the whole file as binary — `grep` reported "Binary file matches" and refused to print, while the diff rendered the byte as a space, which is how it survived review. It is now written as an escape: identical bytes hashed, and a file the tools will still search. **A file that cannot be grepped is a file nobody reviews.**
+
+### D-223 · The IP-hash salt is not read from `process.env`, and the durable fix is reported
+**Status:** CLOSED by D-273 — `IDENTITY_IP_HASH_SALT` is in `config.schema.ts`, threaded through `app/routes.ts`, and documented in both `.env.example` files. It is deliberately NOT a production boot refusal yet; that residue is D-280 item 1.
+The first cut resolved the salt as `deps.ipHashSalt ?? process.env.IDENTITY_IP_HASH_SALT`, which `no-restricted-properties` rejects in as many words: the environment is parsed **once**, in `platform/config`, into a frozen object, so the set of variables a deployment depends on is enumerable in one file rather than discovered by grep. A module reaching around that is how a deployment acquires an undocumented required variable.
+
+The env read is gone. The salt arrives as an optional dependency at the module boundary, and when it is absent the module logs at `warn` and falls back to `UNCONFIGURED_IP_HASH_SALT`, a build constant documented as **not secret**. That is a real but **partial** fix, labelled as such: it defeats a generic precomputed rainbow table over the IPv4 space and defends against nobody who has the source.
+
+A build constant is nonetheless the right fallback rather than a per-process random one. The digest is a rate-limit cache KEY, so a salt that differed per instance would silently convert the shared cross-instance counter into a per-instance counter — the D-034 security downgrade, arriving by accident and with no warning line.
+
+**Owed by another owner:** an `IDENTITY_IP_HASH_SALT` entry in `platform/config/config.schema.ts`, threaded through `app/routes.ts` into `createIdentityModule({ ipHashSalt })`. Until it lands, the warn line is the visible marker of the gap.
+
+### D-224 · Three smaller findings sit outside `identity` and were reported, not reached across for
+**Status:** **Needs platform / app owner**
+All three were confirmed and none is in a file this module owns. They are recorded here so they are not lost between agents:
+
+| finding | file | state |
+|---|---|---|
+| `retry-after` reports the **full window** rather than the time remaining in it | `src/platform/rate-limit/limiter.ts` — `new RateLimitError(rule.windowSeconds, …)` | unfixed; leaks nothing, but tells a well-behaved client to wait an hour when the window resets in seconds |
+| inbound `x-request-id` is accepted **unbounded** — a client may supply a megabyte, which then rides every log line for that request | `src/app/plugins/request-id.ts` | unfixed; needs a length cap with a fresh id substituted past it |
+| the header comment claims `tenant_id` **is nullable**; the column is `.notNull().default(DEFAULT_TENANT_ID)` | `src/platform/db/schema/identity.ts` | stale comment only — the D-073 reasoning it points at was implemented and the comment was not updated with it |
+
+### D-225 · The harness's mail fake is why two live defects were invisible to 300 passing tests
+**Status:** Active
+D-217 and D-218 sat in the hottest path in the product with a full service suite, a routes suite and a dedicated security suite over them. Neither was visible, and the reason is one object: the harness substitutes `RecordingMail`, whose `send` never fails and returns in microseconds. Against that fake **a bare awaited send and a deferred one are indistinguishable** — the outage branch never executes and the latency term is exactly zero.
+
+The lesson generalises past mail. **A fake that only models the success path can only test the success path**, and the defences that most need testing — degradation, timing symmetry, back-pressure — are all properties of the failure path. A fake with no failure mode silently narrows a suite to the cases nobody was worried about.
+
+`identity.mail-path.test.ts` supplies the fake that can see both: `LatentMail` has a `failWith` mode (transient outage vs programming error) and a `delayMs` that models the SMTP round trip. **No test in it sleeps** — the delay lives inside the port, where it models a real dependency, and the deferred-failure assertions are made deterministic by awaiting the same promise `deferMail` attached its handler to, never by waiting for a timer.
+
+---
+
+## Platform hardening wave — 11 August 2026 (D-226 to D-240)
+
+Eight confirmed defects in `platform/mail`, `platform/db`, `platform/metrics`, `platform/jobs`, `app/server.ts`, `app/health.ts`, `app/container.ts` and `scripts/clear-content.ts`. **Every one was proved by re-applying it and watching a named test go red** — the D-214 standard. Seven of the eight are the same shape the audit wave named: enforcement that looks installed and enforces nothing. One of them, D-226, is worse than that: it was a subsystem that did not exist at all, behind an interface that said it did.
+
+### D-226 · There was no mail adapter. Production printed verification links to stdout and delivered nothing
+**Status:** Resolved
+
+`src/platform/mail/` contained a port, a guard and a CONSOLE adapter. There was no real implementation of any kind, and `container.ts` defaulted to `createConsoleMail()` **with no environment gate**. So in production:
+
+- `signup` wrote a verification token to the database and printed its link to stdout. Nobody could ever verify an address.
+- `forgotPassword` did the same with a reset link.
+- `mail.send` resolved, so the breaker never opened, no metric moved, and every health probe stayed green.
+
+**The entire acquisition funnel was dead and the system reported itself perfectly healthy.** `RESEND_API_KEY` was being passed by the deployment and silently ignored, which is how it survived review: the variable's *presence* was the evidence people were reading.
+
+**SMTP, not a vendor HTTP API.** The owner intends to send through Google Workspace, so the transport is SMTP with an app password (`smtp-mail.ts`, `mail-templates.ts`). That is not a compromise — it is the version with the fewest moving parts: no SDK, no vendor auth model, no webhook, and changing provider is four environment variables and no code. **The `MailPort` shape is unchanged**, so nothing upstream of the composition root knows this landed.
+
+**The transport is injected**, and that is what makes it testable: `createSmtpMail` takes a one-method `MailTransport`, and `createNodemailerTransport` is the only function that touches nodemailer. **No test in this repository opens a socket to an SMTP server, and the seam is what guarantees it rather than a convention.** 13 tests in `smtp-mail.test.ts`, including SMTP header injection (a `\r\n` inside a signup-form email address is how `Bcc:` gets appended) and the missing-field case, whose signature without a guard is a delivered email reading `undefined` where the link should be.
+
+**`createContainer` now refuses to boot in production without SMTP** — the same treatment `embed`, `llm` and `payments` already had, and for the same reason: *a console mailer in production is not a degraded mode, it is a silent total failure of signup and password reset.* The error names which of the four variables is missing, because `SMTP_FROM` is genuinely separate from `SMTP_USER` (Workspace allows sending as an alias) and "I set the credentials" and "I set the visible From" are different states.
+
+**Proof:** removing the production gate turns `boot-gates.test.ts > production refuses to boot without SMTP` red (6 tests). Making `send` a no-op turns `smtp-mail.test.ts > sends ONE message per call, with the configured From` red.
+
+### D-227 · `trustProxy: true` collapsed every IP-keyed rate limit to no limit at all
+**Status:** Resolved
+
+`server.ts:53` passed `trustProxy: true` to Fastify. That means *believe the `X-Forwarded-For` header from anyone*, and `request.ip` is what signup (3/h), login (5/15min) and forgot-password (3/h) are all hashed from via `hashIp`.
+
+A client that sends a different forged header on each request therefore **gets a different bucket on each request**. All three limits become unbounded, with no error, no log line and no metric — the limiter is still installed and still counting, and counting a fresh key every time.
+
+The fix is `config.http.trustProxy`, a `false | readonly string[] | number` union fed by `TRUSTED_PROXY_CIDRS` **or** `TRUSTED_PROXY_HOPS` (never both — Fastify takes one value, so with both present one would be silently ignored). **The union cannot express `true`**, so "believe everyone" is closed in the type rather than in a review comment.
+
+**The default is to trust nobody**, and that is the safe wrong answer: unconfigured behind a proxy, the whole fleet shares one bucket and the limits are too STRICT — a visible, complainable failure. Trusting a forged header is an invisible one, and **between a default that over-blocks and a default that silently stops blocking, only one of them gets noticed.**
+
+**Proof:** restoring `trustProxy: true` turns `trust-proxy.test.ts > a forged X-Forwarded-For does NOT change the rate-limit key` red — three rotated addresses become three distinct `hashIp` buckets instead of one.
+
+### D-228 · The pool arithmetic counted one process out of two, and `DATABASE_POOL_MAX` was read by nothing
+**Status:** Resolved
+
+`pools.ts` carried the sentence *"44 total, comfortably inside a default `max_connections` of 100 with room for administrative access."* 44 is **one** process's sum. There are two: `main.ts` and `worker-main.ts` both call `createContainer`, which both calls `createDbPools`, which builds all four pools in each. The real figure was **88 of 100** with a single replica of each, and **132** during a rolling api deploy, which by construction runs the old and new api at once.
+
+Crossing `max_connections` does not present as one slow module. It is `FATAL: sorry, too many clients already` on every checkout in every pool at the same instant, **plus a `psql` that cannot connect to diagnose it** — the exact failure §3.1's bulkheads exist to prevent, arrived at from the server side, with the bulkheads working perfectly throughout.
+
+`DATABASE_POOL_MAX` was parsed, validated, and consulted by no code at all.
+
+Two corrections, in `pool-budget.ts` as a **pure, tested function** — because the thing that was wrong before was arithmetic in a comment, and a comment cannot be tested:
+
+1. **Role awareness.** An api only ENQUEUES onto `worker` (one indexed INSERT, plus the metrics sink), so it is capped at 2. A worker serves no login, so `auth` is capped at 2 and `core` at 4. `ai` is deliberately NOT capped in the worker: starving a vector pool is a silent quality regression, not a loud failure.
+2. **An enforced ceiling.** `DATABASE_POOL_MAX` is now the per-process cap, and the set scales down **proportionally** when the role profile still exceeds it — because the ratios between the four pools ARE the §3.1 policy, and taking the excess off the biggest pool would silently rewrite that policy at whichever ceiling an operator happened to pick. Floor of 1: a pool with zero connections is not a smaller bulkhead, it is a module that cannot run, presenting as an unexplained hang.
+
+At the defaults: **api 40, worker 20, 60 of 100**, leaving room for a rolling deploy's overlap and for `psql`. Total across replicas cannot be enforced from inside one process, so the header states it as the operator's sum rather than assuming it.
+
+**Proof:** restoring the api's `worker` cap to `null` turns `health.test.ts > reports each connection pool separately` red (`worker:2` becomes `worker:6`) and `boot-gates.test.ts > keeps two processes inside a default max_connections of 100` red. Ignoring the ceiling turns `pool-budget.test.ts > never opens more than DATABASE_POOL_MAX across all four pools` red at every one of the 97 ceilings it sweeps.
+
+### D-229 · The health endpoints handed the database host, port and username to anyone
+**Status:** Resolved
+
+`db/health.ts` carried `error: string | undefined`, populated from `cause.message` and rendered **verbatim** into the body of both `/health/ready` and `/health/deps`, which are reachable by anything that can open a socket to the service. The comment beside it said "log-safe; never the connection string, which carries the password" — true, and beside the point, because a node-postgres connection failure reads:
+
+```
+connect ECONNREFUSED 10.0.3.14:5432
+password authentication failed for user "foxxy_app"
+no pg_hba.conf entry for host "10.0.1.7", user "foxxy_app"
+```
+
+Host, port, username, and the private address of the application itself, to an unauthenticated caller, **at the exact moment the database is down and somebody is looking for a way in.** There was already a comment at the old `db/health.ts:107` acknowledging the risk. The code did not act on it — the guard had been written as prose, which is this codebase's signature defect.
+
+Now: `/health/ready` returns `{ status }` **and nothing else**. It is consumed by a load balancer, which reads the status code; the body was for humans, and the humans it reached were not only ours. `/health/deps` may say WHICH dependency is unhealthy through a **closed union** — `'unreachable' | 'timeout' | 'schema_incomplete'` — which is enough to route an operator to the right runbook page and **cannot grow a hostname, because it is not a string.**
+
+**Proof:** re-rendering `cause.message` into either body turns `health.test.ts > leaks no host, port or username with the database down` and `> classifies the failure without a vendor message` red.
+
+### D-230 · Readiness never probed the cache, and eviction silently disabled rate limiting
+**Status:** Resolved
+
+Two fail-open blindspots with one root: nothing anywhere asked whether rate limiting still worked.
+
+**(a) Readiness ignored the cache.** `platform/rate-limit` is deliberately built to survive Valkey's loss — when `cache.incr` throws, counting moves into process memory so one dead container cannot take authentication down. That trade is correct and its own header states the cost: *"the fallback is DELIBERATELY WEAKER: per instance, not global, so N instances admit up to N x the limit."* What was missing is the other half. **A replica in that state stayed in the load balancer's rotation indefinitely**, answering login and signup on a counter that resets whenever it restarts. Nothing removed it, because nothing asked.
+
+`createCacheProbe` now runs in `/health/ready`, against the **raw** cache rather than the guarded one — probing through the breaker would report the breaker's state rather than the cache's, so a replica could never observe the recovery that would return it to rotation. It **reads one key and never writes**: a `set` probe would add a write to an `allkeys-lru` store on every health check from every replica, which is load applied in proportion to how many things are watching it.
+
+**(b) Eviction had no signal at all.** Valkey runs `allkeys-lru`. A rate-limit counter is almost by definition among the least recently used keys — touched a handful of times, then not again for fifteen minutes. When one is evicted mid-window the next `incr` returns 1 and the limiter reads it as a first attempt: **an attacker on their fifth login attempt is back to their first.** There is no error. The cache is up, `incr` succeeded, the breaker is closed, and the in-process fallback — which *does* have a metric — never activates. **Rate limiting silently stops limiting while every signal in the system says it is working.**
+
+`WindowDeadlines` remembers, per key, when the window it just counted into is due to close; a later `incr` returning 1 before that deadline means the counter was destroyed by something other than time. `rate_limit.counter_evicted` is emitted, distinct from the fallback metric because "Valkey is gone" and "Valkey is up and shedding our keys" are different runbook pages. It is a **hint, not a source of truth**: it can only ever miss evictions (a key evicted after its window closed is indistinguishable from one that expired), never invent one. **A metric that under-reports is actionable; one that over-reports gets muted.** A deliberate `reset()` forgets the deadline, so a successful login does not report an eviction — a signal that fires on the happy path is a signal nobody reads.
+
+**Proof:** deleting the cache check from `/health/ready` turns three tests in `health.test.ts > GET /health/ready — with the CACHE down` red. Deleting the `observeWindowStart` check turns `counter-eviction.test.ts > emits the metric when a window restarts before its deadline` red.
+
+### D-231 · `/health/ready` accepted a half-migrated database
+**Status:** Resolved
+
+`db/health.ts` decided readiness with `migrationsApplied = (rows[0]?.count ?? 0) > 0`. **One row.** A database with `0000_baseline` applied and the other five pending satisfied it, so readiness returned 200 and the load balancer routed live traffic into a schema with no `practice`, `parent`, `billing` or `foxy` tables.
+
+The failure then arrives as 500s on whichever endpoint touches a missing table first — **which reads as an application bug rather than as a deploy that did not finish**, and is therefore debugged in the wrong place for as long as it takes somebody to think of it. The migration step is deliberately not run on boot (see the Dockerfile), so "code deployed, migrations not" is a **reachable state by design**, and readiness is the thing that was supposed to notice.
+
+`migration-manifest.ts` reads drizzle's own journal — `<migrations>/meta/_journal.json`, whose `when` values are exactly what the migrator writes into `__drizzle_migrations.created_at`, so the comparison is set membership on a number, with no hashing and no per-file reads. The folder travels with the image (`COPY drizzle ./drizzle`) precisely so the SQL matches the code, and this reads the same copy, so the expectation and the artefact cannot drift. **Read once at boot, never per probe**: a readiness endpoint that hits the filesystem per request is one a health checker can turn into disk load.
+
+**Extra applied migrations are not a failure.** A rolling deploy runs the new schema alongside the old code by design, and failing readiness on the old replicas during that window would take the service down in the middle of a successful deploy. Missing is fatal; extra is expected.
+
+Production **refuses to boot** when the journal is unreadable, because the fallback is the old useless rule, and *a fallback that is right in development and wrong in production, with no way to tell which one you are running, is the same defect wearing a different hat.*
+
+**Proof:** restoring `applied.length > 0` turns `migration-manifest.test.ts > REFUSES a half-migrated database` and `> refuses when a SINGLE migration in the middle is missing` red. The second is the one row-counting can never see: the count is 5, which is emphatically greater than zero.
+
+### D-232 · A breaker opening could sit in memory indefinitely — the failure suppressed its own alert
+**Status:** Resolved
+
+`postgres-metrics.ts` flushed on two events: 100 buffered observations, or shutdown. Nothing else.
+
+Take the single event this subsystem exists for. §5: *"a breaker that opens without anyone knowing is a silent outage."* The transition emits **one** counter. It lands at position 7 of 100 and stays there — **because the dependency is now down, so the traffic that would have filled the buffer has stopped.** The failure suppresses the very observations that would have flushed the record of it. The alert evaluator polls `metrics_events` and sees nothing. If the process is then killed rather than shut down cleanly, the observation is lost outright and the incident has no trace at all.
+
+Three triggers now: **count** (100, unchanged, for throughput), **interval** (5 s while anything is buffered, which bounds the AGE of an observation — the property alerting actually depends on), and **severity** (immediate, for the observations an alert is written against: breaker transitions, dead jobs, degradation activations, PII scrubs, and all three rate-limit fallback/eviction metrics).
+
+The severity set is a set of **names**, not a `severity` field on `MetricEvent`. A field would have to be set correctly at every call site including the ones written next year, and **the failure mode of forgetting it is exactly the silence this closes.** A name is already an API — dashboards are written against it — so a rename that missed the set would break a dashboard first, loudly.
+
+The timer is armed lazily and disarmed when the buffer empties (a permanently-armed timer is a wakeup every five seconds forever in every process, bought for no observability), is `unref`'d (a metrics sink must never be why a container refuses to exit), and is **injected**, so "five seconds elapsed" is a function call and plan §9.5's ban on sleeping in tests holds.
+
+**Proof:** removing the severity check turns `postgres-metrics.test.ts > ONE breaker-open reaches the table WITHOUT 99 companions` red. Removing the interval turns five tests under `> the interval trigger` red. Making *everything* immediate turns `> does NOT flush immediately for an ordinary observation` red — the control that stops the fix from restoring the per-observation insert storm the buffer exists to prevent.
+
+### D-233 · `succeed`/`fail` raced the reaper, and a job's final state could flip to the wrong answer
+**Status:** Resolved
+
+`postgres-queue.ts` carried this comment above `fail`:
+
+> *"The decision is made in SQL with a CASE rather than by reading `attempts` and writing back, because a read-modify-write here races with the reaper — which is also allowed to change this row's status."*
+
+The code directly beneath it did a `SELECT`, then an `UPDATE`, keyed on `id` alone. **It described the race it was going to lose, and then lost it.** `succeed` had the same fence-free `where id = $1`.
+
+The race is not exotic. A handler may legitimately outrun the 120-second lock timeout — a large digest, a slow provider. `reapStuck` returns the row to `pending`, a second worker claims it, and two workers are now running the same job. Both finish, and whichever finishes last wins:
+
+- a stale `succeed` overwrites the new owner's `running`, whose later `fail` then marks a genuinely successful job `failed` and schedules a **third** run; or
+- a stale `fail` overwrites a genuine `succeeded`, so the final state of a job that worked says it did not.
+
+**At-least-once execution is an accepted, documented property of this queue. A final state that is wrong is not**, and handler idempotency cannot fix it, because the corruption is in the queue's own bookkeeping rather than in the side effect.
+
+Both methods are now one statement fenced by `and status = 'running' and locked_by = <lease> and locked_at = <lease>`, and `fail` really does decide `dead` versus `failed` with a `CASE` over the row's own columns, returning the status the database actually chose rather than the one we predicted. The comment and the code now agree.
+
+**The fence is structural, not remembered.** `succeed`/`fail` take a `ClaimedJob` — a type whose only producer is `claim` — instead of a `jobId: string` that any id from anywhere satisfied. `ClaimedJob` is separate from `JobRecord` deliberately: a handler receives the work, not the bookkeeping, so `JobHandler` stays `(job: JobRecord)` and **nothing under `src/modules/` had to change.**
+
+`lease_lost` is a third `FailureOutcome` rather than an exception, because it is an expected benign race and a throw would make the runner's `catch` treat a successfully-avoided double-write as a job failure. The runner emits `platform.job.lease_lost` and logs at `warn`: nothing is broken, but the lock timeout is shorter than that kind of job actually takes, so the handler is running twice on every occurrence.
+
+**Proof:** removing the `locked_by`/`locked_at` conditions turns `job-queue.test.ts > refuses a stale succeed, leaving the new owner running` and `> refuses a stale fail, so a succeeded job cannot be flipped back` red, against a real Postgres with the reaper actually reclaiming the row between claim and completion. A control test asserts the CURRENT owner still completes normally — a fence that rejected everything would pass the first two and break the queue entirely.
+
+*Found while fixing it:* `JobRow.locked_at` was declared `Date` and the driver hands back a string. `run_at` and `created_at` carry the same untrue annotation and have never been caught, because nothing ever calls a method on them. The lease is different — it is formatted back into the next statement — so it is typed honestly as `Date | string` and normalised once, in `toRecord`.
+
+### D-234 · `clear-content` had no production guard while `seed-dev` did
+**Status:** Resolved
+
+`seed-dev.ts` has refused to run against `NODE_ENV=production` since it was written. `clear-content.ts` did not, and **it is by far the more dangerous of the two.** Seeding production adds six fake chapters: embarrassing, and reversible. `clear-content` issues `TRUNCATE ... CASCADE` over six content tables, and the cascade reaches `chapter_mastery` — **every student's learning history** — with no confirmation step and no backup step.
+
+The realistic accident is not somebody typing this at a production shell. It is `DATABASE_URL` still exported in a terminal from an earlier task, or a `.env` pointing at staging-which-is-actually-production, and the command running **exactly as designed** against the wrong database.
+
+The guard is an **exported pure function**, `assertNotProduction(env)`, not an `if` inside the non-exported `main`. An inline check could only have been tested by actually running the TRUNCATE, so it would have shipped untested — which is the shape of every defect in this codebase's audit history. It checks `NODE_ENV`, the same signal `seed-dev` and the container's boot gates use, so there is one answer in this codebase to "is this production" rather than three.
+
+**Proof:** deleting the throw turns `clear-content-guard.test.ts > THROWS for production — the named test the guard exists for` red.
+
+### D-235 · The wave stayed inside its ownership boundary, and one design choice exists only because of it
+**Status:** Active — a note on scope
+
+Everything above lives in `platform/mail`, `platform/db`, `platform/metrics`, `platform/jobs`, `platform/cache`, `platform/rate-limit`, `platform/config`, `app/server.ts`, `app/health.ts`, `app/container.ts`, `src/worker-main.ts` and `scripts/clear-content.ts`. **No file under `src/modules/`, `src/app/routes.ts`, `src/app/plugins/`, `docker/` or `scripts/ops/` was touched.**
+
+That constraint produced a better design once. D-233 introduced `ClaimedJob` as a subtype rather than adding two required fields to `JobRecord`, because the latter would have forced an edit to `modules/notify`'s test fixture. The subtype turns out to be the stronger form anyway: a handler has no use for the lease, and confining it to the completion methods is what makes "you cannot complete a job without holding its lease" a property of the type rather than of a convention.
+
+Mechanically updated for changed signatures, all outside module code: `tests/integration/job-queue.test.ts`, `src/platform/db/__tests__/pools-startup-options.test.ts`, `src/platform/jobs/__tests__/job-runner.test.ts`, `eval/retrieval/{harness,sparse-probe,sparse-recall}.ts`, and `tests/integration/{hnsw-ef-search,pool-bulkhead,retrieval-search}.test.ts`.
+
+### D-236 · The drizzle-orm advisory was assessed and the upgrade DECLINED, with the reasoning recorded
+**Status:** Active — deliberately not done
+
+`npm audit --omit=dev` reports one high-severity finding: **GHSA-gpj5-g38j-94v9, SQL injection via improperly escaped SQL identifiers, `drizzle-orm <0.45.2`.** Installed is `0.38.4`.
+
+**The exploit path does not exist in this codebase.** The advisory requires attacker-influenced text to reach an *identifier* position. There is no `sql.identifier` call anywhere in the repository, and all 23 `sql.raw` calls sit in `platform/db/schema/*.ts`, every one of them mapping a **frozen compile-time constant tuple** (`GRADES`, `SUBJECTS`, `SUBSCRIPTION_STATUSES`, `BLOOM_LEVELS`, …) into a CHECK-constraint literal list at schema-definition time. No request value reaches any of them, and none of them run at request time at all. Everywhere else, every value is a bound parameter through `sql` interpolation.
+
+**The upgrade cost is not small.** `0.38.4 → 0.45.2` is seven minor versions of a library whose typed-query surface changes across them, and drizzle-orm 0.45 wants drizzle-kit `0.31.x` against the installed `0.30.6`. That bump regenerates the snapshot and journal format across the six existing migrations — the same `meta/_journal.json` that D-231's readiness check now reads — and verifying it means a migration round-trip against the one development database holding the corpus (137 chapters, 4,686 rag chunks, 2,741 questions, produced by a paid embedding run), which this wave is explicitly forbidden from migrating.
+
+So, per the instruction to say so and stop rather than half-upgrade: **declined, and reported.** It should be its own change, with `db:round-trip` run against a throwaway database and the corpus untouched. Recorded here so the finding is not silently carried as "known and ignored" — it is known, measured to be unreachable, and scheduled.
+
+### D-237 · The resilience plan's `retries` column is enforced nowhere, and it is not this wave's file
+**Status:** CLOSED by D-270 — wired, with the budget/permission split that made it safe to wire at all. `payments: 0` now forbids something.
+
+04-RESILIENCE-PLAN.md §4's timeout table has a **retries** column, and `config.schema.ts` parses it into every `TimeoutRule`: `postgres` 1, `cache` 1, `llm` 1, `embed` 2, `mail` 3, `payments` 0 (*"none on writes — retrying a payment is worse than failing it"*).
+
+`grep -rn retries src/platform/resilience/` returns **nothing**. `port-guard.ts` applies the concurrency limit, the breaker and the timeout, and never reads `rule.retries`. The only retry machinery in the process is `platform/http`'s own `HTTP_MAX_RETRIES`, which is a different setting on a different axis.
+
+So the per-port retry policy is a validated number that nothing consumes — the same shape as `DATABASE_POOL_MAX` before D-228, and one more instance of the pattern D-214 named. **The `payments: 0` row is the one that matters**: it reads as a deliberate safety property, and it is currently indistinguishable from every other row, all of which are equally inert.
+
+`src/platform/resilience/` is outside this wave's ownership, so this is handed over rather than reached across for. Whoever takes it should decide explicitly between wiring `rule.retries` into `PortGuard.run` and **deleting the column from the config and from the plan** — an unwired safety setting is worse than an absent one, because it is read as a guarantee.
+
+### D-238 · Managed-Postgres TLS accepted any certificate at all
+**Status:** Resolved
+
+`pools.ts` hardcoded `ssl: { rejectUnauthorized: false }` whenever `DATABASE_SSL` was on. **That is TLS with the authentication removed.** The connection is encrypted against a passive listener and completely open to an active one, because any certificate is accepted — including one an attacker generates. Whoever sits between this process and a managed Postgres reads every row, every session token, and the credentials in the connection string, and nothing anywhere reports it: the handshake succeeds, the queries work, and "we use SSL" stays technically true.
+
+Verification is on by default now. `DATABASE_SSL_CA` supplies the provider's PEM for a root Node does not already trust — **that is the correct answer**. `DATABASE_SSL_INSECURE` restores the old behaviour and is named so that it cannot be read in a deployment manifest without knowing what it costs. Setting both is a boot failure: a CA plus a disabled check means the CA is verifying nothing while *appearing* to be the secure configuration.
+
+### D-239 · Three of these were the same defect: a probe answering a weaker question than it appeared to
+**Status:** Active
+
+D-229, D-230 and D-231 look like three unrelated health-check bugs. They are one bug three times, and naming the shape is worth more than the three fixes.
+
+Each was a probe that answered a **weaker question than the one it appeared to answer**, and in every case the weaker question's answer was "yes":
+
+| appeared to ask | actually asked | wrong answer it gave |
+|---|---|---|
+| is the schema current? | has *anything* ever been migrated? | ready, with four modules' tables missing |
+| can this replica serve traffic? | can it reach Postgres? | ready, with rate limiting disabled |
+| what failed? | *(answered honestly — to the wrong audience)* | the database host, port and username |
+
+**A probe that returns 200 is trusted absolutely, by machinery that cannot argue with it.** That is what makes a weak readiness check more dangerous than no readiness check at all: the load balancer does not merely fail to protect, it actively routes traffic *into* the broken replica on the strength of the answer.
+
+The rule this wave adds: **state what a probe proves, and make the assertion the same shape as the claim.** `evaluateMigrationState` compares sets because the claim is about a set. `createCacheProbe` performs a real round trip because the claim is that a round trip works. Both are pure or injected, so the claim can be tested rather than reasoned about.
+
+### D-240 · Every fix here was mutation-proven, and one repair was rejected for failing that bar
+**Status:** Active — reinforces D-214
+
+D-214's standing rule: *a guard is not considered enforced until a mutation of it has been shown to turn a named test red.* All eight defects were verified that way, and the named test is recorded in each entry above.
+
+The bar caught one repair on the way in. The first version of `trust-proxy.test.ts`'s hop-count case sent a **single-entry** `X-Forwarded-For`, asserted the derived address did not move, and failed — correctly. A proxy does not replace that header, it **appends** the address it received the connection from, so a server behind one never sees a single-entry chain. The test had been measuring Fastify answering a different question than the one the deployment asks, and a version of it that passed would have "proved" the hop-count configuration against a topology that does not exist.
+
+The rewritten case simulates the proxy's append and asserts on the real chain. **A test whose fixture does not match production proves something about the fixture** — the same lesson D-225 drew from the mail fake, arrived at from the opposite direction: there the fake was too kind, here it simply was not the thing being modelled.
+
+---
+
+## Wave: notify / parent / billing / foxy module correctness (D-257 – D-265)
+
+### D-257 · `foxy`'s plan reader was a stand-in, so every paying customer got the free tier
+**Status:** Active
+
+`app/routes.ts` wired `foxy`'s `readPlan` to `() => Promise.resolve(null)` under a
+comment reading *"billing is build step 13"*. Build step 13 shipped; the line did
+not change. Every plan-gated decision in `foxy` therefore resolved to `free`
+**forever**, and somebody who paid received the 20-message daily cap.
+
+Nothing failed, nothing logged, and no test noticed — **the stand-in was a
+perfectly valid `PlanReader`.** That is the whole shape of this defect: a
+placeholder that satisfies its type is indistinguishable, to every mechanical
+check the project has, from the real thing.
+
+**The obstacle was a recorded-but-unresolved signature mismatch.** `foxy`'s
+`PlanReader` was `(studentUserId) => Promise<FoxyPlan | null>` — no actor — while
+`billing.getEntitlements(actor, subjectUserId)` requires one and runs
+`authoriseSubscription` on it. Two honest resolutions existed:
+
+1. give `PlanReader` an actor; or
+2. mint a **system actor** at the composition root, narrow and named.
+
+**(1) wins, because it needs no new authority to exist.** `foxy` only ever asks
+about the plan of the student making the request — both call sites pass
+`actor.userId` — so the caller *is* the subject, billing's ownership rule is
+satisfied by a real principal, and nothing in the product gains the ability to
+read a third party's billing. A system actor would have been a new principal that
+can read **anybody's** entitlements, created to answer a question that never
+asked for it, and kept narrow by discipline forever afterwards.
+
+**It asks about a CAPABILITY, never a plan name.**
+`hasFeature(entitlements, 'foxy.unlimited')` and not
+`planCode === 'monthly'`. A plan is a commercial artefact — renamed, split,
+retired — and a call site switching on its name is a call site nobody edits when
+the catalogue changes. Expiry needs no code at all: `resolveEntitlements` decides
+"expired" against the injected clock rather than the stored status, so a lapsed
+customer drops to the free cap on their very next turn.
+
+`readPlan` is also now **required** on `FoxyModuleDeps`, so a construction site
+that has not answered the plan question fails to compile rather than silently
+inheriting the cheapest tier.
+
+**Mutation-proven twice, because the defect has two halves and the obvious test
+only covers one.**
+
+- Reverting the mapping to `planCode === 'monthly'` turns
+  `foxy-plan-reader.test.ts` › *follows the CAPABILITY, so a plan code it has
+  never heard of still counts* red (2 failed / 7).
+- Restoring `readPlan: () => Promise.resolve(null)` in `app/routes.ts` leaves that
+  file **entirely green** — the translator is simply never called. That gap is why
+  `app/__tests__/foxy-billing-edge.test.ts` exists: it intercepts
+  `createFoxyModule`, captures the `readPlan` the composition root actually
+  passes, drives it, and asserts it reached billing. The same mutation turns all
+  **5/5** of its cases red. **Testing a translator does not test its binding.**
+
+### D-258 · The public payment webhook had no rate limit, so forged signatures grew an append-only table
+**Status:** Active
+
+`POST /api/v1/webhooks/billing` is the only endpoint in the product that is
+unauthenticated by design, exempt from the CSRF origin check, and reachable by
+anyone on the internet. It had **no rate limit of any kind**, and every delivery
+whose signature failed wrote a durable `audit_log` row — so an anonymous caller
+chose the growth rate of an append-only table.
+
+The global authenticated throttle in `app/server.ts` cannot cover it: that hook
+returns immediately for a request carrying no actor, and **a webhook carries none
+by definition.** The audit row exists to report probing; at volume it *becomes*
+the payload.
+
+**The key is a constant.** Not the client IP, not `x-razorpay-event-id`, not
+anything else in the request — every one of those is chosen by the caller, so
+limiting on them limits nobody: an attacker rotates the value and gets a fresh
+budget, while the one caller who cannot rotate anything is the genuine provider
+behind a stable egress address.
+
+**The budget is spent only by REJECTED deliveries, after the signature check.**
+A single endpoint-wide budget has a nasty edge — an attacker's traffic exhausts
+what Razorpay's bursty retries need, and the visible symptom is subscriptions
+that never activate. Charging only the failing branch removes it: a verified
+delivery never touches the limiter and can never be throttled.
+
+Exceeding the budget suppresses **the audit write and nothing else**. The response
+is byte-identical either way (a different answer under load tells an attacker they
+found the threshold), and the `warn` line still fires — a log line is bounded by
+the log pipeline where an append-only table is not, and *"we stopped auditing
+because we are being flooded"* is itself what an operator needs to see. 30/minute
+is far above any plausible rate of genuine signature failure and far below a
+capacity problem; the first rejection in a window is always audited, so a single
+probe is never invisible.
+
+`rateLimiter` is **required** on `BillingServiceDeps` and `BillingModuleDeps`. An
+optional limiter with a permissive default would restore the defect silently.
+
+**Mutation-proven:** replacing `if (await rejectionBudgetAvailable())` with
+`if (true)` turns `webhook-rejection-budget.test.ts` red — 4 failed / 7,
+including *STOPS WRITING AUDIT ROWS once the budget is spent* (30 expected, 70
+observed) and *spends the budget on a CONSTANT key, not one the caller controls*.
+The repository in that suite is a **landmine** — every method throws — so "a
+rejected webhook does no database work" is a property the file would fail on
+rather than a claim in a comment.
+
+### D-259 · The notification cursor named fewer columns than the sort, and skipped rows
+**Status:** Active
+
+`NotifyRepository.list` has always ordered by `(created_at desc, id desc)`. Its
+cursor was `created_at` alone, applied as `created_at < :before`.
+
+**A cursor over one column against a sort over two does not name a row.** It names
+an *instant*, and every row sharing that instant falls on the excluded side of
+`<`. So a page ending on one of two same-instant notifications asked next for rows
+strictly older than that instant — and the twin, which sorts immediately after and
+was never returned, appeared on **neither page**. Skipped permanently, with a
+perfectly ordinary-looking page either side of it.
+
+**Ties are the normal case here, not a corner of it.** `created_at` defaults to
+`now()`, which does not advance inside a transaction; a bulk send writes a batch
+that way; and every test in the suite runs on an injected clock that returns one
+instant until moved. The reason this survived is that the existing pagination
+tests happened to page lists whose rows had distinct timestamps.
+
+The predicate is now the **row-value form**,
+`(created_at, id) < (:ts::timestamptz, :id::uuid)` — one comparison Postgres
+evaluates lexicographically and can drive a composite btree with. The
+hand-expanded `or` equivalent means the same thing only while all three
+predicates stay in step, and getting one wrong is this defect again. The casts are
+explicit because a row-value comparison gives the planner no column to infer a
+parameter type from, and an untyped parameter is `text` — which would order rows
+by their printed form.
+
+**Both halves or neither, enforced as a 400.** The wire carries `before` +
+`beforeId` and `nextBefore` + `nextBeforeId`, with a zod refinement refusing a
+half-supplied cursor. Accepting `before` alone would mean any un-updated client
+kept asking the exact question that skipped rows — silently, forever. (An opaque
+single token was considered and rejected: it cannot be half-supplied at all, but
+an operator reading an access log can read an ISO timestamp and a uuid and cannot
+read a token, and the refinement buys the same guarantee at the boundary.)
+Internally the service returns one `ListCursor`, so a half-cursor is
+unrepresentable between the repository and the routes layer.
+
+**Mutation-proven:** reverting the predicate to
+`created_at < :before` turns `notify.pagination.test.ts` red — 2 failed / 6:
+*RETURNS BOTH ROWS when a page boundary lands between two identical timestamps*
+and *returns EVERY row across pages when every timestamp in the list is
+identical*. Both assert on the **set of ids** collected across pages rather than
+on page sizes, because a count comparison passes while returning the wrong rows.
+
+### D-260 · Notification preferences lived only in a cache, and eviction silently restored the defaults
+**Status:** CLOSED by D-268 — the reported migration was written and applied, and the two-line wiring in `app/routes.ts` landed with it. Narrows D-012 / D-033.
+
+Preferences were held in `platform/cache` and nowhere else, justified on record by
+*"a lost preference makes the product QUIETER, never louder"*. **Both halves of
+that are wrong.** `maxmemory-policy allkeys-lru` is configured, so eviction is
+ordinary operation rather than an incident; and the default is **no opt-outs**, so
+reverting to it is the *louder* outcome. Somebody who muted email starts receiving
+email again, having changed nothing and been told nothing.
+
+**This narrows the standing rule.** D-012/D-033 say *"nothing whose loss changes
+what a user is ALLOWED to do may live in a cache"*, and an opt-out passed that
+test because an opt-out is not an authorisation. The rule was too narrow: **what a
+user has DECIDED belongs beside what a user is ALLOWED.** Neither can be recomputed
+from anything else we hold, and losing either is losing something they gave us.
+
+`createDbPreferencesStore` (`notify.preferences.repository.ts`) and
+`createWriteThroughPreferencesStore` are both **finished and deliberately
+unwired**: the table does not exist. The order of the two writes is the design —
+the durable write happens first and its failure propagates; the cache write
+happens second and its failure is swallowed. Reversed, a cache that accepted a
+value the database refused would serve it until eviction and the old one forever
+after, which is the least diagnosable shape this bug has. A cache **miss is not an
+answer** and absence is never negatively cached: only a durable `null` means
+"never chosen".
+
+It is **latent rather than live** only because there is no service-level write
+path yet, which is what made it possible to fix properly instead of quickly.
+
+**MIGRATION REQUIRED — reported, not written** (`drizzle/` is owned by another
+change in flight):
+
+```sql
+CREATE TABLE "notification_preferences" (
+  "user_id"     uuid PRIMARY KEY REFERENCES "users"("id") ON DELETE CASCADE,
+  "preferences" jsonb NOT NULL DEFAULT '{}'::jsonb,
+  "updated_at"  timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "notification_preferences_object_check"
+    CHECK (jsonb_typeof("preferences") = 'object')
+);
+```
+
+plus the matching drizzle table object in `src/platform/db/schema/notifications.ts`.
+Wiring is then two lines in `app/routes.ts`. **A second index is also wanted for
+D-259:** `notifications_recipient_created_idx` is
+`(recipient_user_id, created_at desc)` and the composite cursor sorts by
+`(created_at desc, id desc)`, so it should become
+`(recipient_user_id, created_at desc, id desc)`. Correctness does not depend on
+it; the plan does.
+
+**Mutation-proven:** making the write-through `read` treat a cache miss as the
+answer turns `preferences-persistence.test.ts` red — 5 failed / 9, including
+*STILL RETURNS THE OPT-OUT after the cache entry is gone*. The first case in that
+file asserts the **defect itself** against the old cache-only store, so
+"fixing the cache" instead of persisting fails loudly and says why.
+
+### D-261 · The weekly-digest unique constraint was verified in the schema, not merely in a passing test
+**Status:** Active — completes D-211
+
+D-211 added a behavioural test: two repository-level generations for the same
+(parent, child, week) leave one row, unchanged. That asserts an **outcome**, and an
+outcome has more than one possible cause — an application pre-check that answers
+first, an `ON CONFLICT` naming an index that does not exist and therefore never
+fires, or the constraint genuinely working. It cannot tell them apart, yet
+D-211's whole claim is that the constraint is *"the only thing that can settle"* a
+concurrent pair.
+
+**Verdict: the constraint is real.** `weekly_digests_week_key`, UNIQUE over
+`(parent_user_id, student_user_id, week_start)`, declared at
+`src/platform/db/schema/parent.ts:99` and emitted by
+`drizzle/migrations/0003_parent.sql:54`. Nothing needed fixing. What was missing
+was anything that would **notice if it were dropped** — and the schema and the
+tests have diverged here before (D-046, D-075: a harness naming its own migrations
+ran a whole suite against a schema missing a table and stayed green).
+
+`digest-idempotence-constraint.test.ts` now asks Postgres directly. It asserts the
+**column list**, not just the name: a constraint keeping its name and losing
+`student_user_id` would give a parent with two children one digest a week — a
+silent under-delivery rather than an error. A second case proves the constraint is
+**enforced** and not merely declared, by inserting a duplicate into a
+`LIKE weekly_digests INCLUDING ALL` temp table (which carries constraints across
+but not foreign keys, so the test cannot fail for reasons unrelated to
+uniqueness) and asserting SQLSTATE `23505`.
+
+**Mutation-proven:** changing `INCLUDING ALL` to `INCLUDING DEFAULTS` turns
+*REFUSES a duplicate row at the database* red — proving the **UNIQUE constraint**,
+rather than anything else about the table, is what rejects the second insert.
+
+**Adjacent gap, reported not fixed:** notify's *other* digest idempotence —
+`hasDigestFor` over `notifications` where `kind = 'digest_ready'` and
+`data->>'weekStart'` matches — has **no database-level uniqueness at all**. It
+rests on the job idempotency key plus an application pre-check, which is exactly
+the combination D-211 found insufficient. Closing it needs a partial unique index,
+i.e. a migration.
+
+### D-262 · `foxy` stream timeouts release the concurrency slot without cancelling the vendor call — NOT FIXED, ownership blocked
+**Status:** CLOSED by D-271 — the three-file patch below was applied verbatim.
+The rest of this entry is preserved as the diagnosis; see D-271 for what shipped,
+including the one thing this entry did not anticipate (abort BEFORE release, so
+the freed slot is never handed to a waiting caller while the work it accounted
+for is still open).
+
+`createGuardedLlm` enforces the §4 streaming budget with
+`withTimeout(guard.name, remaining, () => iterator.next())` and releases the
+bulkhead slot in a `finally`. **Neither the timeout nor the release cancels the
+underlying work.** `withTimeout` already constructs an `AbortController` and hands
+its signal to the operation (`port-guard.ts:90`), and `guarded-llm.ts` **ignores
+it**; `anthropic-llm.ts` calls `doFetch` with no `signal`. So on expiry:
+
+- the vendor keeps streaming and keeps billing;
+- the socket and its `ReadableStream` reader linger until GC;
+- **real concurrency exceeds the configured limit invisibly** — the slot is free
+  while the work is not.
+
+The same holds when the student disconnects mid-turn: `foxy`'s `for await` and
+`guarded-llm`'s generator are both finalised correctly, but neither calls
+`.return()` on the adapter's iterator, so the fetch body stays open.
+
+**This is entirely inside `src/platform/llm/`, which this change does not own.**
+It is reported rather than half-done, because a partial fix in `foxy` would look
+like a fix and cancel nothing. The required change is three files and additive:
+
+1. `llm.port.ts` — `LlmRequest` gains `readonly signal?: AbortSignal`.
+2. `guarded-llm.ts` — one `AbortController` per stream; pass `signal` into
+   `inner.stream({ ...req, signal })`; `controller.abort()` in the `finally` and on
+   the total-budget `return`, so the release and the cancellation are the same
+   event.
+3. `anthropic-llm.ts` — forward `signal: req.signal` to `doFetch`.
+
+The test to write with it: a scripted adapter that records whether its signal
+aborted, driven past `streaming.totalMs` on the injected clock, asserting the
+abort fired **before** the slot was released.
+
+### D-263 · `requireActor` existed in eight copies; the four in scope are now one
+**Status:** Active
+
+`notify`, `parent`, `billing` and `foxy` each carried a byte-identical fourteen-line
+`requireActor`, differing only in the module name inside the error string.
+`content`, `learner` and `practice` carry three more, and `identity.plugin.ts`
+exports an eighth. **The four in scope now bind one implementation**
+(`src/shared/http/require-actor.ts`); the other four belong to changes in flight
+and are reported.
+
+**Why `shared/` rather than identity's exported copy.** `identity.plugin.ts`
+already exports exactly this function, and importing it would add four
+cross-module edges. Foundation 1 — *every cross-module dependency is injected, not
+imported* — is what keeps `app/routes.ts` the complete dependency graph;
+deduplicating by adding hidden edges to that graph costs more than the duplication
+does. `shared/` is the one place all four may import from that is not a module,
+and this function reads one property and throws.
+
+The risk being closed is not the duplication itself but **divergence**: four copies
+can drift, and the plausible direction is *"return `undefined` instead of throwing,
+because a 500 looked unfriendly"* — which converts a wiring defect into an
+unauthenticated read that nothing reports. The local wrappers and per-module actor
+types are kept, so each module still states its own actor type at its own boundary.
+
+**Mutation-proven:** replacing the body with an unconditional throw turns
+13 tests red across `require-actor.test.ts` and `notify.routes.test.ts`,
+confirming the shared implementation is genuinely bound into the route layer
+rather than merely present.
+
+### D-264 · Email verification mutates security state on GET — reported, and it is identity's route
+**Status:** Open — requires `src/modules/identity/**`
+
+`GET /api/v1/auth/verify` (`identity.routes.ts:131`) consumes a single-use token
+and marks an account verified. **A GET is safe to prefetch**, and corporate mail
+scanners, link expanders and browser prefetchers issue them unbidden — so the
+verification link can be spent before the user clicks it, and the user then sees
+"this link has expired" on the one path that must never break (P15 / §8.1).
+
+It is a **known trade-off, not an oversight**: the alternative to a top-level GET
+redirect is an interstitial page that POSTs, which adds a step to the funnel with
+the highest abandonment cost in the product.
+
+The instruction was *document it explicitly in the route, or add a confirmation
+interstitial — do not silently leave it.* **The route is `identity`'s and this
+change does not own it**, so the requirement is recorded here instead. Whoever
+owns identity should take one of:
+
+1. a block comment at the route stating the prefetch exposure, the funnel
+   reasoning, and what would change the decision; **or**
+2. an interstitial: GET renders "confirm your email", the POST consumes the token
+   (`Cache-Control: no-store` either way).
+
+Option 1 is sufficient if — and only if — it is written down. An undocumented
+trade-off is indistinguishable from a defect, and the next person to find it will
+either "fix" it and damage the funnel or assume it was considered when it was not.
+
+### D-265 · Dead exports and stale migration numbers, measured rather than assumed
+**Status:** Active
+
+**Six unused exports in `src/shared/constants/`, not four.** Measured across
+`src/`, `tests/`, `eval/` and `scripts/`, excluding their own definition files:
+`PILOT_GRADES`, `isFoxyMode`, `isFoxyAction`, `XP_SOURCES`, `isPlatformRole`,
+`isSignupRole`. All six are referenced by **nothing**. `shared/constants` is
+imported by every module, so deletion is reported rather than taken here.
+Note the shape before deleting: `isFoxyMode`/`isFoxyAction` are the type guards
+for constants that *are* used, and `isPlatformRole`/`isSignupRole` likewise — a
+guard with no call site usually means a validation boundary that casts instead,
+which is worth checking before removing the guard rather than after.
+
+**Stale migration comments: none in the files this change owns.** The chain is now
+`0000`-`0005` with the previous one under `drizzle/_superseded`, and `0003`-`0008`
+citations across `src/` were expected to be stale. Checking each:
+
+- `foxy.repository.ts:102` and `foxy.service.ts:298` — "a CHECK in migration 0005".
+  **Correct.** Current `0005_foxy.sql` genuinely carries
+  `chat_messages_abstention_no_citations_check`.
+- `parent.repository.ts:390` — already reads *"migration 0003 of the superseded
+  chain"*, which is accurate and explicit.
+
+**Stale, and in files owned elsewhere — reported:** `platform/authz/can-access.ts`
+(lines 59, 87, 163, 201, 222, 287 — "migrations 0004 and 0005", "migration 0008"),
+`identity/identity.repository.ts:77` and `identity.types.ts:15` ("NOT NULL since
+migration 0008" — the chain now stops at 0005), `platform/db/schema/tenants.ts:27`,
+`platform/db/schema/practice.ts:249` ("COMMENT ON COLUMN in migration 0006"),
+`platform/db/schema/identity.ts:19`, `platform/config/config.schema.ts:305`,
+`content/content.repository.ts:98`, `content/content.types.ts:43`, and the
+`can-access` / `content` / `identity` test files that repeat them.
+
+The actively misleading ones are the **`0008` citations**: an operator reading
+`identity.types.ts:15` and looking for migration 0008 finds a chain that ends at
+0005 and a `_superseded/` directory, and cannot tell whether the column is NOT NULL
+today. The `0004`/`0005` ones are worse in a quieter way — those numbers **exist in
+the current chain and mean something else** (`0004` is billing, `0005` is foxy), so
+they read as correct and are not.
+
+### D-266 · `Retry-After` advertised the full window, so obeying the header was the punishment
+**Status:** Active — completes D-034
+
+`RateLimiter.consume` threw `new RateLimitError(rule.windowSeconds)` on every
+refusal, regardless of how much of the window had elapsed. Trip the login limiter
+fourteen minutes and fifty seconds into its fifteen-minute window and the client
+was told to wait **fifteen minutes** for a lockout with ten seconds left on it.
+
+**`Retry-After` is obeyed, which is what makes this a defect rather than a
+cosmetic inaccuracy.** A mobile client, a retrying SDK and our own frontend all
+wait exactly as long as they are told. So the honest ten seconds became fifteen
+minutes for every well-behaved caller, and **only a caller that IGNORED the
+header discovered it could have retried**. The limiter penalised correct
+behaviour and rewarded ignoring it.
+
+**Nothing caught it because the underlying limit was correct throughout.**
+`countInCache` calls `expire` exactly once, on attempt 1, precisely so a lockout
+cannot creep forward — so the window genuinely never extends and only the
+ADVERTISED wait was wrong. No error, no metric, no failing test. The user-visible
+report is "it locks me out for ages" against a rule that reads 5-per-15-minutes
+and is accurate.
+
+`WindowDeadlines` already knew the answer: it records each window's deadline so
+an evicted counter can be told from an expired one. `remainingSeconds(key,
+windowSeconds)` reads it, rounds **up** (a `Retry-After: 0` invites an immediate
+refusal; rounding 1.2s down to 1s puts the client back 200ms early, which is a
+retry loop that looks like an attack), and falls back to the full window when
+this process never saw the window open — another replica, or before a restart.
+That fallback is deliberate and conservative: guessing "nearly over" there sends
+a caller straight back into a refusal, so over-reporting is the safe direction.
+
+**Mutation-proven:** restoring `new RateLimitError(rule.windowSeconds, …)` turns
+`platform/rate-limit/__tests__/retry-after.test.ts` red — 3 of 6, including
+*reports the remaining seconds, not the whole window*.
+
+**The same entry covers the inbound `x-request-id` cap**
+(`app/plugins/request-id.ts`), which was accepted **verbatim and unbounded**,
+bound into the child logger for the request, and echoed on the response. Three
+consequences, none of which failed anything: an 8 kB header (inside Fastify's
+limit) multiplied by every line a request logs is a **log-volume lever the caller
+chooses**; a newline breaks line-oriented log shipping and a forged
+`"level":"error"` fragment is read by whatever parses the stream; and the value
+comes straight back in a response header.
+
+The rule is a **character allowlist plus a 200-character cap**, not a length
+alone — a denylist of "characters that break log shipping" is a list somebody has
+to keep complete. 200 is comfortably above a UUID (36), a W3C `traceparent` (55)
+and the longest convention in common use (~128). **A rejected id is REPLACED,
+never refused:** a 400 would let a broken upstream proxy take the API down over a
+correlation identifier.
+
+**One finding was worse than reported.** The mutation test showed the CR/LF cases
+do not merely pollute the log — they make the response **hang for 15 seconds** and
+time out, because the value is echoed into a response header. It was an
+availability defect as well as a log-injection one.
+
+### D-267 · `JobRow.run_at` and `created_at` were typed `Date` and the driver returns strings
+**Status:** Active — completes D-233
+
+D-233 typed `locked_at` as `Date | string` and explicitly left the other two
+alone, reasoning that they "have never been PROVEN to be one, because nothing
+ever called a method on them — they are handed straight out and only ever
+compared". **That is an explanation of why it had not blown up yet, not an
+argument that it was safe**, and the lie was not confined to the file: they are
+handed out as `ClaimedJob.runAt` / `.createdAt`, both declared `Date`, so it was
+exported.
+
+`locked_at` was found the hard way — the integration suite threw
+`job.lockedAt.toISOString is not a function` on its first run, because the fence
+formats it back into SQL. The first caller to write `job.runAt.getTime()` for a
+scheduler, a lateness metric or a log line would have got the same `TypeError` in
+a worker, past a compiler that had already signed off on it.
+
+**This was live, not latent.** The mutation test reads
+`expected '2026-08-09 08:00:00+00' to be an instance of Date` — node-postgres
+returns a **string** for these columns through `db.execute`, today, in this
+schema. The annotation was simply false.
+
+Both are now `Date | string` in `JobRow` and normalised once through a `toDate`
+helper in `toRecord`, which `locked_at` now shares. "Fix the types, or parse
+them" — both: the honesty stops at the row boundary and every consumer still gets
+a real `Date`.
+
+**Mutation-proven:** replacing `toDate(row.run_at)` with `row.run_at as Date`
+turns `tests/integration/job-queue.test.ts` red on *hands out real Date objects
+for runAt, createdAt AND lockedAt*. Only an integration test can catch it: a unit
+test with a fake row supplies whatever type it declares.
+
+### D-268 · `notification_preferences` exists, and the notification index finally matches its cursor
+**Status:** Active — closes D-260, completes D-259
+
+Migration `0006_notify_preferences`. `createDbPreferencesStore` and
+`createWriteThroughPreferencesStore` had been **finished and deliberately
+unwired** since D-260 for exactly one reason: the table did not exist. It does
+now, with the shape D-260 specified — `user_id` uuid primary key referencing
+`users` on delete cascade, `preferences` jsonb not null default `'{}'`,
+`updated_at` timestamptz, and `CHECK (jsonb_typeof(preferences) = 'object')`.
+
+**The CHECK is load-bearing, not decoration.** jsonb accepts `'"muted"'`,
+`'null'`, `'[]'` and `'3'` as perfectly valid documents, and every one would
+reach `parseStoredPreferences` as a shape it must defend against forever. It is
+the third instance of the same constraint in this schema
+(`notifications_data_object_check`, `audit_log.metadata`).
+
+**No surrogate key.** The user IS the key. A surrogate id would permit two
+preference rows for one user, which is not a resolvable state — whichever you
+read, the other is also something they said.
+
+`notifications_recipient_created_idx` widened from `(recipient_user_id,
+created_at desc)` to `(recipient_user_id, created_at desc, id desc)`, matching the
+composite cursor. D-259 fixed the cursor, so **correctness** no longer depends on
+this and **performance** does: with two columns Postgres satisfies the first two
+sort keys from the index and then sorts each equal-timestamp group by `id`
+itself. Drop-then-create rather than a second index, and in that order — a
+leftover two-column index on the same leading columns would be chosen by the
+planner about as often as the three-column one and the change would appear to
+have done nothing.
+
+The wiring is the two lines in `app/routes.ts` D-260 promised, and the write
+order is the design: durable first with its failure propagating, cache second
+with its failure swallowed. Reversed, a cache holding a value the database
+refused would serve it until eviction and the old one forever after.
+
+**Mutation-proven twice.** Removing the `preferences:` block from
+`app/routes.ts` turns *honours an opt-out that exists ONLY in the database* red —
+email is scheduled for a user who muted it. Weakening the migration's CHECK to
+`CHECK (true)` turns all four *REFUSES … in the preferences column* cases red.
+
+### D-269 · The migration journal ordering defect tried to ship again, and the guard caught it
+**Status:** Active — D-109 / D-174 enforcement, working
+
+`drizzle-kit generate` wrote `0006_notify_preferences` with
+`"when": 1786434818902`. Every hand-written entry from `0001` onward uses round
+numbers, and `0005_foxy` sits at `1786800000000` — so the generated wall-clock
+value landed **370 million milliseconds BELOW its own predecessor**.
+
+`drizzle-orm`'s migrator does not use `idx`. It reads the last row of
+`drizzle.__drizzle_migrations`, takes its `created_at`, and applies only entries
+whose `when` is greater. On any database already past `0005`, this migration
+would have been **skipped in silence** — "Migrations applied." printed,
+`notification_preferences` never created, and the newly-wired durable preferences
+store failing on the first notification. That is exactly the shape `0004_billing`
+shipped in, and exactly what D-174 warned would happen again.
+
+Corrected to `1786850000000`. **The value is now a deliberate choice and not a
+wall-clock artefact**, which is the property that matters: `drizzle-kit` derives
+it from the clock, this chain's values are hand-assigned, and the two conventions
+cannot both be right.
+
+**Mutation-proven:** restoring drizzle-kit's generated `when` turns
+`tests/integration/migration-journal-order.test.ts` red — 2 of 8, naming
+`0006_notify_preferences` as the entry that would go unapplied. Worth recording
+that the guard fired on its first real opportunity since it was written.
+
+### D-270 · `TimeoutRule.retries` is wired, and the reason it could not simply be applied
+**Status:** Active — closes D-237
+
+The §4 timeout table has carried a `retries` column since the plan was written.
+It was parsed, range-validated, documented ("a non-zero value here is a statement
+that the call is idempotent") and **read by nothing**. That is worse than not
+having the column: `payments: { retries: 0 }` sits beside the sentence "none on
+writes — retrying a payment is worse than failing it", and a reader takes it as an
+enforced safety property. It forbade exactly as much as `mail: { retries: 3 }`
+required — nothing. **An unwired safety setting is a false guarantee, and the cost
+is paid by the next person who trusts it.**
+
+**Why it could not be applied blanket, which is why it sat unwired rather than
+being an oversight.** A guard wraps a **port**, not an operation, and the port's
+rule cannot know which operation it is:
+
+- `cache` carries `retries: 1`, and `cache.incr` is the rate limiter's counter. A
+  timed-out `INCR` has very often been executed; retrying it **double-counts a
+  login attempt** and locks a user out having done nothing wrong — a retry budget
+  silently TIGHTENING an authentication limit, reported as "random lockouts".
+- `mail` carries the largest budget in the table, `retries: 3`, and `mail.send` is
+  not idempotent. A timed-out SMTP send has often been delivered. Blanket wiring
+  would send a **password-reset link up to four times**, from a change whose
+  stated purpose was reliability.
+
+So the **rule supplies the budget and the call site supplies the permission**, via
+`GuardedCallOptions.idempotent`, and a retry needs both. Absent — the default, and
+every call site written before this — means one attempt, so nothing that already
+exists can start retrying. `payments: 0` is now load-bearing in the direction it
+always claimed: **the permission cannot exceed the policy**, so even a call site
+that declares itself repeatable gets one attempt.
+
+Declared repeatable: `embed.embedQuery` (pure, writes nothing), `cache.get`,
+`cache.set`, `cache.del`, `cache.expire`. Deliberately not: `cache.incr`,
+`mail.send`, and both payment writes. Each omission carries its reason at the call
+site rather than in a plan.
+
+**Composition order.** The limiter is OUTSIDE the retry loop — one slot for the
+whole retried operation, because re-acquiring per attempt would let real in-flight
+concurrency exceed the configured limit while the limiter's count reported the
+configured number, which is the same class of defect as D-262 and not worth
+introducing a second time while fixing the first. The breaker is INSIDE it: each
+attempt is a real call and §5 counts failed calls, and an open breaker then
+short-circuits the retry for free. `isWorthRetrying` declines breaker rejections
+(retrying one turns the breaker into a slow retry loop against something known to
+be broken) and concurrency rejections (backing off inside a held slot adds load to
+an overloaded port), distinguished structurally by the `details` each thrower
+stamps rather than by message text.
+
+A fifth emission joins the registry: `platform.port.retried`. A dependency that
+succeeds on attempt two every single time is failing every single time, and
+without the counter it is indistinguishable from a healthy one.
+
+**Mutation-proven:** forcing `attempts = 1` turns
+`src/platform/resilience/__tests__/port-guard-retries.test.ts` red — 8 of 14.
+
+### D-271 · The LLM stream timeout now cancels the vendor call
+**Status:** Active — closes D-262
+
+Applied exactly as D-262 specified, in three files. `LlmRequest` gains an optional
+`signal`; `createGuardedLlm` builds **one `AbortController` per stream** and aborts
+it in the same `finally` that releases the bulkhead slot; `anthropic-llm.ts`
+forwards `signal` to `doFetch`.
+
+**The pairing is the fix, not the abort on its own.** Releasing the slot and
+stopping the work were two different events with only one of them implemented, so
+the limiter's count and the number of live vendor streams drifted apart with
+nothing to report it. Making them the same statement means they cannot drift:
+every path out of the generator — the total-budget return, the first-token
+timeout, an exhausted iterator, a thrown breaker rejection, and the `.return()`
+the runtime calls when a student disconnects mid-turn — runs that `finally`.
+**Abort before release**, deliberately: the other order re-opens the same
+over-admission window, just narrower.
+
+**Not `withTimeout`'s controller.** That one is per-`next()` and fires when a
+single token wait expires, which is a different event from "this stream is over" —
+aborting the fetch on the first-token deadline would kill a stream the total
+budget still allows.
+
+`complete()` needs no equivalent: it goes through `options.http`, which is already
+`createHttpClient` behind `guard.run`, and that path receives and forwards
+`withTimeout`'s signal.
+
+**Every pre-existing assertion was green while the defect was live**, which is the
+point of the new ones. *holds a concurrency slot for the LIFETIME of the stream*
+and *releases the slot when a stream is abandoned part-way* both pass whether or
+not anything is cancelled, because they only asked the LIMITER what it thought.
+The limiter thought the stream was over.
+
+**Mutation-proven:** removing `cancellation.abort()` turns 4 of the new
+`guarded-ports` cases red; removing the `signal` argument in the adapter turns
+*forwards the caller's AbortSignal to fetch* red.
+
+### D-272 · `parsePlanIds` refuses instead of shrugging
+**Status:** Active — closes the open half of D-253
+
+D-253 recorded this as still open: the pre-flight caught a malformed
+`RAZORPAY_PLAN_IDS` in a deployed stack, and "the parser should refuse rather than
+shrug" for every other caller — a test, a script, a future process.
+
+`RAZORPAY_PLAN_IDS=monthly=plan_x` — an `=` where a `:` belongs, one keystroke —
+parsed to `{}`. A value the type system is perfectly happy with, that boots, that
+reports healthy on every probe, and that fails at the checkout of the first
+customer who tries to give us money. **The variable was set, the deployment was
+green, and the paid funnel was dead.**
+
+`container.ts` argues correctly that an empty plan map is not one of its boot
+refusals because it is a LOUD failure where a missing credential is a SILENT
+fallback. The gap is **who** it is loud to. `{}` is loud to a paying customer.
+
+Four refusals, each **naming the offending entry**, because "the plan ids are
+malformed" sends an operator to re-read a variable they have already read twice:
+no `:` separator (or more than one), an empty code or plan id, an empty entry (a
+stray or trailing comma), and a **duplicated plan code** — the old behaviour let
+the later pair win silently, so half the variable was decoration and the value
+itself did not show which half.
+
+`undefined` remains `{}` and is not a refusal — "this deployment has no plan map"
+is legitimate in every non-production environment, and refusing it would be D-250
+rebuilt. An **empty string** is refused: somebody set the variable and gave it
+nothing, which is a mistake rather than a state.
+
+Validated in the zod schema via `superRefine` as well as in `toConfig`, so the
+refusal joins the aggregated `Invalid environment configuration` report rather
+than arriving one restart later.
+
+D-256's `ops:preflight` is not replaced — it also checks the map against
+`purchasablePlans()`, which `platform/config` may not import.
+
+**Mutation-proven:** restoring the original drop-and-continue parser turns
+`payments-config.test.ts` red — 10 of 15.
+
+### D-273 · `IDENTITY_IP_HASH_SALT` is configuration, not a build constant
+**Status:** Active — closes D-223, completes D-221
+
+D-221 salted `hashIp` and could reach neither `platform/config` nor
+`app/routes.ts`, so the identity module resolved the salt itself: absent, it
+warned and used `UNCONFIGURED_IP_HASH_SALT` — a constant **in the source**,
+documented as not secret. `sessions.ip_hash` was therefore pseudonymised against a
+generic rainbow table and against nobody who had read the repository, and because
+the identical digest is also a rate-limit cache key it joined a Valkey dump to a
+Postgres dump exactly.
+
+`IDENTITY_IP_HASH_SALT` is now parsed once in `platform/config` and threaded
+through `app/routes.ts` into `createIdentityModule({ ipHashSalt })`. The module
+still never touches `process.env`, so the set of variables this process depends on
+stays enumerable in one file.
+
+**Three deliberate choices.**
+
+*Optional, not a production boot refusal.* Making it a refusal is correct on the
+merits and would **restart-loop every existing deployment on the deploy that
+shipped it** — D-250 exactly, a fix that causes the outage. The module's
+`identity.ip_hash_salt_unconfigured` warn keeps the gap visible; promoting it to a
+refusal is a one-line follow-up in `container.ts` once operators have set it.
+compose.prod.yml passes it with a soft `${VAR:-}` and says why in as many words.
+
+*A 32-character minimum.* A short salt is far closer to no salt than to a good one
+and would otherwise pass silently while reading as "configured".
+
+*An empty string is treated as absent.* The soft compose default supplies `''` to
+a stack that has not set it, and refusing that would be the restart loop above by
+another route.
+
+**`?? default` was NOT used at the composition root**, and that is the subtle way
+this wiring goes wrong: substituting a value there type-checks, works, and
+silences the one signal saying the deployment is still hashing with a constant
+from the source. The field is omitted entirely instead.
+
+**Mutation-proven:** removing the threading turns
+`src/app/__tests__/ip-hash-salt-wiring.test.ts` red on *is SILENT once the salt is
+configured*.
+
+### D-274 · Four wiring tests asserted gate ORDER while claiming to assert gate CONTENT
+**Status:** Active
+
+`wiring.test.ts`'s payments block built a `PRODUCTION_BASE` that satisfied **no**
+production boot gate, then asserted `toThrow(/RAZORPAY_KEY_ID/)`.
+`createContainer` runs its refusals in source order — mail, embed, llm, payments,
+migration journal — and every one throws, so the assertion only ever passed
+because payments happened to be **first among the unmet gates**.
+
+D-226 added the SMTP gate ahead of payments and all four went red with `SMTP_HOST
+is required in production`: a correct refusal, reported as a payments regression.
+The tests were measuring ordering.
+
+`PRODUCTION_BASE` now satisfies **every** gate and each case removes exactly the
+variable it is about via a `without()` helper. A gate added ahead of payments
+tomorrow cannot break this block, because a satisfied gate does not throw and
+therefore cannot be the thing observed. One assertion was added that the old shape
+could not make: *refuses for the PAYMENTS reason, not because some earlier gate
+was unset*.
+
+This is a general lesson about boot-gate tests, not a one-off: **an assertion that
+a constructor throws a particular message is an assertion about ordering unless
+everything else is satisfied.**
+
+### D-275 · `/health/ready` carries a status and nothing else, and the detail moved to `/health/deps`
+**Status:** Active — completes D-229
+
+`tests/integration/health-ready.test.ts` still asserted the `checks: { database,
+migrations, config }` map and a `database.error` string that D-229 **deliberately
+removed** — they rendered the raw pg error, carrying the host, the port and the
+database username, to any unauthenticated caller at the exact moment the database
+went down.
+
+The three detail assertions moved to `/health/deps`, which is the endpoint that
+exists for that question, and are **strictly sharper there**: `checks: { database:
+true, migrations: false }` and `failure: 'schema_incomplete'` say the same thing,
+but only the latter separates "unmigrated" from "unreachable" and "timeout" —
+three different runbook pages. `failure` is a closed union and therefore cannot
+grow a hostname, because it is not a string field.
+
+The readiness assertion is **inverted rather than deleted**: the body is now
+pinned as exactly `{ status }`, plus a check that the response contains neither the
+hostname, the port nor the username from the connection string the test is itself
+using. Re-widening the body is now a failing test rather than a silent regression.
+
+**One leg was NOT recreated, and is reported rather than faked.** `checks.config`
+has no home on `/health/deps` and has not been reinvented there. It was vacuous
+where it stood: config is parsed by `parseConfig` at boot, and a process whose
+config did not parse never binds a socket — so nothing could reach the route to be
+told `config: false`. It could only ever report `true`. `/health/deps` reports live
+dependency state and config is not a live dependency; the boot gates in
+`createContainer` assert it at the only moment the answer can be anything else.
+
+### D-276 · `DATABASE_POOL_MAX` defaults to 40, and the test that pinned 10 was pinning a dead variable
+**Status:** Active — follows D-228
+
+`config.test.ts` asserted `config.db.poolMax === 10`. D-228 moved the default to 40
+and, more importantly, made the variable **mean something**: it had been parsed and
+read by nothing, so the old assertion pinned a number that was applied to no pool.
+10 as a live ceiling would throttle `auth` alone, which asks for 10 by itself; 40
+is the api role's natural sum, 10 + 20 + 8 + 2.
+
+The per-pool defaults are now asserted alongside it, so "40" cannot stay green
+while the four numbers underneath it drift away from summing to it.
+
+**A stale exemption was found in passing.** `env-contract-check.ts` exempted
+`DATABASE_POOL_MAX` from the compose contract with the reason "schema default 10;
+used only by migrations and scripts, not the app". Both halves expired at D-228.
+**An exemption whose justification has expired is worse than no exemption — it is a
+reviewer's reason not to look.** `compose.prod.yml` now passes it, with the
+cross-replica arithmetic (`api x 40 + worker x 20 + headroom <= max_connections`,
+and a rolling deploy briefly doubling the api term) stated where an operator
+scaling replicas will read it.
+
+### D-277 · A timing test's noise anchor was under-sized, and it was the only flake in the suite
+**Status:** Active
+
+`identity.mail-path.test.ts`'s `ANSWERS A NEW AND AN ALREADY-REGISTERED ADDRESS IN
+THE SAME TIME` failed under a **full** `npm test` run and passed every time in
+isolation — observed at an anchored ratio of 12.48 against a bound of 10, with both
+ABSOLUTE assertions (the ones the file's own header calls load-bearing) green by
+two orders of magnitude on the same run.
+
+That is the anchor failing to anchor, not the property failing to hold.
+`NOISE_FLOOR_MS` exists to bound the estimator by the resolution of the measurement
+rather than by the smaller sample, and at 1 ms it was under-sized for the case it
+had to cover: the signup case's own stated residual — two INSERTs against one that
+fails on a unique index — is about six milliseconds in a container, so the ratio was
+being set by whichever branch happened to be sub-millisecond. That is precisely the
+"divides noise by noise" failure the constant was introduced to prevent.
+
+Raised to 5. **Raising a noise floor to stop a flake is one edit away from raising
+it until nothing can fail, and the two edits look identical in a diff**, so the
+constant now has its own guard: `rejects a defect-sized asymmetry at the floor it is
+configured with` exercises `anchoredRatio` directly against the shape the defect
+produces (`MAIL_LATENCY_MS` on one branch) and against the residual alone, and both
+bounds in the file must still separate them. Pure arithmetic, no clock, no sleep —
+it asks whether the instrument can still see the thing, not how fast the machine is
+today.
+
+Of the nine failures this wave started with, this was **the only one that was not a
+stale test**. It was a pre-existing load-dependent flake, red in the baseline run and
+green in isolation.
+
+### D-278 · The five-emission resilience registry
+**Status:** Active — bookkeeping for D-270
+
+`ResilienceRegistryOptions.metrics` documented itself as wiring "FOUR emissions at
+once, and they are four because that is the list §5 and §3.3 and §4 actually name".
+It is five now — breaker transitions, breaker rejections, concurrency rejections,
+port timeouts, **port retries** — and the comment says so.
+
+Recorded separately and deliberately. That paragraph is the kind of self-describing
+count that goes stale on the next change and then reads as authoritative for a year;
+the number is load-bearing to a reader deciding whether their signal is already
+wired. The registry also gained `sleeper` and `random` options so that a test
+asserting retry BEHAVIOUR can inject a `RecordingSleeper` and read the jittered
+sequence back with no wall-clock time passing — §9.5 bans `sleep` in a test, and the
+seam is what makes obeying it possible now that a guarded call can wait.
+
+### D-279 · `docker compose config` did not exit 0 before this wave, and it was the local `.env.prod`
+**Status:** Active — operational note
+
+`docker compose -f docker/compose.prod.yml config` exited **15** at the start of this
+work, on `VOYAGE_API_KEY` and then on `SMTP_HOST`. Nothing in the tracked tree was
+wrong: `docker/.env.prod.example` carries every variable, and `compose.prod.yml`'s
+`:?` markers are correct. The **untracked, gitignored `docker/.env.prod`** had fallen
+behind the example after the D-226/D-254 SMTP wave added five required variables to
+it.
+
+Worth recording because of the shape rather than the fix. The env-contract gate
+(D-252, D-255) relates `config.schema.ts`, `compose.prod.yml` and both `.env.example`
+files, and it passes — **it cannot see the operator's real `.env.prod`, by
+construction, because that file holds secrets and is not in the repository.** So "the
+contract is green" and "the stack will start" are different claims, and the second one
+is only answered by running `compose config` against the actual env file. That command
+belongs in the deploy runbook ahead of `deploy-app.sh`, not only in CI.
+
+### D-280 · What this wave did NOT do, listed so it is not mistaken for done
+**Status:** Open — residue
+
+Every item below was reachable and was deliberately left, with the reason:
+
+1. **`IDENTITY_IP_HASH_SALT` is not a production boot refusal** (D-273). It should
+   become one — `container.ts`, one `if`, alongside the other nine — once operators
+   have set it everywhere. Doing it in the same change that introduced the variable
+   would restart-loop every running stack (D-250).
+
+2. **`notification_preferences` has no HTTP write path.** D-260 noted the defect was
+   "latent rather than live only because there is no service-level write path yet",
+   and that is still true: `notify` exposes no preferences endpoint, so the only
+   writers are tests and whatever calls the store directly. The table and the store
+   are correct and largely unexercised in production until an endpoint exists.
+
+3. **`mail`'s `retries: 3` budget is declared and unspent** (D-270). No mail operation
+   is idempotent, so nothing claims it. The right answer for mail is §3.3's overflow
+   behaviour — defer to the worker, whose queue already has at-least-once semantics —
+   and a retry here would be a second, worse delivery mechanism competing with the good
+   one. The budget remains as a ceiling if a genuinely repeatable mail operation ever
+   exists.
+
+4. **`checks.config` from the old `/health/ready` body was not recreated anywhere**
+   (D-275). It was vacuous; the reasoning is in that entry.
+
+5. **The six dead exports in `src/shared/constants/` reported under D-265 are still
+   there.** Out of scope for this wave and unchanged.
+
+6. **`retries` is declared repeatable at five call sites only.** `platform/http`'s own
+   `maxRetries` and the guard's budget are two retry mechanisms on the same port and
+   have not been reconciled; `http` is left un-declared so they cannot multiply. That
+   reconciliation is a separate change.

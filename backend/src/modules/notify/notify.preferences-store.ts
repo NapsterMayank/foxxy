@@ -8,29 +8,40 @@ import type { StoredPreferences } from './domain/preferences';
  * Where a person's notification preferences are kept.
  *
  * ===========================================================================
- * READ THIS BEFORE RELYING ON IT. THE ADAPTER BELOW IS CACHE-BACKED, AND THAT
- * IS A KNOWN, REPORTED GAP — NOT A DESIGN.
+ * THE CACHE-ONLY ADAPTER BELOW IS NO LONGER THE INTENDED HOME — D-260.
  *
- * Preferences are durable user settings. They belong in a
- * `notification_preferences` table, keyed by user, with the tenant alongside.
- * That is a MIGRATION, and this module was built under an explicit instruction
- * not to write one while the migration chain is being rewritten underneath it.
- * So the shape that needs the migration is behind this PORT, the port has a
- * cache-backed adapter today, and swapping in a repository is one line at the
- * composition root.
+ * It used to be the only one, and the reasoning given for that was: a lost
+ * preference makes the product QUIETER, never louder, so losing one is
+ * survivable. That reasoning does not survive contact with the deployment.
+ * `maxmemory-policy allkeys-lru` is configured, which makes eviction ORDINARY
+ * OPERATION rather than an incident — and what eviction restores is the DEFAULT
+ * channel set. Somebody who muted email starts receiving email again, having
+ * changed nothing and having been told nothing.
  *
- * The honest consequence, stated rather than discovered: a cache eviction
- * resets a person's preferences to the defaults. That is survivable ONLY
- * because of what the defaults are — quiet hours ON, no opt-outs, English. A
- * lost preference makes the product QUIETER and more conservative, never
- * louder, and it never grants anyone access to anything.
+ * "Quieter, never louder" was also simply wrong in the one direction that
+ * matters: the default is *no opt-outs*, so reverting to it is exactly the
+ * louder outcome.
  *
- * D-012 and D-033 set the standing rule: "nothing whose loss changes what a
- * user is ALLOWED to do may live in a cache." A channel opt-out is not that —
- * losing it means an email somebody had muted arrives once. Losing a link code
- * (the case that produced the rule) meant a parent could not link at all.
+ * D-012 and D-033 set the standing rule — "nothing whose loss changes what a
+ * user is ALLOWED to do may live in a cache" — and an opt-out passed it, because
+ * an opt-out is not an authorisation. The rule was too narrow. What a user has
+ * DECIDED belongs beside what a user is ALLOWED: neither can be recomputed from
+ * anything else we hold, and losing either one is losing something they gave us.
  *
- * It would still be wrong to leave it here. Hence: reported.
+ * ---------------------------------------------------------------------------
+ * WHAT IS AND IS NOT DONE, STATED PLAINLY.
+ *
+ * `createDbPreferencesStore` (`notify.preferences.repository.ts`) is the durable
+ * adapter and it is finished. `createWriteThroughPreferencesStore` below is the
+ * composition that makes the database authoritative and keeps the cache as a
+ * read cache. NEITHER IS WIRED, because `notification_preferences` needs a
+ * migration and `drizzle/` belongs to another change in flight. The migration is
+ * REPORTED — see D-260 and the module report — rather than written here, and
+ * `app/routes.ts` still constructs the cache-only store until it lands.
+ *
+ * There is no service-level write path yet either, so today's cache-only store
+ * loses nothing a user has actually set. That is what makes this latent rather
+ * than live, and it is the reason it could be fixed properly instead of quickly.
  *
  * ===========================================================================
  * A READ NEVER THROWS.
@@ -150,6 +161,100 @@ export function createCachePreferencesStore(
      */
     async write(userId: string, preferences: StoredPreferences): Promise<void> {
       await cache.set(`${KEY_PREFIX}${userId}`, JSON.stringify(preferences));
+    },
+  };
+}
+
+export interface WriteThroughPreferencesStoreOptions {
+  /** The AUTHORITY. Everything here is answered from this store eventually. */
+  readonly durable: NotifyPreferencesStore;
+  /** A read cache in front of it, and nothing more. */
+  readonly cache: CachePort;
+  readonly logger: Logger;
+}
+
+/**
+ * =============================================================================
+ * THE DURABLE STORE, WITH THE CACHE DEMOTED TO A READ CACHE — D-260.
+ *
+ * The ORDER OF THE TWO WRITES IS THE WHOLE DESIGN. The durable write happens
+ * FIRST and its failure propagates; the cache write happens second and its
+ * failure is swallowed. Reverse them and a cache that accepted the value while
+ * the database refused it would serve the new preference until eviction and the
+ * old one forever after — a setting that appears to save, works for a while, and
+ * then silently reverts, which is the least diagnosable shape this bug has.
+ *
+ * A MISS IS NOT AN ANSWER. `read` falls through to the durable store on a cache
+ * miss, and only a durable `null` means "this person has never chosen". That is
+ * the exact inversion of the defect: eviction now costs one indexed primary-key
+ * lookup instead of costing somebody their opt-out.
+ *
+ * THE CACHE IS NEVER THE AUTHORITY ON ABSENCE, and it is not negatively cached
+ * either. Caching "no preferences" would reintroduce the failure through the
+ * back door — a miss stored as a null is indistinguishable from a wish to have
+ * none, and the whole point is that those two are different facts.
+ * =============================================================================
+ */
+export function createWriteThroughPreferencesStore(
+  options: WriteThroughPreferencesStoreOptions,
+): NotifyPreferencesStore {
+  const { durable, cache, logger } = options;
+
+  function warn(event: string, error: unknown): void {
+    // Never the user id: a log line about personal settings must not become a
+    // record of who has them.
+    logger.warn(
+      {
+        event,
+        err: error instanceof Error ? error.message : 'unknown cache failure',
+      },
+      'the notification-preferences cache is unavailable; the database is answering',
+    );
+  }
+
+  return {
+    async read(userId: string): Promise<StoredPreferences | null> {
+      const key = `${KEY_PREFIX}${userId}`;
+
+      try {
+        const raw = await cache.get(key);
+        if (raw !== null) {
+          const cached = parseStoredPreferences(raw);
+          // A cached entry that no longer parses is treated as a MISS rather
+          // than as "no preferences". Falling through re-reads the authority and
+          // repairs the entry; returning null would apply the defaults to
+          // somebody whose real settings are sitting in the database.
+          if (cached !== null) return cached;
+        }
+      } catch (error) {
+        warn('notify.preferences_cache_unavailable', error);
+      }
+
+      const stored = await durable.read(userId);
+      if (stored !== null) {
+        try {
+          await cache.set(key, JSON.stringify(stored));
+        } catch (error) {
+          // A cache that cannot be populated is a slow read, not a failed one.
+          warn('notify.preferences_cache_unwritable', error);
+        }
+      }
+      return stored;
+    },
+
+    async write(userId: string, preferences: StoredPreferences): Promise<void> {
+      // FIRST, AND UNGUARDED. If this throws, the caller must hear that the
+      // setting was not saved — see the block above for why the other order is
+      // the worst of the three possibilities.
+      await durable.write(userId, preferences);
+
+      try {
+        await cache.set(`${KEY_PREFIX}${userId}`, JSON.stringify(preferences));
+      } catch (error) {
+        // The value IS saved. A failed cache write costs one database read on
+        // the next lookup and nothing else, so it must not fail the request.
+        warn('notify.preferences_cache_unwritable', error);
+      }
     },
   };
 }

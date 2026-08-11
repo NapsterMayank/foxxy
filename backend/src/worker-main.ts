@@ -44,7 +44,22 @@ import { createWorker } from './worker/worker';
  * call `exit` twice.
  */
 async function main(): Promise<void> {
-  const container = createContainer(config);
+  /**
+   * `role: 'worker'` — D-228, and it is not decoration.
+   *
+   * Both entry points call `createContainer`, and before the role existed both
+   * built all four pools at full size: 44 connections each, so 88 of a default
+   * `max_connections=100` with a single replica of each, and 132 during a
+   * rolling api deploy. Crossing that limit is not one slow module — it is
+   * every checkout in every pool failing at once, plus a `psql` that cannot
+   * connect to diagnose it.
+   *
+   * A worker serves no login and holds no sessions, so `auth` and `core` are
+   * trimmed to what a background sweep needs. Stated here rather than inferred,
+   * because the default is `'api'` and an api mis-trimmed to two auth
+   * connections would throttle login.
+   */
+  const container = createContainer(config, { role: 'worker' });
 
   /**
    * The SAME dependency graph the API builds, on the `worker` pool.

@@ -1,7 +1,14 @@
 import type { FastifyInstance } from 'fastify';
-import type { LinkStatus } from '../platform/authz/index';
+import type { Actor, LinkStatus } from '../platform/authz/index';
 import type { Payer } from '../platform/payments/index';
-import { createBillingModule, type BillingModule } from '../modules/billing/index';
+import { createRateLimiter } from '../platform/rate-limit/index';
+import type { FoxyPlan } from '../shared/constants/foxy';
+import {
+  createBillingModule,
+  hasFeature,
+  type BillingModule,
+  type BillingService,
+} from '../modules/billing/index';
 import { createContentModule, type ContentModule } from '../modules/content/index';
 import { createFoxyModule, type FoxyModule } from '../modules/foxy/index';
 import { createIdentityModule, type IdentityModule } from '../modules/identity/index';
@@ -17,7 +24,9 @@ import {
 import { createRetrievalModule, type RetrievalModule } from '../modules/retrieval/index';
 import { createSignalsModule, type SignalsModule } from '../modules/signals/index';
 import {
+  createDbPreferencesStore,
   createNotifyModule,
+  createWriteThroughPreferencesStore,
   type DigestSource,
   type NotifyModule,
   type NotifyRecipient,
@@ -152,6 +161,70 @@ export interface BuildModulesOptions {
 }
 
 /**
+ * ============================================================================
+ * THE BILLING → FOXY EDGE, AS A NAMED FUNCTION RATHER THAN AN INLINE CLOSURE.
+ *
+ * D-257. `foxy`'s `readPlan` was wired to `() => Promise.resolve(null)` under a
+ * comment saying "billing is build step 13". Build step 13 shipped and this
+ * line did not change, so every plan-gated decision in `foxy` resolved to the
+ * free tier forever and a paying customer received the 20-message cap. There
+ * was no error, no log line and no failing test: the stand-in was a perfectly
+ * valid `PlanReader`.
+ *
+ * It is lifted out of `buildModules` and EXPORTED so the translation can be
+ * tested directly, against real `Entitlements` values, without a database.
+ * `foxy-plan-reader.test.ts` pins all three cases the defect covered — a live
+ * subscriber gets the paid allowance, an account with no subscription gets the
+ * free one, and a subscription whose period has ended gets the free one.
+ *
+ * ----------------------------------------------------------------------------
+ * IT ASKS ABOUT A CAPABILITY, NEVER A PLAN NAME.
+ *
+ * `hasFeature(entitlements, 'foxy.unlimited')`, which `billing/index.ts` names
+ * as the only shape a consumer should write. A plan is a commercial artefact —
+ * renamed, split, retired — and `planCode === 'monthly'` at a call site
+ * hardcodes the catalogue somewhere nobody edits when the catalogue changes. A
+ * new plan that grants `foxy.unlimited` reaches Foxy with no edit here.
+ *
+ * Expiry needs no code here at all: `resolveEntitlements` decides "expired" by
+ * the injected CLOCK rather than by the stored status, and returns the free
+ * grant — so a lapsed customer drops to the free cap on their very next turn.
+ *
+ * ----------------------------------------------------------------------------
+ * IT TAKES THE ACTOR THROUGH, AND MINTS NO SYSTEM PRINCIPAL.
+ *
+ * `billing.getEntitlements(actor, subjectUserId)` runs `authoriseSubscription`
+ * on the actor; `PlanReader` used to have no actor, and that mismatch is what
+ * the stand-in was papering over. Passing the session actor through is the
+ * resolution that requires no new authority to exist — `foxy` only ever asks
+ * about the plan of the student making the request, so the caller IS the
+ * subject and billing's ownership rule is satisfied by a real principal. A
+ * "system actor" would have been a new one that can read anybody's billing,
+ * created to answer a question that never needed it.
+ *
+ * The return type is `Promise<FoxyPlan>` and NOT `PlanReader`'s own
+ * `Promise<FoxyPlan | null>`. `null` is the reader's way of saying "no answer,
+ * assume free", and this reader always has an answer — billing returns the free
+ * grant rather than nothing. Narrowing here means a caller reading the result
+ * cannot be handed a null it must remember to default, which is the shape the
+ * defect came in.
+ *
+ * THE SERVICE ARRIVES AS A THUNK because `billing` is constructed AFTER `foxy`
+ * in `buildModules`, and a thunk states that lateness instead of relying on a
+ * closure that happens to be evaluated late. Reordering the two modules would
+ * make the file's order imply a dependency that exists in neither direction.
+ * ============================================================================
+ */
+export function createFoxyPlanReader(
+  billingService: () => Pick<BillingService, 'getEntitlements'>,
+): (actor: Actor, studentUserId: string) => Promise<FoxyPlan> {
+  return async (actor: Actor, studentUserId: string): Promise<FoxyPlan> => {
+    const entitlements = await billingService().getEntitlements(actor, studentUserId);
+    return hasFeature(entitlements, 'foxy.unlimited') ? 'plus' : 'free';
+  };
+}
+
+/**
  * Both origins now come from explicit configuration — resolves D-015.
  *
  * They used to be derived, and both derivations were wrong in the same
@@ -238,6 +311,33 @@ export function buildModules(container: Container, options: BuildModulesOptions 
       apiBaseUrl: config.urls.api,
       appBaseUrl: config.urls.app,
     },
+    /**
+     * THE IDENTIFIER-HASH SALT, FINALLY FROM CONFIGURATION — D-223.
+     *
+     * =====================================================================
+     * D-221 salted `hashIp` and could reach neither `platform/config` nor
+     * this file, so the module has been resolving the salt itself: absent, it
+     * warns and uses `UNCONFIGURED_IP_HASH_SALT`, a BUILD CONSTANT sitting in
+     * the source and documented as not secret. `sessions.ip_hash` was
+     * therefore pseudonymised against a generic rainbow table and against
+     * nobody who had read the repository — and the same digest is a rate-limit
+     * cache key, so it also joined a cache dump to a database dump exactly.
+     *
+     * This line is the durable half. `IDENTITY_IP_HASH_SALT` is parsed ONCE,
+     * in `platform/config`, and threaded in here — the module still never
+     * touches `process.env` (`no-restricted-properties` forbids it in as many
+     * words), so the set of variables this process depends on stays
+     * enumerable in one file rather than discovered by grep.
+     *
+     * `??` RATHER THAN A DEFAULT, deliberately: passing `undefined` when it is
+     * unset is what lets `resolveIpHashSalt` emit its warn. Substituting a
+     * value here would silence the one signal that says the deployment is
+     * still running on the build constant.
+     * =====================================================================
+     */
+    ...(config.identity.ipHashSalt === null
+      ? {}
+      : { ipHashSalt: config.identity.ipHashSalt }),
   });
 
   /**
@@ -579,10 +679,58 @@ export function buildModules(container: Container, options: BuildModulesOptions 
     readLanguage: async (actor, studentUserId) =>
       (await learner.service.getProfile(actor, studentUserId)).preferredLanguage,
 
-    // `billing` is build step 13. Until it exists every account reports no
-    // subscription, which the service reads as `free` — stated here rather than
-    // defaulted invisibly inside the module.
-    readPlan: (): Promise<null> => Promise.resolve(null),
+    /**
+     * ========================================================================
+     * THE BILLING EDGE — D-257. THE LINE THAT USED TO GIVE PAYING CUSTOMERS
+     * THE FREE TIER.
+     *
+     * It read `readPlan: () => Promise.resolve(null)`, under a comment saying
+     * "billing is build step 13". Build step 13 shipped. The comment did not,
+     * so every plan-gated decision in `foxy` resolved to `free` FOREVER and
+     * somebody who paid received the 20-message cap. Nothing failed, nothing
+     * logged, and no test noticed — the stand-in was a valid `PlanReader`.
+     *
+     * ------------------------------------------------------------------------
+     * THE OBSTACLE WAS A SIGNATURE MISMATCH, AND IT IS RESOLVED BY PASSING THE
+     * ACTOR RATHER THAN BY MINTING A SYSTEM ACTOR.
+     *
+     * `billing.getEntitlements(actor, subjectUserId)` runs
+     * `authoriseSubscription` on the actor; `PlanReader` had no actor at all.
+     * The two available answers were "give `PlanReader` an actor" and "supply a
+     * system actor here whose authority is narrow and named". THE FIRST WINS,
+     * because it needs no new authority to exist: `foxy` only ever asks about
+     * the plan of the student making the request, so the session actor IS the
+     * subject, billing's ownership rule is satisfied by a real principal, and
+     * nothing in the product gains the ability to read a third party's billing.
+     * A system actor would have been a new principal — one that can read
+     * ANYBODY's entitlements — created to answer a question that never asked
+     * for it, and it would have had to be kept narrow by discipline forever.
+     *
+     * ------------------------------------------------------------------------
+     * IT ASKS FOR A CAPABILITY, NOT A PLAN NAME.
+     *
+     * `hasFeature(entitlements, 'foxy.unlimited')` and never
+     * `entitlements.planCode === 'monthly'`. A plan is a commercial artefact —
+     * renamed, split, retired, replaced by an annual tier — and a call site
+     * that switches on its name is a call site nobody edits when the catalogue
+     * changes. A capability is what this code actually depends on, so a new
+     * plan granting `foxy.unlimited` reaches Foxy with no edit here at all.
+     * `billing/index.ts`'s own header names this as the ONLY shape a consumer
+     * should write.
+     *
+     * An expired, halted or `pending` subscription resolves to the free grant
+     * inside `resolveEntitlements` — computed against the injected clock, never
+     * cached — so a lapsed customer falls back to the free cap on the very next
+     * turn without anything here knowing what "expired" means.
+     *
+     * `billing` is constructed BELOW this line; the reference is inside a
+     * closure that is not called until a request arrives, by which time the
+     * whole graph is built. That ordering is deliberate rather than tolerated:
+     * moving `billing` above `foxy` would make the file's module order describe
+     * a dependency that does not exist in either direction.
+     * ========================================================================
+     */
+    readPlan: createFoxyPlanReader(() => billing.service),
 
     model: config.ai.llmModel ?? 'unset',
   });
@@ -640,6 +788,48 @@ export function buildModules(container: Container, options: BuildModulesOptions 
      * without building a real digest. Production never passes it.
      */
     digest: options.digest ?? parent.digestSource,
+    /**
+     * ======================================================================
+     * PREFERENCES ARE DURABLE NOW — D-260, and this is the two-line wiring it
+     * asked for. The table landed in migration `0006_notify_preferences`.
+     *
+     * Until this line, preferences lived in `platform/cache` AND NOWHERE ELSE.
+     * `maxmemory-policy allkeys-lru` is configured, so eviction is ORDINARY
+     * OPERATION rather than an incident — and a preference key is written once
+     * and read rarely, which puts it near the front of the eviction queue by
+     * construction. What eviction restores is the DEFAULT channel set, and the
+     * default is NO OPT-OUTS. Somebody who muted email started receiving email
+     * again, having changed nothing and been told nothing.
+     *
+     * THE ORDER OF THE TWO STORES IS THE DESIGN, not an implementation
+     * detail. `createWriteThroughPreferencesStore` writes the DURABLE one
+     * first and lets its failure propagate; the cache write happens second and
+     * its failure is swallowed. Reversed, a cache that accepted a value the
+     * database refused would serve it until eviction and the old one forever
+     * after — the least diagnosable shape this bug has.
+     *
+     * A CACHE MISS IS NOT AN ANSWER. Absence is never negatively cached; only
+     * a durable `null` means "never chosen". That is what makes the cache a
+     * genuine accelerator rather than a second, lossy source of truth.
+     *
+     * The same pool as the rest of notify, deliberately: a preference read is
+     * ordinary request traffic on the API side and part of the delivery job on
+     * the worker side, so it belongs in whichever bulkhead the module is
+     * already using rather than opening a second one.
+     * ======================================================================
+     */
+    preferences: createWriteThroughPreferencesStore({
+      durable: createDbPreferencesStore(
+        forWorker ? container.pools.worker : container.poolFor('notify'),
+      ),
+      // The RAW cache port, demoted to a read cache. It is not
+      // `createCachePreferencesStore` wrapped again: the write-through store
+      // owns the key format and the miss semantics precisely so that "a miss is
+      // not an answer" is decided in ONE place rather than composed out of two
+      // stores that each have an opinion about absence.
+      cache: container.cache,
+      logger: container.logger,
+    }),
   });
 
   /**
@@ -702,6 +892,41 @@ export function buildModules(container: Container, options: BuildModulesOptions 
     // silently-unwired audit log is indistinguishable from one that is working
     // and has nothing to say.
     audit: container.audit,
+
+    /**
+     * ========================================================================
+     * THE WEBHOOK'S REJECTION BUDGET — D-258.
+     *
+     * `POST /api/v1/webhooks/billing` is the only unauthenticated,
+     * origin-check-exempt, internet-reachable endpoint in the product, and it
+     * was the only one with NO rate limit of any kind. The global authenticated
+     * throttle in `app/server.ts` cannot cover it — that hook returns
+     * immediately for a request carrying no actor, and a webhook carries none by
+     * definition. So every forged signature wrote a durable `audit_log` row, and
+     * an append-only table grew at a rate an anonymous caller chose.
+     *
+     * The counters live in `platform/cache` under an expiring key, with the
+     * in-process fallback for a cache outage, exactly like every other limiter
+     * in the process. The METRIC NAME IS ITS OWN: "the payment webhook has
+     * degraded to a per-instance limiter" and "authentication has" are different
+     * pages in a runbook, and one name for both makes the alert unactionable —
+     * the same reasoning that gave the global throttle a distinct name.
+     *
+     * The KEY and the RULE belong to `billing` and are stated there; this line
+     * supplies only the mechanism. See `WEBHOOK_REJECTION_RATE_LIMIT`.
+     * ========================================================================
+     */
+    rateLimiter: createRateLimiter({
+      cache: container.cache,
+      clock: container.clock,
+      logger: container.logger,
+      metrics: {
+        increment: (metric: string, tags?: Readonly<Record<string, string>>): void => {
+          container.metrics.counter(metric, 1, tags);
+        },
+      },
+      fallbackMetric: 'billing.webhook_rate_limit.in_process_fallback',
+    }),
   });
 
   /**

@@ -5,6 +5,7 @@ import type {
   SubscribeResponse,
   WebhookResponse,
 } from '@/shared/contracts/billing.contract';
+import { requireActor as requireRequestActor } from '@/shared/http/require-actor';
 import { billingSchemas, parseInput } from './billing.schema';
 import type { BillingService } from './billing.service';
 import type { BillingActor } from './billing.types';
@@ -59,12 +60,12 @@ const API_PREFIX = '/api/v1';
 /** The exempt prefix, matched by `WEBHOOK_PATH_PATTERN`. Not a coincidence. */
 export const BILLING_WEBHOOK_PATH = `${API_PREFIX}/webhooks/billing`;
 
+/**
+ * D-263 — one implementation, in `shared/http`, bound to this module's name and
+ * actor type. Three other modules carried a byte-identical copy of the body.
+ */
 function requireActor(request: FastifyRequest): BillingActor {
-  const actor = request.actor;
-  if (actor === undefined) {
-    throw new Error('billing routes: missing the requireSession preHandler');
-  }
-  return actor;
+  return requireRequestActor(request, 'billing');
 }
 
 export interface BillingRoutesDeps {

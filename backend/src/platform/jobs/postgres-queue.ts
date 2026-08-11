@@ -7,7 +7,7 @@ import {
   type EnqueueResult,
   type FailureOutcome,
   type JobQueue,
-  type JobRecord,
+  type ClaimedJob,
   type JobStatus,
 } from './job.port';
 
@@ -76,11 +76,56 @@ interface JobRow extends Record<string, unknown> {
   payload: Record<string, unknown>;
   attempts: number;
   max_attempts: number;
-  run_at: Date;
-  created_at: Date;
+  /**
+   * ==========================================================================
+   * ALL THREE TIMESTAMPS ARE `Date | string` — D-267, completing D-233.
+   *
+   * `db.execute` runs raw SQL through node-postgres, and what comes back for a
+   * `timestamptz` depends on the driver's type parsers, not on the annotation
+   * written here. D-233 typed `locked_at` honestly and left these two as
+   * `Date`, saying so explicitly: they "have never been PROVEN to be one,
+   * because nothing ever called a method on them — they are handed straight out
+   * and only ever compared".
+   *
+   * THAT IS AN ARGUMENT FOR WHY IT HAD NOT BLOWN UP YET, NOT FOR WHY IT WAS
+   * SAFE. `locked_at` was found the hard way — the integration suite threw
+   * `job.lockedAt.toISOString is not a function` on its first run — and the
+   * only reason these two did not is that no caller had yet done the obvious
+   * thing with a value the type system promised was a `Date`. They are handed
+   * out as `ClaimedJob.runAt` / `.createdAt`, both declared `Date`, so the lie
+   * is not confined to this file: it is exported. The first caller to write
+   * `job.runAt.getTime()` — a scheduler, a metric, a "how late is this job"
+   * log line — gets a `TypeError` in a worker, at runtime, with a compiler that
+   * had already signed off on it.
+   *
+   * "Fix the types, or parse them" — both. Typed as the union the driver
+   * actually returns, and normalised once in `toRecord`, so the honesty stops
+   * at the boundary and every consumer still gets a real `Date`.
+   * ==========================================================================
+   */
+  run_at: Date | string;
+  created_at: Date | string;
+  locked_by: string;
+  /**
+   * The field that proved it. See the block above: this one is formatted back
+   * into the next statement by the fence, so a string here is a `TypeError` at
+   * the one moment that matters — which is why it was typed honestly first and
+   * why the other two are now typed the same way rather than waiting for their
+   * own incident.
+   */
+  locked_at: Date | string;
 }
 
-function toRecord(row: JobRow): JobRecord {
+/**
+ * The driver may hand back a `Date` or an ISO string for a `timestamptz`.
+ * Normalised at the row boundary — once, here — so no consumer has to know
+ * which one it got. See `JobRow`'s header.
+ */
+function toDate(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value);
+}
+
+function toRecord(row: JobRow): ClaimedJob {
   return {
     id: row.id,
     kind: row.kind,
@@ -88,8 +133,19 @@ function toRecord(row: JobRow): JobRecord {
     payload: row.payload,
     attempts: row.attempts,
     maxAttempts: row.max_attempts,
-    runAt: row.run_at,
-    createdAt: row.created_at,
+    // D-267 — normalised, not asserted. `ClaimedJob` declares both as `Date`,
+    // and until now that was a promise this function was not keeping.
+    runAt: toDate(row.run_at),
+    createdAt: toDate(row.created_at),
+    // D-233 — the lease. Returned by the claim's own RETURNING clause, so it is
+    // the value the database actually wrote and not the value we asked it to.
+    //
+    // Normalised through `new Date` because the driver may hand back either a
+    // `Date` or an ISO string — see `JobRow.locked_at`. Doing it here means the
+    // fence has exactly one shape to format, rather than every completion site
+    // having to know which one it got.
+    lockedBy: row.locked_by,
+    lockedAt: toDate(row.locked_at),
   };
 }
 
@@ -166,7 +222,7 @@ export function createPostgresJobQueue(options: PostgresJobQueueOptions): JobQue
       workerId: string,
       kinds: readonly string[],
       now: Date,
-    ): Promise<JobRecord | null> {
+    ): Promise<ClaimedJob | null> {
       if (kinds.length === 0) return null;
 
       const result = await db.db.execute<JobRow>(sql`
@@ -188,61 +244,108 @@ export function createPostgresJobQueue(options: PostgresJobQueueOptions): JobQue
           for update skip locked
           limit 1
         )
-        returning id, kind, idempotency_key, payload, attempts, max_attempts, run_at, created_at
+        returning id, kind, idempotency_key, payload, attempts, max_attempts, run_at,
+                  created_at, locked_by, locked_at
       `);
 
       const row = result.rows[0];
       return row === undefined ? null : toRecord(row);
     },
 
-    async succeed(jobId: string, now: Date): Promise<void> {
-      await db.db.execute(sql`
+    /**
+     * FENCED BY THE LEASE — D-233. See `JobQueue.succeed` for the race.
+     *
+     * The `where` clause is the whole fix: `locked_by` and `locked_at` together
+     * identify the claim this caller holds, and `reapStuck` nulls both when it
+     * reclaims a row. So a worker whose job outran the 120-second lock timeout
+     * matches nothing and its write does not land, instead of overwriting the
+     * state of the worker that legitimately owns the job now.
+     *
+     * `status = 'running'` is in there too, and it is not redundant with the
+     * lease: `succeed` and `fail` both null the lock columns, so a duplicate
+     * completion from the SAME worker would otherwise be matched by
+     * `locked_by is null and locked_at is null` if either ever became nullable
+     * in the comparison. Belt and braces on a statement whose failure mode is
+     * silent.
+     */
+    async succeed(job: ClaimedJob, now: Date): Promise<boolean> {
+      const result = await db.db.execute<{ id: string }>(sql`
         update jobs set
           status = 'succeeded',
           locked_by = null,
           locked_at = null,
           last_error = null,
           updated_at = ${now.toISOString()}::timestamptz
-        where id = ${jobId}
+        where id = ${job.id}
+          and status = 'running'
+          and locked_by = ${job.lockedBy}
+          and locked_at = ${job.lockedAt.toISOString()}::timestamptz
+        returning id
       `);
+
+      return result.rows.length > 0;
     },
 
     /**
      * Transient failure → `failed` with `run_at` pushed out by the jittered
      * backoff. Attempts exhausted → `dead`, and THE ROW IS KEPT.
      *
-     * The decision is made in SQL with a CASE rather than by reading `attempts`
-     * and writing back, because a read-modify-write here races with the reaper
-     * — which is also allowed to change this row's status.
+     * ========================================================================
+     * THE COMMENT HERE USED TO PROMISE A `CASE` AND THE CODE DID A
+     * SELECT-THEN-UPDATE — D-233.
+     *
+     * It said, verbatim: "The decision is made in SQL with a CASE rather than by
+     * reading `attempts` and writing back, because a read-modify-write here
+     * races with the reaper — which is also allowed to change this row's
+     * status." Then it did exactly the read-modify-write it had just ruled out,
+     * and the UPDATE keyed on `id` alone. Between the SELECT and the UPDATE the
+     * reaper could requeue the row and a second worker could claim it, and this
+     * statement would then stamp a stale `failed`/`dead` over the new claim —
+     * including over a job that had already succeeded.
+     *
+     * Now it is ONE statement. `dead` versus `failed` is decided by a `CASE`
+     * over the row's own `attempts` and `max_attempts` — the values as they are
+     * at write time, not as they were at read time — and the whole thing is
+     * fenced by the lease. `RETURNING status` reports what the database
+     * actually decided, so the outcome this function returns is observed rather
+     * than predicted.
+     *
+     * The backoff DELAY is still computed here, from `job.attempts`. That is
+     * safe under the fence: the statement only lands when the lease is intact,
+     * and `attempts` cannot have changed while it is — a claim is the only
+     * thing that increments it, and a claim would have replaced the lease.
+     * Computing the jitter in SQL instead would mean a second implementation of
+     * `jitteredBackoffMs`, in a second language, that no test compares to the
+     * first.
      */
-    async fail(jobId: string, error: string, now: Date): Promise<FailureOutcome> {
-      const current = await db.db.execute<{ attempts: number; max_attempts: number }>(sql`
-        select attempts, max_attempts from jobs where id = ${jobId}
-      `);
-      const row = current.rows[0];
-      if (row === undefined) {
-        throw new Error(`fail: no job ${jobId}`);
-      }
-
-      const exhausted = row.attempts >= row.max_attempts;
+    async fail(job: ClaimedJob, error: string, now: Date): Promise<FailureOutcome> {
       // `attempts - 1` is the zero-based retry index: `attempts` was already
       // incremented by the claim, so the first failure has attempts === 1 and
       // must produce the FIRST backoff delay, not the second.
-      const delayMs = jitteredBackoffMs(row.attempts - 1, JOB_BACKOFF_POLICY, random);
+      const delayMs = jitteredBackoffMs(job.attempts - 1, JOB_BACKOFF_POLICY, random);
       const nextRunAt = new Date(now.getTime() + delayMs);
 
-      await db.db.execute(sql`
+      const result = await db.db.execute<{ status: string }>(sql`
         update jobs set
-          status = ${exhausted ? 'dead' : 'failed'},
+          status = case when attempts >= max_attempts then 'dead' else 'failed' end,
           locked_by = null,
           locked_at = null,
           last_error = ${error.slice(0, 1_000)},
-          run_at = ${(exhausted ? now : nextRunAt).toISOString()}::timestamptz,
+          run_at = case
+            when attempts >= max_attempts then ${now.toISOString()}::timestamptz
+            else ${nextRunAt.toISOString()}::timestamptz
+          end,
           updated_at = ${now.toISOString()}::timestamptz
-        where id = ${jobId}
+        where id = ${job.id}
+          and status = 'running'
+          and locked_by = ${job.lockedBy}
+          and locked_at = ${job.lockedAt.toISOString()}::timestamptz
+        returning status
       `);
 
-      return exhausted ? 'dead' : 'retry';
+      const status = result.rows[0]?.status;
+      if (status === undefined) return 'lease_lost';
+      return status === 'dead' ? 'dead' : 'retry';
     },
 
     /**

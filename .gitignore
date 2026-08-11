@@ -16,6 +16,17 @@ backups/
 .env
 .env.*
 !.env.example
+# `!.env.example` does NOT match `.env.prod.example` — a negation is matched
+# against the whole basename, not a suffix. `docker/.env.prod.example` was
+# therefore ignored while `ci.yml`'s infra job did
+# `cp .env.prod.example .env.prod` before validating the compose file, so the
+# ONLY gate that proves compose.prod.yml parses could never run on a clean
+# checkout. Every `*.example` is documentation by definition and is scanned for
+# credential-shaped values by `tools/scan-secrets.mjs`, so the safe rule is to
+# un-ignore all of them rather than to enumerate one more name and be wrong
+# again the next time a file is added. See D-249.
+!*.env.example
+!.env.*.example
 
 # test artefacts
 coverage/

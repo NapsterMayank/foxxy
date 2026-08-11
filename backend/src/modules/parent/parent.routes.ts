@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
+import { requireActor as requireRequestActor } from '@/shared/http/require-actor';
 import { parentSchemas, parseInput } from './parent.schema';
 import type { ParentService } from './parent.service';
 import type { ParentActor } from './parent.types';
@@ -32,12 +33,12 @@ import type { ParentActor } from './parent.types';
 
 const API_PREFIX = '/api/v1';
 
+/**
+ * D-263 — one implementation, in `shared/http`, bound to this module's name and
+ * actor type. Three other modules carried a byte-identical copy of the body.
+ */
 function requireActor(request: FastifyRequest): ParentActor {
-  const actor = request.actor;
-  if (actor === undefined) {
-    throw new Error('parent routes: missing the requireSession preHandler');
-  }
-  return actor;
+  return requireRequestActor(request, 'parent');
 }
 
 /** `?week=YYYY-MM-DD` — any day in the week; the service normalises it. */

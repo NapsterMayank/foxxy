@@ -35,7 +35,7 @@ import {
   scheduleNextReview,
   type RetentionState,
 } from './domain/spaced-retention';
-import { applyDailyCap, calculateXp } from './domain/xp-rules';
+import { applyDailyCap, calculateXp, type CappedXp } from './domain/xp-rules';
 import type { PracticeRepository, ResponseInput } from './practice.repository';
 import type {
   ChapterListReader,
@@ -142,6 +142,23 @@ const XP_SOURCE: XpSource = 'practice_session';
  * rest.
  */
 const SESSION_NOT_FOUND = 'Session not found.';
+
+/**
+ * Thrown to ROLL BACK an attempt whose mastery step was computed from a value
+ * another submission has since replaced — D-241.
+ *
+ * Deliberately module-private and deliberately not an `AppError`: it never
+ * reaches a route. It is a control-flow signal between the transaction body and
+ * the retry immediately outside it, and the only reason it is an exception at
+ * all is that returning would COMMIT the responses, the session and the XP row
+ * around a mastery write that did not happen.
+ */
+class StaleMasteryError extends Error {
+  constructor() {
+    super('practice: mastery compare-and-set was refused');
+    this.name = 'StaleMasteryError';
+  }
+}
 
 export interface PracticeService {
   getTodaysMission(actor: PracticeActor): Promise<MissionView | null>;
@@ -400,6 +417,233 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
     return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   }
 
+  /**
+   * Everything about this submission that is decided BEFORE the transaction and
+   * cannot change inside it: the score, the uncapped XP, the verdict, the rows.
+   *
+   * The cap, the mastery and the schedule are deliberately NOT here. Each of
+   * them is a function of state another submission can move, so each is decided
+   * inside the transaction, under the lock.
+   */
+  interface SubmissionWrite {
+    readonly now: Date;
+    readonly scorePercent: number;
+    readonly earned: number;
+    readonly isValid: boolean;
+    readonly invalidReason: string | null;
+    readonly responses: readonly ResponseInput[];
+  }
+
+  /** What the transaction actually wrote — the source of every number returned. */
+  interface SubmissionOutcome {
+    readonly capped: CappedXp;
+    readonly masteryScore: number;
+    readonly attempts: number;
+    readonly nextReviewAt: Date;
+  }
+
+  /**
+   * How many times a submission may recompute its mastery step and try again.
+   *
+   * Each retry is caused by ANOTHER submission of the same student committing
+   * in between — so under the per-student lock the queue is at most as long as
+   * the number of submissions in flight, and three is generous for a human with
+   * two tabs. Exhausting it is a 409 the client can retry, never a silent write.
+   */
+  const MASTERY_ATTEMPTS = 3;
+
+  /**
+   * Runs one attempt at the submission transaction.
+   *
+   * Returns `null` — after rolling back — when the mastery compare-and-set was
+   * refused, which means another submission moved this chapter's mastery
+   * between this attempt's read and its write.
+   */
+  async function attemptSubmission(
+    actor: PracticeActor,
+    session: SessionRecord,
+    write: SubmissionWrite,
+  ): Promise<SubmissionOutcome | null> {
+    /**
+     * THE MASTERY READ IS OUTSIDE THE TRANSACTION, AND IT HAS TO BE.
+     *
+     * `chapter_mastery` belongs to `learner` and is reached through an injected
+     * function bound to `learner.service.getMastery`, which runs on learner's
+     * own pool — the SAME `core` pool this module's transaction is holding a
+     * connection from (§3.1). Issuing that read from inside the transaction
+     * would hold two `core` connections per submission, and twenty concurrent
+     * submissions would deadlock the pool against itself: every connection
+     * held by a transaction waiting for a connection that will never come.
+     *
+     * So the read stays out here and the WRITE carries the value it was
+     * computed from (D-241). `learner` applies the update only if the row still
+     * holds that value, which makes the pair atomic without nesting a
+     * connection inside a transaction.
+     */
+    const mastery = await deps.readMastery(actor, session.studentUserId);
+    const previous = mastery.find((row) => row.chapterId === session.chapterId);
+    const previousScore = previous?.masteryScore ?? null;
+    const updatedMastery = nextMastery(previousScore, write.scorePercent);
+
+    let stale = false;
+
+    const outcome = await repository.withTransaction(
+      async (tx: TransactionToken): Promise<SubmissionOutcome | null> => {
+        /**
+         * FIRST STATEMENT IN THE TRANSACTION, BEFORE ANY READ THAT IS ACTED ON
+         * — D-242. Everything below decides something from state another
+         * submission by this student can move; the lock is what makes those
+         * decisions still true when they are written.
+         */
+        await repository.lockStudent(tx, session.studentUserId);
+
+        /**
+         * THE DAY'S XP, READ UNDER THE LOCK. Read before the lock — which is
+         * where it used to be, outside the transaction entirely — two
+         * submissions both saw the same total, both computed room from it, and
+         * both wrote. The 200-a-day cap became 400.
+         */
+        const alreadyToday = await repository.xpSince(
+          session.studentUserId,
+          startOfDay(write.now),
+          tx,
+        );
+        const capped = applyDailyCap(write.earned, alreadyToday);
+
+        /**
+         * `where submitted_at is null` — the second guard on double submission.
+         * It used to be the first, and under the student lock a concurrent
+         * duplicate now queues here rather than racing; it stays because the
+         * lock protects one student's submissions from each other and this
+         * protects the row from anything else. The unique constraint on
+         * `(session_id, question_id)` is the backstop under both.
+         */
+        const completed = await repository.completeSession(tx, {
+          sessionId: session.id,
+          scorePercent: write.scorePercent,
+          xpEarned: capped.awarded,
+          isValid: write.isValid,
+          invalidReason: write.invalidReason,
+          now: write.now,
+        });
+
+        if (completed === null) {
+          throw new ConflictError('This session has already been submitted.', {
+            message: 'Concurrent submission lost the race',
+          });
+        }
+
+        await repository.insertResponses(tx, write.responses);
+
+        await repository.appendXp(tx, {
+          studentUserId: session.studentUserId,
+          tenantId: session.tenantId,
+          source: XP_SOURCE,
+          sourceId: session.id,
+          // ZERO IS A REAL ROW. "This session awarded nothing" and "this session
+          // was never submitted" must not look the same in the ledger.
+          amount: capped.awarded,
+          now: write.now,
+        });
+
+        // THE CROSS-MODULE WRITE, INSIDE THIS TRANSACTION (D-056). `learner`
+        // owns `chapter_mastery`; the executor is handed over as an opaque
+        // token it unwraps inside its own repository.
+        const written = await deps.writeMastery(actor, {
+          studentUserId: session.studentUserId,
+          chapterId: session.chapterId,
+          masteryScore: updatedMastery,
+          // D-241 — the write applies only if the row still holds this.
+          expectedPreviousScore: previousScore,
+          attemptIncrement: 1,
+          practised: true,
+          executor: tx,
+        });
+
+        if (written === null) {
+          // Another submission blended this chapter first. THROW rather than
+          // return, because returning would COMMIT everything above it — the
+          // responses, the session, the XP row — around a mastery step that
+          // never landed. The throw rolls the whole attempt back; the caller
+          // re-reads and recomputes.
+          stale = true;
+          throw new StaleMasteryError();
+        }
+
+        // Read under the same lock, for the same reason the XP total is: the
+        // SM-2 state is a function of the previous schedule, and two
+        // submissions reading the same one produce one review step for two
+        // sessions.
+        const retention = await repository.findRetention(session.studentUserId, tx);
+        const current = retention.find((row) => row.chapterId === session.chapterId);
+        const state: RetentionState =
+          current === undefined
+            ? INITIAL_RETENTION
+            : {
+                intervalDays: current.intervalDays,
+                easeFactor: current.easeFactor,
+                repetitions: current.repetitions,
+              };
+        const schedule = scheduleNextReview(state, write.scorePercent, write.now);
+
+        await repository.upsertRetention(tx, {
+          studentUserId: session.studentUserId,
+          tenantId: session.tenantId,
+          chapterId: session.chapterId,
+          dueAt: schedule.dueAt,
+          intervalDays: schedule.intervalDays,
+          easeFactor: schedule.easeFactor,
+          repetitions: schedule.repetitions,
+          lastReviewedAt: schedule.lastReviewedAt,
+          now: write.now,
+        });
+
+        return {
+          capped,
+          masteryScore: written.masteryScore,
+          attempts: written.attempts,
+          nextReviewAt: schedule.dueAt,
+        };
+      },
+    ).catch((error: unknown): SubmissionOutcome | null => {
+      if (stale && error instanceof StaleMasteryError) {
+        return null;
+      }
+      throw error;
+    });
+
+    return outcome;
+  }
+
+  /**
+   * §8.6 — the submission transaction, retried when its mastery step went stale.
+   *
+   * The retry re-reads mastery and recomputes the EMA step from the value that
+   * is actually stored, so two overlapping submissions produce TWO steps rather
+   * than one — which is what makes the mastery agree with the attempt count that
+   * SQL was incrementing correctly all along.
+   */
+  async function submitOnce(
+    actor: PracticeActor,
+    session: SessionRecord,
+    write: SubmissionWrite,
+  ): Promise<SubmissionOutcome> {
+    for (let attempt = 1; attempt <= MASTERY_ATTEMPTS; attempt += 1) {
+      const outcome = await attemptSubmission(actor, session, write);
+      if (outcome !== null) {
+        return outcome;
+      }
+      logger.warn(
+        { attempt, chapterId: session.chapterId },
+        'practice.session.mastery_contended',
+      );
+    }
+
+    throw new ConflictError('Please try submitting again.', {
+      message: `Mastery compare-and-set lost ${String(MASTERY_ATTEMPTS)} times`,
+    });
+  }
+
   return {
     /**
      * §8.6 — Today's Mission, step 1, and the client's most important screen.
@@ -645,10 +889,22 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
      * disagrees with their history permanently — there is no retry that
      * reconciles it, because both halves individually look correct.
      *
-     * ORDER INSIDE THE TRANSACTION IS DELIBERATE. `completeSession` runs FIRST
-     * and carries `where submitted_at is null`, so a concurrent duplicate
-     * submission is refused before it can insert a single response. The unique
-     * constraint on `(session_id, question_id)` is the backstop under that.
+     * ORDER INSIDE THE TRANSACTION IS DELIBERATE, and it changed — D-241,
+     * D-242. `lockStudent` runs first and every value that is DECIDED from
+     * mutable state is read after it: the day's XP total, the retention
+     * schedule. They used to be read before the transaction opened, where two
+     * overlapping submissions read the same numbers, computed from them
+     * independently, and both wrote — a daily cap that could be exceeded and a
+     * mastery that recorded one step for two attempts.
+     *
+     * `completeSession` still carries `where submitted_at is null` and the
+     * unique constraint on `(session_id, question_id)` is still the backstop
+     * under it. Neither was removed; they are simply no longer the only thing
+     * standing between two concurrent submissions and a wrong number.
+     *
+     * The one read that stays outside is mastery, because it crosses a module
+     * and therefore a second connection from the same pool — see the note in
+     * `attemptSubmission`. It carries its own compare-and-set instead.
      */
     async submitSession(actor: PracticeActor, sessionId: string): Promise<SubmissionResult> {
       const session = await loadSession(actor, sessionId, 'write');
@@ -693,25 +949,6 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
       const scorePercent = validity.isValid ? calculateScore(correctCount, questionCount) : 0;
       const earned = validity.isValid ? calculateXp(correctCount, scorePercent) : 0;
 
-      const alreadyToday = await repository.xpSince(session.studentUserId, startOfDay(now));
-      const capped = applyDailyCap(earned, alreadyToday);
-
-      const retention = await repository.findRetention(session.studentUserId);
-      const current = retention.find((row) => row.chapterId === session.chapterId);
-      const state: RetentionState =
-        current === undefined
-          ? INITIAL_RETENTION
-          : {
-              intervalDays: current.intervalDays,
-              easeFactor: current.easeFactor,
-              repetitions: current.repetitions,
-            };
-      const schedule = scheduleNextReview(state, scorePercent, now);
-
-      const mastery = await deps.readMastery(actor, session.studentUserId);
-      const previous = mastery.find((row) => row.chapterId === session.chapterId);
-      const updatedMastery = nextMastery(previous?.masteryScore ?? null, scorePercent);
-
       const responses: ResponseInput[] = answers.map((answer) => ({
         sessionId: session.id,
         studentUserId: session.studentUserId,
@@ -728,66 +965,22 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         now,
       }));
 
-      await repository.withTransaction(async (tx: TransactionToken) => {
-        const completed = await repository.completeSession(tx, {
-          sessionId: session.id,
-          scorePercent,
-          xpEarned: capped.awarded,
-          isValid: validity.isValid,
-          invalidReason: validity.isValid ? null : validity.reason,
-          now,
-        });
-
-        if (completed === null) {
-          throw new ConflictError('This session has already been submitted.', {
-            message: 'Concurrent submission lost the race',
-          });
-        }
-
-        await repository.insertResponses(tx, responses);
-
-        await repository.appendXp(tx, {
-          studentUserId: session.studentUserId,
-          tenantId: session.tenantId,
-          source: XP_SOURCE,
-          sourceId: session.id,
-          // ZERO IS A REAL ROW. "This session awarded nothing" and "this session
-          // was never submitted" must not look the same in the ledger.
-          amount: capped.awarded,
-          now,
-        });
-
-        // THE CROSS-MODULE WRITE, INSIDE THIS TRANSACTION (D-056). `learner`
-        // owns `chapter_mastery`; the executor is handed over as an opaque
-        // token it unwraps inside its own repository.
-        await deps.writeMastery(actor, {
-          studentUserId: session.studentUserId,
-          chapterId: session.chapterId,
-          masteryScore: updatedMastery,
-          attemptIncrement: 1,
-          practised: true,
-          executor: tx,
-        });
-
-        await repository.upsertRetention(tx, {
-          studentUserId: session.studentUserId,
-          tenantId: session.tenantId,
-          chapterId: session.chapterId,
-          dueAt: schedule.dueAt,
-          intervalDays: schedule.intervalDays,
-          easeFactor: schedule.easeFactor,
-          repetitions: schedule.repetitions,
-          lastReviewedAt: schedule.lastReviewedAt,
-          now,
-        });
+      const outcome = await submitOnce(actor, session, {
+        now,
+        scorePercent,
+        earned,
+        isValid: validity.isValid,
+        invalidReason: validity.isValid ? null : validity.reason,
+        responses,
       });
 
       logger.info(
         {
           scorePercent,
-          xpAwarded: capped.awarded,
+          xpAwarded: outcome.capped.awarded,
           isValid: validity.isValid,
           questionCount,
+          masteryAttempts: outcome.attempts,
         },
         'practice.session.submitted',
       );
@@ -797,13 +990,15 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         scorePercent,
         correctCount: validity.isValid ? correctCount : 0,
         questionCount,
-        xpAwarded: capped.awarded,
-        xpEarned: capped.earned,
-        dailyCapReached: capped.capReached,
+        xpAwarded: outcome.capped.awarded,
+        xpEarned: outcome.capped.earned,
+        dailyCapReached: outcome.capped.capReached,
         isValid: validity.isValid,
         invalidReason: validity.isValid ? null : validity.reason,
-        evidence: evidenceLabel(updatedMastery, (previous?.attempts ?? 0) + 1),
-        nextReviewAt: schedule.dueAt.toISOString(),
+        // FROM THE ROW THAT WAS WRITTEN, never from what this module intended
+        // to write. The two used to be computed separately and could disagree.
+        evidence: evidenceLabel(outcome.masteryScore, outcome.attempts),
+        nextReviewAt: outcome.nextReviewAt.toISOString(),
       };
     },
 

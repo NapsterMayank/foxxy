@@ -1,10 +1,17 @@
 import { AUDIT_RESOURCES, type AuditPort } from '@/platform/audit/index';
 import { createAccessGuard } from '@/platform/authz/index';
 import type { Clock } from '@/platform/clock/index';
-import { ConflictError, NotFoundError, ValidationError } from '@/platform/errors/index';
+import {
+  ConflictError,
+  NotFoundError,
+  RateLimitError,
+  ValidationError,
+} from '@/platform/errors/index';
 import type { Logger } from '@/platform/logger/index';
 import type { PaymentsPort, WebhookDelivery } from '@/platform/payments/index';
+import type { RateLimiter } from '@/platform/rate-limit/index';
 import type { TransactionToken } from '@/platform/tx/index';
+import type { RateLimitRule } from '@/shared/constants/rate-limits';
 import type {
   BillingStatusResponse,
   Entitlements,
@@ -75,6 +82,57 @@ import type {
  * never be one — every entitlement decision depends on it.
  */
 
+/**
+ * ============================================================================
+ * THE WEBHOOK'S REJECTION BUDGET — D-258.
+ *
+ * `POST /api/v1/webhooks/billing` is the one endpoint in the product that is
+ * unauthenticated by design, exempt from the CSRF origin check, and reachable
+ * by anybody on the internet. Until this constant existed it was also
+ * UNRATE-LIMITED, and every delivery whose signature failed wrote a durable
+ * `audit_log` row. So a forged-signature flood was an append-only table growing
+ * at the attacker's chosen rate, consuming database capacity and disk on an
+ * endpoint that costs them nothing to call. The audit row is there to report
+ * probing; at volume it becomes the payload.
+ *
+ * ----------------------------------------------------------------------------
+ * THE KEY IS A CONSTANT, AND THAT IS THE POINT.
+ *
+ * NOT the client IP, NOT the `x-razorpay-event-id` header, NOT anything else in
+ * the request — every one of those is chosen by the caller, so limiting on them
+ * limits nobody: an attacker rotates the value and gets a fresh budget, while
+ * the one caller who cannot rotate anything is the genuine provider behind a
+ * stable egress address. A single global counter is the only key in this
+ * request that the attacker does not control.
+ *
+ * ----------------------------------------------------------------------------
+ * IT IS SPENT ONLY BY REJECTED DELIVERIES, WHICH IS WHY A FLOOD CANNOT STARVE
+ * THE PROVIDER.
+ *
+ * The obvious design — one budget for the whole endpoint — has a nasty edge: a
+ * shared counter keyed globally means an attacker's traffic exhausts the budget
+ * that Razorpay's genuine, bursty retries need, and the visible failure is
+ * subscriptions that never activate. Charging only the REJECTED path removes
+ * that entirely. A verified delivery never touches the limiter and can never be
+ * throttled, no matter what else is arriving; a forged one spends from a budget
+ * it shares with every other forgery.
+ *
+ * Exceeding it suppresses the AUDIT WRITE and nothing else. The response is
+ * unchanged — still a contentless 400 — so the endpoint reveals nothing new,
+ * and the log line still fires because a warn line is bounded by the log
+ * pipeline where an unbounded table is not.
+ *
+ * 30 A MINUTE is far above any plausible rate of genuine signature failure (a
+ * rotated secret produces a handful of retries, not thirty a minute) and far
+ * below a rate at which the table is a capacity problem. The first rejection in
+ * a window is always audited, so a single probe is never invisible.
+ * ============================================================================
+ */
+export const WEBHOOK_REJECTION_RATE_LIMIT: RateLimitRule = { limit: 30, windowSeconds: 60 };
+
+/** The one, constant, caller-independent counter key. See the block above. */
+export const WEBHOOK_REJECTION_RATE_LIMIT_KEY = 'billing:webhook:rejected';
+
 /** `audit_log.action` values this module writes. Dotted and past tense. */
 export const BILLING_AUDIT_ACTIONS = {
   SUBSCRIPTION_CREATED: 'billing.subscription_created',
@@ -93,6 +151,15 @@ export interface BillingServiceDeps {
   /** WHO PAYS. The B2C/B2B seam — see `PayerResolver`. */
   readonly resolvePayer: PayerResolver;
   readonly audit: AuditPort;
+  /**
+   * The budget spent by REJECTED webhook deliveries — D-258.
+   *
+   * REQUIRED, not optional with a permissive default. An absent limiter here
+   * would restore exactly the defect: an unauthenticated endpoint writing
+   * durable rows at a rate the caller picks. A construction site that has not
+   * supplied one must fail to compile rather than fail open.
+   */
+  readonly rateLimiter: RateLimiter;
 }
 
 export interface BillingService {
@@ -148,6 +215,31 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
       tenantId,
     });
     return tenantId;
+  }
+
+  /**
+   * Whether this rejected delivery may still write an audit row — D-258.
+   *
+   * TRUE means "spend one and audit"; FALSE means "we are being flooded, keep
+   * the log line and skip the durable write".
+   *
+   * A `RateLimitError` is the ONLY thing treated as "no budget". Anything else
+   * — a cache outage that the limiter's own in-process fallback could not
+   * absorb, say — propagates, becomes a 5xx and makes the provider retry, which
+   * is §8.8 rule 4. Swallowing it would mean a broken limiter silently reverted
+   * to unlimited auditing, which is the defect this function exists to close.
+   */
+  async function rejectionBudgetAvailable(): Promise<boolean> {
+    try {
+      await deps.rateLimiter.consume(
+        WEBHOOK_REJECTION_RATE_LIMIT_KEY,
+        WEBHOOK_REJECTION_RATE_LIMIT,
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof RateLimitError) return false;
+      throw error;
+    }
   }
 
   /** The stored row for a beneficiary, plus the entitlements it currently grants. */
@@ -314,20 +406,40 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
       // =====================================================================
       const verified = deps.payments.verifyWebhook(delivery);
       if (verified === null) {
-        // A REJECTION IS AUDITED, because it is the one signal that somebody is
-        // probing the endpoint. Metadata only: the body is attacker-controlled
-        // and echoing it into an audit row is how log injection starts.
-        await deps.audit.record({
-          actor: { userId: null, role: null, tenantId: null },
-          action: BILLING_AUDIT_ACTIONS.WEBHOOK_REJECTED,
-          resourceType: AUDIT_RESOURCES.USER,
-          resourceId: null,
-          metadata: { bodyBytes: delivery.rawBody.length },
-        });
+        /**
+         * D-258 — THE BUDGET IS SPENT HERE AND NOWHERE ELSE.
+         *
+         * After the signature has failed, so a genuine delivery never reaches
+         * this line and can never be throttled by an attacker's volume; and
+         * BEFORE the audit write, because the audit write is the resource being
+         * protected. On a constant key, because every key the request carries is
+         * chosen by the caller. See `WEBHOOK_REJECTION_RATE_LIMIT`.
+         */
+        if (await rejectionBudgetAvailable()) {
+          // A REJECTION IS AUDITED, because it is the one signal that somebody
+          // is probing the endpoint. Metadata only: the body is
+          // attacker-controlled and echoing it into an audit row is how log
+          // injection starts.
+          await deps.audit.record({
+            actor: { userId: null, role: null, tenantId: null },
+            action: BILLING_AUDIT_ACTIONS.WEBHOOK_REJECTED,
+            resourceType: AUDIT_RESOURCES.USER,
+            resourceId: null,
+            metadata: { bodyBytes: delivery.rawBody.length },
+          });
+        }
+        // OUTSIDE the budget check, deliberately. Suppressing the durable row
+        // must not also suppress the signal — a log line is bounded by the log
+        // pipeline, an append-only table is not, and "we stopped auditing
+        // because we are being flooded" is itself the thing an operator needs
+        // to see.
         logger.warn(
           { event: 'billing.webhook_rejected' },
           'a webhook was rejected: the signature did not verify',
         );
+        // THE RESPONSE IS UNCHANGED whether the budget was available or not.
+        // A different outcome under load would tell an attacker they had found
+        // the threshold, and would tell the provider something untrue.
         return { result: 'rejected' };
       }
 

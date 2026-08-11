@@ -2,6 +2,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import * as schema from './schema/index';
 import type { Database, DbExecutor, DbHandle } from './client';
+import { resolvePoolSizes, type ProcessRole } from './pool-budget';
 
 /**
  * SEPARATE CONNECTION POOLS — 04-RESILIENCE-PLAN.md §3.1.
@@ -25,9 +26,36 @@ import type { Database, DbExecutor, DbHandle } from './client';
  *   ai       8   vector search        — capped so it cannot exhaust the others
  *   worker   6   background jobs      — never competes with live traffic
  *
- * 44 total, comfortably inside a default `max_connections` of 100 with room
- * for administrative access — which matters, because the moment you most need
- * `psql` is the moment the pools are full.
+ * ===========================================================================
+ * THOSE FOUR NUMBERS ARE A REQUEST, NOT A BUDGET — and the budget is
+ * PER PROCESS. Corrected in D-228; the sentence that used to sit here was
+ * actively misleading.
+ *
+ * It read: "44 total, comfortably inside a default `max_connections` of 100."
+ * 44 is ONE process's sum, and there are two — `main.ts` and `worker-main.ts`
+ * both call `createContainer`, so both built all four pools and the real figure
+ * was 88 of 100 with a single replica of each. One extra replica, or the
+ * overlap of a rolling deploy, crosses `max_connections`; the symptom is every
+ * pool failing at once plus a `psql` that cannot connect to find out why.
+ *
+ * What is enforced now:
+ *
+ *   PER PROCESS   `resolvePoolSizes` trims by ROLE (an api never claims a job;
+ *                 a worker never serves a login) and then scales the whole set
+ *                 down proportionally to `DATABASE_POOL_MAX`. At the defaults:
+ *                 api  10 + 20 + 8 + 2 = 40
+ *                 worker 2 +  4 + 8 + 6 = 20
+ *
+ *   ACROSS        cannot be enforced from inside one process; it is the
+ *   REPLICAS      operator's sum and it is stated so it can be checked:
+ *                     api_replicas x 40  +  worker_replicas x 20
+ *                       + headroom for psql and for a rolling deploy's overlap
+ *                       <= max_connections
+ *                 One of each is 60 of 100. A rolling api deploy briefly makes
+ *                 that 100, which is why the ceiling is a variable.
+ *
+ * See `pool-budget.ts` for the arithmetic, which is a tested pure function
+ * rather than a paragraph.
  *
  * `withTransaction` operates within a SINGLE pool. A transaction spanning two
  * pools is two transactions, and the second one committing after the first
@@ -48,7 +76,22 @@ export interface DbPoolSizes {
 export interface DbPoolsConfig {
   readonly url: string;
   readonly ssl: boolean;
+  /**
+   * The provider's CA, PEM. `null` means "use Node's trust store", which is
+   * correct for every managed Postgres whose root is a public CA.
+   */
+  readonly sslCa: string | null;
+  /**
+   * TLS WITHOUT CERTIFICATE VERIFICATION. `true` only when an operator has set
+   * `DATABASE_SSL_INSECURE` deliberately — see the note on `createNamedPool`.
+   */
+  readonly sslInsecure: boolean;
+  /** The REQUESTED sizes. `resolvePoolSizes` decides what is actually opened. */
   readonly sizes: DbPoolSizes;
+  /** Which process this is. An api does not need the `worker` pool (D-228). */
+  readonly role: ProcessRole;
+  /** `DATABASE_POOL_MAX` — the ceiling across all four pools in THIS process. */
+  readonly maxConnections: number;
   /** §4 — the Postgres statement timeout for ordinary queries. */
   readonly statementTimeoutMs: number;
   /** §4 — the shorter statement timeout applied to the `ai` pool. */
@@ -119,6 +162,34 @@ function startupOptions(statementTimeoutMs: number, efSearch: number | undefined
   return options.join(' ');
 }
 
+/**
+ * The TLS options for a pool — D-238.
+ *
+ * ===========================================================================
+ * THIS USED TO BE `{ rejectUnauthorized: false }`, UNCONDITIONALLY.
+ *
+ * That is TLS with the authentication removed. The connection is encrypted
+ * against a passive listener and completely open to an active one, because ANY
+ * certificate is accepted — including one an attacker generates. Whoever sits
+ * between this process and a managed Postgres reads every row, every session
+ * token and the credentials in the connection string, and nothing anywhere
+ * reports it: the handshake succeeds, the queries work, and "we use SSL" stays
+ * technically true.
+ *
+ * Verification is on by default now. `DATABASE_SSL_CA` is the correct answer
+ * for a provider whose root Node does not already trust;
+ * `DATABASE_SSL_INSECURE` restores the old behaviour and is named so that it
+ * cannot be read in a deployment manifest without knowing what it costs.
+ */
+function sslOptions(cfg: DbPoolsConfig): pg.PoolConfig['ssl'] {
+  if (!cfg.ssl) return undefined;
+  if (cfg.sslInsecure) return { rejectUnauthorized: false };
+  return {
+    rejectUnauthorized: true,
+    ...(cfg.sslCa === null ? {} : { ca: cfg.sslCa }),
+  };
+}
+
 function createNamedPool(
   name: PoolName,
   cfg: DbPoolsConfig,
@@ -126,12 +197,13 @@ function createNamedPool(
   statementTimeoutMs: number,
   efSearch?: number,
 ): NamedDbHandle {
+  const ssl = sslOptions(cfg);
   const pool = new pg.Pool({
     connectionString: cfg.url,
     max,
     connectionTimeoutMillis: cfg.connectTimeoutMs,
     options: startupOptions(statementTimeoutMs, efSearch),
-    ...(cfg.ssl ? { ssl: { rejectUnauthorized: false } } : {}),
+    ...(ssl === undefined ? {} : { ssl }),
   });
 
   // pg emits `error` on an idle client that the server closed. Without a
@@ -159,8 +231,17 @@ function createNamedPool(
 }
 
 export function createDbPools(cfg: DbPoolsConfig): DbPools {
-  const auth = createNamedPool('auth', cfg, cfg.sizes.auth, cfg.statementTimeoutMs);
-  const core = createNamedPool('core', cfg, cfg.sizes.core, cfg.statementTimeoutMs);
+  /**
+   * THE BUDGET IS APPLIED HERE, ONCE, BEFORE A SINGLE POOL IS BUILT (D-228).
+   *
+   * Not at the four call sites below — a per-pool clamp is four places for the
+   * ceiling to be forgotten, and the one that gets forgotten is the one added
+   * next year.
+   */
+  const sizes = resolvePoolSizes(cfg.sizes, cfg.role, cfg.maxConnections);
+
+  const auth = createNamedPool('auth', cfg, sizes.auth, cfg.statementTimeoutMs);
+  const core = createNamedPool('core', cfg, sizes.core, cfg.statementTimeoutMs);
   // The `ai` pool is the one that gets the SHORT statement timeout. Vector
   // search is the expensive, spiky query path (§3.1), so it is capped both in
   // how many connections it may hold and in how long it may hold one.
@@ -172,7 +253,7 @@ export function createDbPools(cfg: DbPoolsConfig): DbPools {
   const ai = createNamedPool(
     'ai',
     cfg,
-    cfg.sizes.ai,
+    sizes.ai,
     cfg.vectorStatementTimeoutMs,
     cfg.hnswEfSearch,
   );
@@ -206,7 +287,7 @@ export function createDbPools(cfg: DbPoolsConfig): DbPools {
   const worker = createNamedPool(
     'worker',
     cfg,
-    cfg.sizes.worker,
+    sizes.worker,
     cfg.statementTimeoutMs,
     cfg.hnswEfSearch,
   );

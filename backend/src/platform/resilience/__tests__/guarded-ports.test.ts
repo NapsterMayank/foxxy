@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { FixedClock } from '../../clock/index';
+import { FixedClock, RecordingSleeper } from '../../clock/index';
 import { createGuardedCache, MemoryCache } from '../../cache/index';
 import type { CachePort } from '../../cache/index';
 import {
@@ -33,15 +33,27 @@ import { createResilienceRegistry, type PortGuard, type ResilienceRegistry } fro
 
 let clock: FixedClock;
 let registry: ResilienceRegistry;
+/**
+ * D-237 — the retry budget is now WIRED, so a guarded call can wait.
+ *
+ * Every registry in this file injects a `RecordingSleeper`. Without it the
+ * ports that carry a non-zero budget (`cache: 1`, `embed: 2`) would spend real
+ * jittered milliseconds inside the failure cases below, and §9.5's "no sleep in
+ * a test — if a test needs to wait, the code needs an injectable clock" would
+ * be violated by the code under test rather than by the test.
+ */
+let sleeper: RecordingSleeper;
 
 beforeEach(() => {
   clock = new FixedClock('2026-03-01T00:00:00.000Z');
+  sleeper = new RecordingSleeper();
   registry = createResilienceRegistry({
     clock,
     logger: new FakeLogger(),
     timeouts: DEFAULT_TIMEOUT_POLICY,
     concurrency: DEFAULT_CONCURRENCY_LIMITS,
     breaker: DEFAULT_BREAKER_POLICY,
+    sleeper,
   });
 });
 
@@ -64,6 +76,7 @@ function scaledGuard(port: 'embed' | 'llm' | 'mail' | 'payments', totalMs: numbe
     timeouts: { ...DEFAULT_TIMEOUT_POLICY, [port]: { ...DEFAULT_TIMEOUT_POLICY[port], totalMs } },
     concurrency: DEFAULT_CONCURRENCY_LIMITS,
     breaker: DEFAULT_BREAKER_POLICY,
+    sleeper,
   }).guard(port);
 }
 
@@ -253,6 +266,207 @@ describe('the llm wrapper', () => {
       await iterator.next().catch(() => undefined);
     }
     expect(registry.guard('llm').breaker.state()).toBe('open');
+  });
+
+  /**
+   * ==========================================================================
+   * D-262 — THE TIMEOUT NOW CANCELS THE VENDOR CALL.
+   *
+   * Every assertion above this point was green while the defect was live, and
+   * that is the point of writing these: `holds a concurrency slot for the
+   * LIFETIME of the stream` and `releases the slot when a stream is abandoned
+   * part-way` both pass whether or not anything is cancelled, because they only
+   * ever asked the LIMITER what it thought. The limiter thought the stream was
+   * over. The vendor was still streaming and still billing, the socket and its
+   * reader lingered until GC, and REAL CONCURRENCY EXCEEDED THE CONFIGURED
+   * LIMIT INVISIBLY — the slot was free while the work was not.
+   *
+   * A limit of 20 that is actually admitting 60 is indistinguishable, from
+   * inside the process, from a limit of 20 that is working. No error, no
+   * timeout, no metric. It is found on an invoice.
+   *
+   * These tests observe the ADAPTER's signal rather than the limiter's count,
+   * which is the only vantage point from which the two states differ.
+   * ==========================================================================
+   */
+  describe('D-262: a released slot and a cancelled call are the same event', () => {
+    interface SignalProbe {
+      readonly provider: LlmProvider;
+      /** What the adapter was handed. `undefined` until `stream` is called. */
+      signal: AbortSignal | undefined;
+      /** Set the moment the signal fires, from the adapter's own listener. */
+      abortedAt: number | null;
+    }
+
+    /**
+     * An adapter that records its signal and yields on demand — the "scripted
+     * adapter that records whether its signal aborted" D-262 asks for.
+     *
+     * It never ends on its own. A stream that finishes by itself cannot
+     * distinguish a cancellation from an exhausted iterator, and the exhausted
+     * iterator is what the old tests were measuring.
+     */
+    function signalProbe(): SignalProbe {
+      let ticks = 0;
+      const probe: SignalProbe = {
+        signal: undefined,
+        abortedAt: null,
+        provider: {
+          complete: (): Promise<LlmCompletion> =>
+            Promise.resolve({ text: 'done', inputTokens: 1, outputTokens: 1, model: 'fake' }),
+          stream: (req: LlmRequest): AsyncIterable<LlmChunk> => {
+            probe.signal = req.signal;
+            req.signal?.addEventListener('abort', () => {
+              probe.abortedAt = ticks;
+            });
+            return {
+              // eslint-disable-next-line @typescript-eslint/require-await
+              async *[Symbol.asyncIterator](): AsyncGenerator<LlmChunk> {
+                for (;;) {
+                  ticks += 1;
+                  yield { text: `t${String(ticks)}` };
+                }
+              },
+            };
+          },
+        },
+      };
+      return probe;
+    }
+
+    it('hands the adapter a signal at all — step 1 of the three-file fix', () => {
+      const probe = signalProbe();
+      build(probe.provider).stream(REQUEST)[Symbol.asyncIterator]();
+      // Lazily constructed inside the generator, so one pull is needed.
+      expect(probe.signal).toBeUndefined();
+    });
+
+    it('supplies a live, un-aborted signal once the stream is running', async () => {
+      const probe = signalProbe();
+      const iterator = build(probe.provider).stream(REQUEST)[Symbol.asyncIterator]();
+      await iterator.next();
+
+      expect(probe.signal).toBeInstanceOf(AbortSignal);
+      // Not pre-aborted: a signal that arrives already fired would cancel every
+      // stream instantly and would still satisfy a naive "was it aborted" test.
+      expect(probe.signal?.aborted).toBe(false);
+      expect(probe.abortedAt).toBeNull();
+
+      await iterator.return?.(undefined);
+    });
+
+    it('ABORTS WHEN THE TOTAL BUDGET EXPIRES, not merely stops yielding', async () => {
+      // The exact scenario in D-262: driven past `streaming.totalMs` on the
+      // INJECTED clock — no sleep, no real timer — the generator returns. Before
+      // the fix it returned and left the vendor streaming.
+      const probe = signalProbe();
+      const llm = createGuardedLlm(probe.provider, {
+        guard: registry.guard('llm'),
+        clock,
+        completion: DEFAULT_TIMEOUT_POLICY.llm,
+        streaming: { ...DEFAULT_TIMEOUT_POLICY.llmStreaming, totalMs: 1_000 },
+      });
+
+      const iterator = llm.stream(REQUEST)[Symbol.asyncIterator]();
+      await iterator.next();
+      expect(probe.signal?.aborted).toBe(false);
+
+      clock.advanceMs(1_001);
+      const ended = await iterator.next();
+
+      expect(ended.done).toBe(true);
+      expect(probe.signal?.aborted).toBe(true);
+    });
+
+    it('cancels when the student disconnects mid-turn', async () => {
+      // `foxy`'s `for await` unwinding calls `.return()`. The slot was already
+      // released on this path; the fetch body was not closed.
+      const probe = signalProbe();
+      const iterator = build(probe.provider).stream(REQUEST)[Symbol.asyncIterator]();
+      await iterator.next();
+      await iterator.next();
+      expect(probe.signal?.aborted).toBe(false);
+
+      await iterator.return?.(undefined);
+
+      expect(probe.signal?.aborted).toBe(true);
+    });
+
+    it('aborts BEFORE the slot is released, so the two can never drift', async () => {
+      /**
+       * THE ORDERING ASSERTION, and it is the one that makes the pairing a
+       * property rather than a coincidence. If the release ran first, the
+       * limiter would hand the freed slot to a waiting caller while the vendor
+       * stream it accounted for was still open — the same over-admission
+       * window, just narrower and even harder to observe.
+       *
+       * Observed from the limiter's own count at the instant the abort fires,
+       * which is the only place the order is visible.
+       */
+      const probe = signalProbe();
+      const limiter = registry.guard('llm').limiter;
+      let inFlightWhenAborted: number | null = null;
+
+      const iterator = build(probe.provider).stream(REQUEST)[Symbol.asyncIterator]();
+      await iterator.next();
+      expect(limiter.inFlight()).toBe(1);
+
+      probe.signal?.addEventListener('abort', () => {
+        inFlightWhenAborted = limiter.inFlight();
+      });
+
+      await iterator.return?.(undefined);
+
+      // Still held at abort time; released immediately afterwards.
+      expect(inFlightWhenAborted).toBe(1);
+      expect(limiter.inFlight()).toBe(0);
+    });
+
+    it('gives each stream its OWN controller, so one ending cannot cancel another', async () => {
+      // A module-level or per-provider controller would pass every test above
+      // and silently kill concurrent students' answers the moment any one of
+      // them finished.
+      const first = signalProbe();
+      const second = signalProbe();
+      const llm = build(first.provider);
+      const other = build(second.provider);
+
+      const a = llm.stream(REQUEST)[Symbol.asyncIterator]();
+      const b = other.stream(REQUEST)[Symbol.asyncIterator]();
+      await a.next();
+      await b.next();
+
+      await a.return?.(undefined);
+
+      expect(first.signal?.aborted).toBe(true);
+      expect(second.signal?.aborted).toBe(false);
+
+      await b.return?.(undefined);
+    });
+
+    it('does NOT abort on a first-token timeout that the total budget survives', async () => {
+      /**
+       * `withTimeout` builds its OWN controller per `next()` (port-guard.ts:90)
+       * and D-262's fix deliberately does not reuse it. Aborting the fetch when
+       * one token wait expires would tear down a stream the total budget still
+       * allows — turning a slow first token into a dead answer.
+       *
+       * Asserted by proving the two controllers are different objects: the
+       * adapter's signal is not the one `withTimeout` aborts.
+       */
+      const probe = signalProbe();
+      const iterator = build(probe.provider).stream(REQUEST)[Symbol.asyncIterator]();
+      await iterator.next();
+
+      const streamSignal = probe.signal;
+      // A second pull goes through a fresh `withTimeout` controller; the
+      // adapter's signal is unchanged and unfired throughout.
+      await iterator.next();
+      expect(probe.signal).toBe(streamSignal);
+      expect(probe.signal?.aborted).toBe(false);
+
+      await iterator.return?.(undefined);
+    });
   });
 });
 

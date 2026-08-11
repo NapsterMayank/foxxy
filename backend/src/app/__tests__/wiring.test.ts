@@ -209,12 +209,35 @@ describe('the rate-limit fallback emits a metric', () => {
  * nothing in a log. It is discovered by reconciling a bank statement.
  *
  * These are the assertions that the boot refusal is REAL rather than a comment
- * about one. Every case supplies `embed` and `llm` overrides, because those two
- * checks run FIRST in `createContainer` and would otherwise be the thing that
- * threw — a green test proving the wrong refusal.
- * ============================================================================
+ * about one.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY `PRODUCTION_BASE` SATISFIES EVERY *OTHER* GATE RATHER THAN NONE OF THEM.
+ *
+ * `createContainer` runs its production refusals in source order — mail, then
+ * embed, then llm, then payments, then the migration journal — and every one of
+ * them throws. A base environment that satisfied none of them therefore proved
+ * nothing about payments: the FIRST unmet gate threw and `toThrow(/RAZORPAY…/)`
+ * only ever passed because payments happened to be first among the unmet ones.
+ *
+ * That is exactly how these four tests broke: D-226 added the SMTP gate AHEAD
+ * of payments, and all four went red with `SMTP_HOST is required in
+ * production` — a correct refusal, reported as a payments regression. The
+ * tests were asserting gate ORDER while claiming to assert gate CONTENT.
+ *
+ * So the base now satisfies every gate, and each case removes EXACTLY the
+ * variable it is about via `without`. A gate added ahead of payments tomorrow
+ * cannot break this block, because a gate that is satisfied does not throw and
+ * therefore cannot be the thing observed.
+ * ---------------------------------------------------------------------------
  */
 describe('the container chooses a payment gateway and refuses to guess', () => {
+  /**
+   * Every production boot gate satisfied — SMTP (D-226), Voyage, the LLM key,
+   * and Razorpay. Nothing here opens a socket: `nodemailer.createTransport`
+   * connects on send, and the Voyage/Anthropic adapters take an injected
+   * `HttpClient` and are constructed lazily.
+   */
   const PRODUCTION_BASE = {
     NODE_ENV: 'production',
     DATABASE_URL: 'postgres://user:pass@localhost:5433/unused',
@@ -224,16 +247,39 @@ describe('the container chooses a payment gateway and refuses to guess', () => {
     SESSION_COOKIE_NAME: 'foxxy_session',
     APP_URL: 'https://app.example.com',
     API_URL: 'https://api.example.com',
-  } as const;
-
-  const RAZORPAY_ENV = {
+    // D-226 — the mail gate, which runs BEFORE payments.
+    SMTP_HOST: 'smtp.example.com',
+    SMTP_PORT: '587',
+    SMTP_USER: 'no-reply@example.com',
+    SMTP_PASSWORD: 'smtp-app-password',
+    SMTP_FROM: 'Foxxy <no-reply@example.com>',
+    // The two AI gates, which also run before payments.
+    VOYAGE_API_KEY: 'voyage-test-key',
+    LLM_API_KEY: 'llm-test-key',
+    // Payments — removed per-case by `without` below.
     RAZORPAY_KEY_ID: 'rzp_test_key_id',
     RAZORPAY_KEY_SECRET: 'rzp_test_key_secret',
     RAZORPAY_WEBHOOK_SECRET: 'whsec_different_from_the_api_secret',
     RAZORPAY_PLAN_IDS: 'monthly:plan_MONTH,yearly:plan_YEAR',
   } as const;
 
-  /** The two adapter choices that precede payments, taken out of the picture. */
+  /**
+   * `PRODUCTION_BASE` with the named variables absent — the one axis under
+   * test, with every other gate left satisfied.
+   */
+  function without(...keys: readonly (keyof typeof PRODUCTION_BASE)[]): Record<string, string> {
+    return Object.fromEntries(
+      Object.entries(PRODUCTION_BASE).filter(
+        ([name]) => !keys.includes(name as keyof typeof PRODUCTION_BASE),
+      ),
+    );
+  }
+
+  /**
+   * The deterministic AI adapters, so no case depends on a real vendor client
+   * being constructible. Kept alongside the env keys rather than instead of
+   * them: the keys make the GATES pass, these make the ADAPTERS inert.
+   */
   const AI_OVERRIDES = {
     embed: createDeterministicEmbed(),
     llm: createFakeLlm(),
@@ -245,8 +291,20 @@ describe('the container chooses a payment gateway and refuses to guess', () => {
   });
 
   it('REFUSES TO BOOT in production with no credentials, naming the missing one', () => {
-    const config = parseConfig(PRODUCTION_BASE);
+    const config = parseConfig(
+      without('RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET'),
+    );
     expect(() => createContainer(config, AI_OVERRIDES)).toThrow(/RAZORPAY_KEY_ID/);
+  });
+
+  it('refuses for the PAYMENTS reason, not because some earlier gate was unset', () => {
+    // The assertion the old ordering-dependent form could not make. Had the
+    // SMTP gate still been unsatisfied here, the message would name SMTP_HOST
+    // and the test above would pass for entirely the wrong reason.
+    const config = parseConfig(
+      without('RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET'),
+    );
+    expect(() => createContainer(config, AI_OVERRIDES)).not.toThrow(/SMTP_|VOYAGE_|LLM_API_KEY/);
   });
 
   it('names RAZORPAY_WEBHOOK_SECRET specifically when only that one is absent', () => {
@@ -258,16 +316,12 @@ describe('the container chooses a payment gateway and refuses to guess', () => {
      * checkout working perfectly while every genuine delivery fails its
      * signature — money in, no access.
      */
-    const config = parseConfig({
-      ...PRODUCTION_BASE,
-      RAZORPAY_KEY_ID: RAZORPAY_ENV.RAZORPAY_KEY_ID,
-      RAZORPAY_KEY_SECRET: RAZORPAY_ENV.RAZORPAY_KEY_SECRET,
-    });
+    const config = parseConfig(without('RAZORPAY_WEBHOOK_SECRET'));
     expect(() => createContainer(config, AI_OVERRIDES)).toThrow(/RAZORPAY_WEBHOOK_SECRET/);
   });
 
   it('takes the Razorpay adapter in production once all three are set', async () => {
-    const config = parseConfig({ ...PRODUCTION_BASE, ...RAZORPAY_ENV });
+    const config = parseConfig(PRODUCTION_BASE);
     const built = createContainer(config, AI_OVERRIDES);
     try {
       expect(built.payments.name).toBe(RAZORPAY_PROVIDER);
@@ -282,7 +336,9 @@ describe('the container chooses a payment gateway and refuses to guess', () => {
      * different facts, and only one of them should be refused. The refusal is
      * about the SILENT fallback, not about the fake itself.
      */
-    const config = parseConfig(PRODUCTION_BASE);
+    const config = parseConfig(
+      without('RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET'),
+    );
     const built = createContainer(config, {
       ...AI_OVERRIDES,
       payments: createFakePayments({ secret: 'explicit' }),

@@ -21,7 +21,21 @@ export function createGuardedEmbed(
     model: inner.model,
     dimensions: inner.dimensions,
     embedQuery(text: string): Promise<number[]> {
-      return guard.run(() => inner.embedQuery(text));
+      /**
+       * IDEMPOTENT — D-237, and this is the clearest case in the codebase.
+       *
+       * Embedding is a pure function of the text: the same input returns the
+       * same vector, it writes nothing, and a repeated call is invisible to
+       * everything except the vendor's bill. `embed`'s rule carries
+       * `retries: 2`, which had been parsed and read by nothing; declaring the
+       * permission here is what spends it.
+       *
+       * It also protects the §6 degradation rather than undermining it: the
+       * fallback to keyword-only retrieval runs when the call FAILS, and two
+       * jittered retries inside a 5s-per-attempt budget still fail fast
+       * compared with the alternative of losing semantic search on a blip.
+       */
+      return guard.run(() => inner.embedQuery(text), { idempotent: true });
     },
   };
 }

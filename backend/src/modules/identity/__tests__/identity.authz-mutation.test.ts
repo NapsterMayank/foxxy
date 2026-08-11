@@ -7,6 +7,7 @@ import { createIdentityService, type IdentityService } from '../identity.service
 import type { RequestContext, SessionActor } from '../identity.types';
 import {
   OTHER_TENANT_ID,
+  TEST_IP_HASH_SALT,
   TEST_TENANT_ID,
   createSecondTenant,
   startIdentityHarness,
@@ -109,6 +110,7 @@ function buildService(mutations: Mutations = {}): IdentityService {
     randomBytes: (size: number): Uint8Array => cryptoRandomBytes(size),
     randomInt: (max: number): number => cryptoRandomInt(max),
     sessionTtlDays: 30,
+    ipHashSalt: TEST_IP_HASH_SALT,
     defaultTenantId: TEST_TENANT_ID,
     urls: { apiBaseUrl: 'http://api.test', appBaseUrl: 'http://app.test' },
   });

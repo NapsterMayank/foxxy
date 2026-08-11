@@ -23,6 +23,14 @@ export interface SessionRecord {
   readonly userId: string;
   readonly expiresAt: Date;
   readonly lastUsedAt: Date;
+  /**
+   * WHEN THE SESSION WAS ISSUED — the anchor of the absolute lifetime (D-219).
+   *
+   * Selected on every validation, which is one more column on the hottest read
+   * in the product, and worth it: without it `expires_at` is the only deadline,
+   * `expires_at` slides forward on use, and a session that is used never dies.
+   */
+  readonly createdAt: Date;
 }
 
 /**

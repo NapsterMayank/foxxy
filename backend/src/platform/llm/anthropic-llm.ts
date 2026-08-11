@@ -291,10 +291,25 @@ export function createAnthropicLlm(options: AnthropicLlmOptions): LlmProvider {
 
     stream(req: LlmRequest): AsyncIterable<LlmChunk> {
       async function* iterate(): AsyncGenerator<LlmChunk> {
+        /**
+         * D-262, step 3 of 3 — THE SIGNAL REACHES THE SOCKET.
+         *
+         * This is the only line in the three-file fix that actually stops
+         * anything. `LlmRequest.signal` and `guarded-llm`'s controller are
+         * plumbing; `fetch` honouring an `AbortSignal` by tearing down the
+         * connection and erroring the `ReadableStream` is the mechanism. Until
+         * this argument existed, `guarded-llm` could abort all it liked and the
+         * vendor went on streaming to a reader nobody was draining.
+         *
+         * `complete()` needs no equivalent: it goes through `options.http`,
+         * which is `createHttpClient` behind `guard.run`, and that path already
+         * receives and forwards `withTimeout`'s signal.
+         */
         const response = await doFetch(`${baseUrl}/messages`, {
           method: 'POST',
           headers: headersFor(options.apiKey),
           body: JSON.stringify(toWireBody(req, model, true)),
+          ...(req.signal === undefined ? {} : { signal: req.signal }),
         });
 
         if (!response.ok) {

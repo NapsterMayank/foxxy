@@ -11,7 +11,7 @@ import type {
   SignupResponse,
   UserProfile,
 } from '@/shared/contracts/identity.contract';
-import { hashIp } from './domain/token';
+import { createIpHasher } from './domain/token';
 import {
   clearSessionCookie,
   createRequireSession,
@@ -43,14 +43,19 @@ const USER_AGENT_MAX_LENGTH = 512;
  *
  * The IP is HASHED here and the raw value never leaves this function: it is
  * personal data, and it ends up both in `sessions.ip_hash` and in a
- * rate-limit key.
+ * rate-limit key. The hash is SALTED — the hasher arrives with the salt already
+ * bound, so no request-path code holds the secret (D-221).
  */
-function contextOf(request: FastifyRequest): RequestContext {
-  const rawUserAgent = request.headers['user-agent'];
-  return {
-    ipHash: hashIp(request.ip),
-    userAgent:
-      typeof rawUserAgent === 'string' ? rawUserAgent.slice(0, USER_AGENT_MAX_LENGTH) : null,
+function buildContextOf(
+  hashIdentifier: (value: string) => string,
+): (request: FastifyRequest) => RequestContext {
+  return function contextOf(request: FastifyRequest): RequestContext {
+    const rawUserAgent = request.headers['user-agent'];
+    return {
+      ipHash: hashIdentifier(request.ip),
+      userAgent:
+        typeof rawUserAgent === 'string' ? rawUserAgent.slice(0, USER_AGENT_MAX_LENGTH) : null,
+    };
   };
 }
 
@@ -84,6 +89,8 @@ export interface IdentityRoutesDeps {
   readonly cookie: SessionCookieOptions;
   /** Where a freshly verified account is sent. */
   readonly postVerifyRedirectUrl: string;
+  /** The salt for `ip_hash` and every rate-limit key derived from it — D-221. */
+  readonly ipHashSalt: string;
 }
 
 export async function registerIdentityRoutes(
@@ -94,6 +101,7 @@ export async function registerIdentityRoutes(
 
   const requireSession = createRequireSession({ service: deps.service, cookie: deps.cookie });
   const authenticated = { preHandler: requireSession };
+  const contextOf = buildContextOf(createIpHasher(deps.ipHashSalt));
 
   // ---------------------------------------------------------------------
   // Auth
@@ -139,9 +147,13 @@ export async function registerIdentityRoutes(
   /**
    * §6.6. Deliberately NOT behind `requireSession`: logging out with an
    * already-dead session must succeed, not 401.
+   *
+   * Which is precisely why it is RATE LIMITED BY IP inside the service (D-220):
+   * unauthenticated and reaching the `auth` pool is the combination the bulkhead
+   * exists to prevent. The context is passed for that key and no other reason.
    */
   app.post(`${API_PREFIX}/auth/logout`, async (request, reply) => {
-    await deps.service.logout(request.cookies[deps.cookie.name]);
+    await deps.service.logout(request.cookies[deps.cookie.name], contextOf(request));
     clearSessionCookie(reply, deps.cookie);
     return reply.status(200).send(OK);
   });

@@ -22,7 +22,7 @@ import {
 } from './domain/digest-week';
 import { KIND_POLICY, NOTIFY_METRICS, type NotifyKind } from './domain/kinds';
 import { resolvePreferences, type NotifyPreferences } from './domain/preferences';
-import type { NotifyRepository } from './notify.repository';
+import type { ListCursor, NotifyRepository } from './notify.repository';
 import type { NotifyPreferencesStore } from './notify.preferences-store';
 import type {
   DeliveryJobPayload,
@@ -169,12 +169,25 @@ export interface NotifyServiceDeps {
 
 export interface ListNotificationsInput {
   readonly limit: number;
-  readonly before?: Date | undefined;
+  /**
+   * The composite keyset cursor — D-259. `(createdAt, id)`, never a bare
+   * timestamp; see `NotifyRepository.list`.
+   */
+  readonly before?: ListCursor | undefined;
 }
 
 export interface ListNotificationsResult {
   readonly notifications: readonly NotificationRecord[];
-  readonly nextBefore: Date | null;
+  /**
+   * The position to resume from, or null at the end of the list.
+   *
+   * ONE VALUE CARRYING BOTH COLUMNS, rather than a `nextBefore` timestamp the
+   * routes layer would have to remember to pair with an id. The defect this
+   * replaces was precisely a cursor that had lost half of itself, and the
+   * cheapest way to stop that recurring is to make the half-cursor
+   * unrepresentable between here and the wire.
+   */
+  readonly nextCursor: ListCursor | null;
   readonly unreadCount: number;
 }
 
@@ -606,13 +619,20 @@ export function createNotifyService(deps: NotifyServiceDeps): NotifyService {
       // The cursor is only offered when the page was FULL. A short page is the
       // end of the list, and handing back a cursor for it makes every client
       // issue one more request that always returns nothing.
+      //
+      // BOTH COLUMNS OF THE LAST ROW (D-259). `createdAt` alone was the defect:
+      // it named the boundary instant rather than the boundary ROW, so a row
+      // sharing that instant was excluded from the next page and returned by no
+      // page at all.
       const oldest = notifications.at(-1);
-      const nextBefore =
-        notifications.length === input.limit && oldest !== undefined ? oldest.createdAt : null;
+      const nextCursor: ListCursor | null =
+        notifications.length === input.limit && oldest !== undefined
+          ? { createdAt: oldest.createdAt, id: oldest.id }
+          : null;
 
       return {
         notifications,
-        nextBefore,
+        nextCursor,
         unreadCount: await repository.countUnread({
           recipientUserId: actor.userId,
           tenantId,

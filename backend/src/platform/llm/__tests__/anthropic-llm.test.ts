@@ -212,6 +212,62 @@ describe('the language-model adapter — stream()', () => {
     expect(await collect(llm.stream(REQUEST))).toEqual(['Refraction ', 'bends ', 'light.']);
   });
 
+  /**
+   * D-262, step 3 of 3 — THE ONLY LINE IN THE FIX THAT STOPS ANYTHING.
+   *
+   * `LlmRequest.signal` and `guarded-llm`'s controller are plumbing; `fetch`
+   * honouring an `AbortSignal` is the mechanism. This adapter used to call
+   * `doFetch` with no `signal` at all, so `guarded-llm` could abort all it
+   * liked and the vendor went on streaming to a reader nobody was draining —
+   * billing for tokens no student would ever see.
+   *
+   * Asserted against the `RequestInit` the adapter actually builds, because
+   * "we pass the signal" is exactly the kind of claim that survives a refactor
+   * as a comment while the argument quietly disappears.
+   */
+  it('forwards the caller’s AbortSignal to fetch, so a cancelled stream really stops', async () => {
+    const controller = new AbortController();
+    let init: RequestInit | undefined;
+
+    const llm = createAnthropicLlm({
+      http: fakeHttp(() => ({ status: 200, headers: {}, body: '' })),
+      apiKey: 'test-key',
+      fetchImpl: (_url: string | URL | Request, options?: RequestInit): Promise<Response> => {
+        init = options;
+        return Promise.resolve(
+          streamingResponse([textDelta('hi'), sse({ type: 'message_stop' })]),
+        );
+      },
+    });
+
+    await collect(llm.stream({ ...REQUEST, signal: controller.signal }));
+
+    expect(init?.signal).toBe(controller.signal);
+  });
+
+  it('omits `signal` entirely when the caller supplies none', async () => {
+    // Not `signal: undefined`. Some fetch implementations and polyfills treat a
+    // present-but-undefined `signal` differently from an absent one, and the
+    // deterministic fake provider has nothing to abort — an adapter that only
+    // works when a signal is supplied would be a new failure mode, not a fix.
+    let init: RequestInit | undefined;
+
+    const llm = createAnthropicLlm({
+      http: fakeHttp(() => ({ status: 200, headers: {}, body: '' })),
+      apiKey: 'test-key',
+      fetchImpl: (_url: string | URL | Request, options?: RequestInit): Promise<Response> => {
+        init = options;
+        return Promise.resolve(
+          streamingResponse([textDelta('hi'), sse({ type: 'message_stop' })]),
+        );
+      },
+    });
+
+    await collect(llm.stream(REQUEST));
+
+    expect(init).not.toHaveProperty('signal');
+  });
+
   it('buffers a frame SPLIT ACROSS CHUNK BOUNDARIES rather than corrupting it', async () => {
     const whole = textDelta('Refraction bends light.');
     const cut = Math.floor(whole.length / 2);

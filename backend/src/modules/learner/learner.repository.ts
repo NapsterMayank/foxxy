@@ -1,4 +1,4 @@
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, or, sql, type SQL } from 'drizzle-orm';
 import type { DbExecutor, DbHandle } from '@/platform/db/index';
 import { schema, unwrapExecutor } from '@/platform/db/index';
 import type { TransactionToken } from '@/platform/tx/index';
@@ -118,6 +118,29 @@ export interface UpsertMasteryInput {
   readonly chapterId: string;
   /** Already clamped by `domain/mastery.ts`. */
   readonly masteryScore: number;
+  /**
+   * THE VALUE `masteryScore` WAS COMPUTED FROM — the compare-and-set half of
+   * D-241.
+   *
+   * `mastery_score` is not a tally, it is a LEVEL: the caller reads the current
+   * one, blends the new session into it, and writes the result outright. That
+   * is a read-modify-write, and a read-modify-write with the read outside the
+   * write's transaction is a lost update — two submissions on the same chapter
+   * both blend from the same prior value and the second write discards the
+   * first. Meanwhile `attempts` increments in SQL and is therefore correct, so
+   * the row ends up permanently self-contradicting: two attempts recorded, one
+   * attempt's worth of movement.
+   *
+   * So the previous value travels WITH the new one and the UPDATE applies only
+   * if the row still holds it. `null` means "the caller saw no row", in which
+   * case the INSERT must win outright and a conflict means somebody inserted
+   * first — also a stale computation, also refused.
+   *
+   * The write returns `null` when the set is refused. It is NOT an error here:
+   * the caller knows what it computed and can recompute, and only the caller
+   * knows whether recomputing is cheap.
+   */
+  readonly expectedPreviousScore: number | null;
   readonly attemptIncrement: number;
   readonly practisedAt: Date | null;
   readonly now: Date;
@@ -147,7 +170,8 @@ export interface LearnerRepository {
   updateProfile(input: UpdateProfileInput): Promise<StudentProfileRecord | null>;
   findSubjects(studentUserId: string): Promise<string[]>;
   findMastery(studentUserId: string): Promise<ChapterMasteryRecord[]>;
-  upsertMastery(input: UpsertMasteryInput): Promise<ChapterMasteryRecord>;
+  /** `null` when the compare-and-set was refused — see `expectedPreviousScore`. */
+  upsertMastery(input: UpsertMasteryInput): Promise<ChapterMasteryRecord | null>;
 }
 
 export function createLearnerRepository(handle: LearnerDbHandle): LearnerRepository {
@@ -262,23 +286,61 @@ export function createLearnerRepository(handle: LearnerDbHandle): LearnerReposit
      * null — a PATCH that mentions only `displayName` must not blank a grade.
      * Returns `null` when no row matched, so the service can distinguish
      * "not found" from "updated" without a second query.
+     *
+     * ===========================================================================
+     * A PATCH THAT CHANGES NOTHING WRITES NOTHING — D-244.
+     *
+     * `updated_at` used to move on every call, including a PATCH with an empty
+     * body and a PATCH re-sending the values already stored. Both are the
+     * NORMAL case on a mobile client: a settings screen posts its whole form on
+     * save whether or not a field was touched, and a dropped connection makes
+     * the app resend it.
+     *
+     * The cost is not the write. It is that `updated_at` stops meaning "when
+     * this profile last changed" and starts meaning "when it was last saved
+     * over" — and it is read as the former. Nothing fails; the column simply
+     * becomes a timestamp of client behaviour.
+     *
+     * `IS DISTINCT FROM` rather than `<>`: the columns are NOT NULL today, but
+     * `<>` on a null is null, which a WHERE reads as false, so a nullable
+     * column added later would silently become unpatchable.
+     *
+     * The UPDATE matching nothing is AMBIGUOUS — "no such student" and "nothing
+     * to change" look identical — so the fallback SELECT disambiguates them.
+     * It runs only on that path, never on a real update.
+     * ===========================================================================
      */
     async updateProfile(input: UpdateProfileInput): Promise<StudentProfileRecord | null> {
-      const changes: Record<string, unknown> = { updatedAt: input.now };
-      if (input.displayName !== undefined) changes.displayName = input.displayName;
-      if (input.grade !== undefined) changes.grade = input.grade;
+      const changes: Record<string, unknown> = {};
+      const changed: SQL[] = [];
+
+      if (input.displayName !== undefined) {
+        changes.displayName = input.displayName;
+        changed.push(sql`${students.displayName} is distinct from ${input.displayName}`);
+      }
+      if (input.grade !== undefined) {
+        changes.grade = input.grade;
+        changed.push(sql`${students.grade} is distinct from ${input.grade}`);
+      }
       if (input.preferredLanguage !== undefined) {
         changes.preferredLanguage = input.preferredLanguage;
+        changed.push(sql`${students.preferredLanguage} is distinct from ${input.preferredLanguage}`);
+      }
+
+      // An empty PATCH is a genuine no-op: no statement at all, so there is no
+      // shape of it that could bump a timestamp.
+      if (changed.length === 0) {
+        return selectProfile(db, input.userId);
       }
 
       const rows = await db
         .update(students)
-        .set(changes)
-        .where(eq(students.userId, input.userId))
+        .set({ ...changes, updatedAt: input.now })
+        .where(and(eq(students.userId, input.userId), or(...changed)))
         .returning();
 
       const row = rows[0];
-      return row === undefined ? null : toProfileRecord(row);
+      return row === undefined ? selectProfile(db, input.userId) : toProfileRecord(row);
     },
 
     findSubjects(studentUserId: string): Promise<string[]> {
@@ -299,7 +361,8 @@ export function createLearnerRepository(handle: LearnerDbHandle): LearnerReposit
     },
 
     /**
-     * Writes mastery for one chapter.
+     * Writes mastery for one chapter, ATOMICALLY WITH RESPECT TO THE READ THAT
+     * PRODUCED IT — D-241.
      *
      * `attempts` is incremented IN SQL (`attempts + $n`) rather than read,
      * incremented in TypeScript and written back. Read-modify-write on a
@@ -310,9 +373,41 @@ export function createLearnerRepository(handle: LearnerDbHandle): LearnerReposit
      * `mastery_score` is written outright rather than accumulated, because it
      * is a computed level and not a tally: the caller has already decided what
      * the new value is, from the whole of the student's history.
+     *
+     * ===========================================================================
+     * AND THAT IS THE DEFECT THIS `setWhere` CLOSES.
+     *
+     * "The caller has already decided" is a read-modify-write with the read
+     * somewhere else entirely — in `practice.submitSession`, before its
+     * transaction opened. Two submissions on the same chapter both read the
+     * same prior mastery, both computed an EMA step from it, and the second
+     * UPDATE overwrote the first. One EMA step where two occurred, while
+     * `attempts` — correctly incremented in SQL — recorded two. The row
+     * permanently disagreed with itself, and every number in it was plausible.
+     *
+     * The predicate makes the update CONDITIONAL on the row still holding the
+     * value the caller computed from. Postgres takes the row lock before
+     * evaluating an `ON CONFLICT DO UPDATE`, and re-reads the row afterwards,
+     * so a concurrent transaction's committed write IS visible to this
+     * predicate: the loser matches nothing, updates nothing, and returns
+     * nothing. No timestamp moves, no attempt is counted, and the caller is
+     * told rather than silently overwriting.
+     *
+     * `expectedPreviousScore === null` means the caller saw NO row. The insert
+     * is then the only correct outcome, so the conflict branch is refused
+     * outright (`where false`) — reaching it means somebody inserted first and
+     * the caller's "there is nothing to blend with" is already false.
+     * ===========================================================================
      */
-    async upsertMastery(input: UpsertMasteryInput): Promise<ChapterMasteryRecord> {
+    async upsertMastery(input: UpsertMasteryInput): Promise<ChapterMasteryRecord | null> {
       const score = toMasteryColumn(input.masteryScore);
+
+      const setWhere =
+        input.expectedPreviousScore === null
+          ? sql`false`
+          : sql`${chapterMastery.masteryScore} = ${toMasteryColumn(
+              input.expectedPreviousScore,
+            )}::numeric`;
 
       const rows = await (unwrapExecutor(input.executor) ?? db)
         .insert(chapterMastery)
@@ -327,6 +422,7 @@ export function createLearnerRepository(handle: LearnerDbHandle): LearnerReposit
         })
         .onConflictDoUpdate({
           target: [chapterMastery.studentUserId, chapterMastery.chapterId],
+          setWhere,
           set: {
             masteryScore: score,
             attempts: sql`${chapterMastery.attempts} + ${input.attemptIncrement}`,
@@ -339,10 +435,9 @@ export function createLearnerRepository(handle: LearnerDbHandle): LearnerReposit
         .returning();
 
       const row = rows[0];
-      if (row === undefined) {
-        throw new Error('upsertMastery: no row returned');
-      }
-      return toMasteryRecord(row);
+      // NOT an error. The caller computed from a value that is no longer
+      // current; it is the only party that knows how to compute a fresh one.
+      return row === undefined ? null : toMasteryRecord(row);
     },
   };
 }

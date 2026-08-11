@@ -12,7 +12,11 @@ import { MemoryCache } from '../../platform/cache/index';
 import { RecordingMail } from '../../platform/mail/index';
 import { createContainer, type Container } from '../container';
 import { createServer } from '../server';
-import { REQUEST_ID_HEADER } from '../plugins/request-id';
+import {
+  REQUEST_ID_HEADER,
+  MAX_REQUEST_ID_LENGTH,
+  isAcceptableRequestId,
+} from '../plugins/request-id';
 
 const CONFIG = parseConfig({
   NODE_ENV: 'test',
@@ -82,6 +86,70 @@ describe('request id', () => {
       headers: { [REQUEST_ID_HEADER]: 'upstream-42' },
     });
     expect(response.headers[REQUEST_ID_HEADER]).toBe('upstream-42');
+  });
+
+  /**
+   * =======================================================================
+   * D-266 — AN INBOUND REQUEST ID IS BOUNDED AND CHARACTER-CHECKED.
+   *
+   * It used to be taken verbatim with no limit of any kind, then bound into
+   * the child logger for the request and echoed back on the response. It is
+   * the one caller-controlled value that reaches EVERY log line a request
+   * produces, which makes an 8 kB header a log-volume multiplier a caller
+   * chooses, and a newline in it a log-injection primitive.
+   *
+   * Nothing failed while that was true, which is why it needed a test rather
+   * than a bug report.
+   * =======================================================================
+   */
+  it('REPLACES an over-long inbound id rather than logging 8 kB per line', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/health',
+      headers: { [REQUEST_ID_HEADER]: 'x'.repeat(MAX_REQUEST_ID_LENGTH + 1) },
+    });
+
+    // Replaced, not refused: a broken upstream proxy must not be able to take
+    // the API down over a correlation identifier.
+    expect(response.statusCode).toBe(200);
+    expect(response.headers[REQUEST_ID_HEADER]).toBe('00000000-0000-4000-8000-000000000001');
+  });
+
+  it('accepts an id EXACTLY at the cap — the boundary is inclusive', async () => {
+    const atCap = 'a'.repeat(MAX_REQUEST_ID_LENGTH);
+    const response = await app.inject({
+      method: 'GET',
+      url: '/health',
+      headers: { [REQUEST_ID_HEADER]: atCap },
+    });
+    expect(response.headers[REQUEST_ID_HEADER]).toBe(atCap);
+  });
+
+  it.each([
+    ['a newline — breaks line-oriented log shipping', 'abc\ndef'],
+    ['a forged JSON log fragment', '1","level":"error","msg":"forged'],
+    ['a carriage return — header injection on echo', 'abc\rdef'],
+    ['an empty value', ''],
+  ])('REPLACES an inbound id containing %s', async (_label, value) => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/health',
+      headers: { [REQUEST_ID_HEADER]: value },
+    });
+    const echoed = response.headers[REQUEST_ID_HEADER];
+    expect(echoed).not.toBe(value);
+    expect(echoed).toMatch(/^[0-9a-f-]{36}$/u);
+  });
+
+  it('accepts the identifier formats real tracing actually emits', () => {
+    // The allowlist has to be wide enough that this cap never silently breaks
+    // correlation for a proxy that was doing everything right.
+    expect(isAcceptableRequestId('00000000-0000-4000-8000-000000000001')).toBe(true); // UUID
+    expect(isAcceptableRequestId('00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01')).toBe(
+      true,
+    ); // W3C traceparent
+    expect(isAcceptableRequestId('req_1a2b3c.4d5e')).toBe(true);
+    expect(isAcceptableRequestId('svc:edge@1+2')).toBe(true);
   });
 
   it('binds the request id to the per-request logger', async () => {

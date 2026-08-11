@@ -23,7 +23,21 @@ describe('parseConfig — required variables', () => {
     expect(config.server.port).toBe(4000);
     expect(config.server.host).toBe('0.0.0.0');
     expect(config.log.level).toBe('info');
-    expect(config.db.poolMax).toBe(10);
+    /**
+     * D-228 — 40, not 10.
+     *
+     * `DATABASE_POOL_MAX` was parsed and READ BY NOTHING, so its old default of
+     * 10 was never applied to anything and asserting it only pinned a dead
+     * variable. It is now the ceiling this process may open across all four
+     * bulkhead pools, enforced by `resolvePoolSizes`. 10 as a live ceiling
+     * would throttle `auth` alone (which asks for 10 by itself); 40 is the api
+     * role's natural sum, 10 + 20 + 8 + 2.
+     *
+     * The per-pool defaults are asserted alongside it so that "40" cannot stay
+     * green while the four numbers underneath it drift away from summing to it.
+     */
+    expect(config.db.poolMax).toBe(40);
+    expect(config.db.pools).toMatchObject({ auth: 10, core: 20, ai: 8, worker: 6 });
     expect(config.db.ssl).toBe(false);
     expect(config.http.timeoutMs).toBe(10_000);
     expect(config.http.maxRetries).toBe(2);

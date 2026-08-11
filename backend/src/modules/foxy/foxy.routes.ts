@@ -6,6 +6,7 @@ import type {
   FoxySessionListResponse,
   FoxySessionResponse,
 } from '@/shared/contracts/foxy.contract';
+import { requireActor as requireRequestActor } from '@/shared/http/require-actor';
 import { listActions } from './domain/actions';
 import { listModes } from './domain/modes';
 import { SSE_HEADERS, encodeFrame } from './domain/sse';
@@ -49,12 +50,12 @@ import type { FoxyActor, MessageRecord, SessionRecord } from './foxy.types';
 
 const API_PREFIX = '/api/v1';
 
+/**
+ * D-263 — one implementation, in `shared/http`, bound to this module's name and
+ * actor type. Three other modules carried a byte-identical copy of the body.
+ */
 function requireActor(request: FastifyRequest): FoxyActor {
-  const actor = request.actor;
-  if (actor === undefined) {
-    throw new Error('foxy routes: missing the requireSession preHandler');
-  }
-  return actor;
+  return requireRequestActor(request, 'foxy');
 }
 
 function toSessionDto(session: SessionRecord): FoxySessionDto {

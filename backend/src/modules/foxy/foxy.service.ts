@@ -91,7 +91,12 @@ export interface FoxyServiceDeps {
   readonly readTenantOfStudent: TenantReader;
   readonly readStudentContext: StudentContextReader;
   readonly readLanguage: LanguageReader;
-  /** `billing` does not exist; the composition root supplies a `free` reader. */
+  /**
+   * `billing.getEntitlements`, bound at the composition root and asked about
+   * the `foxy.unlimited` CAPABILITY rather than about a plan name (D-257).
+   * Takes the actor, because the only subject it is ever asked about is the
+   * actor themselves — see `PlanReader` in `foxy.types.ts`.
+   */
   readonly readPlan: PlanReader;
   /** Stamped on every trace, so a model change is attributable afterwards. */
   readonly model: string;
@@ -189,9 +194,16 @@ export function createFoxyService(deps: FoxyServiceDeps): FoxyService {
     return session;
   }
 
-  /** An ABSENT subscription is `free`, not an error. Most accounts have none. */
-  async function planOf(studentUserId: string): Promise<FoxyPlan> {
-    return (await deps.readPlan(studentUserId)) ?? 'free';
+  /**
+   * An ABSENT subscription is `free`, not an error. Most accounts have none.
+   *
+   * THE ACTOR IS PASSED THROUGH (D-257). `billing.getEntitlements` authorises
+   * on ownership, and the only subject this module ever asks about is the actor
+   * themselves — so the caller's own session is exactly the authority the read
+   * needs, and nothing here can reach a third party's billing.
+   */
+  async function planOf(actor: FoxyActor): Promise<FoxyPlan> {
+    return (await deps.readPlan(actor, actor.userId)) ?? 'free';
   }
 
   async function readUsed(userId: string, now: Date): Promise<number> {
@@ -527,7 +539,7 @@ export function createFoxyService(deps: FoxyServiceDeps): FoxyService {
 
       // STEP 2 — the usage limit. Before retrieval, before the model, before
       // anything that costs money.
-      const plan = await planOf(actor.userId);
+      const plan = await planOf(actor);
       const now = clock.now();
       await consumeUsage(actor.userId, plan, now);
 
@@ -702,7 +714,7 @@ export function createFoxyService(deps: FoxyServiceDeps): FoxyService {
       const tenantId = await tenantOf(actor.userId);
       authorise(actor, 'read', actor.userId, tenantId);
       const now = clock.now();
-      const plan = await planOf(actor.userId);
+      const plan = await planOf(actor);
       const used = await readUsed(actor.userId, now);
       const decision = decideUsage(used, plan);
       return {

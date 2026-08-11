@@ -181,6 +181,28 @@ jobs:
           docker compose -f compose.prod.yml --env-file .env.prod config > /dev/null
           echo "compose.prod.yml validates"
 
+      # A VALID COMPOSE FILE AND A BOOTABLE ENVIRONMENT ARE DIFFERENT CLAIMS,
+      # and the step above only makes the first one (D-250, D-256).
+      #
+      # To compose, every value is just a string, so `config` is perfectly happy
+      # with `LLM_MODEL: ''` — and the application is not: that variable is
+      # `z.string().min(1).optional()`, optional means ABSENT, and an empty
+      # string is a PRESENT value that fails `min(1)` and stops the process.
+      # `.env.prod.example` carried `LLM_MODEL=` and `LLM_BASE_URL=` exactly
+      # like that, and that file is what an operator copies to `.env.prod` — so
+      # following the documentation produced a stack that could not boot.
+      #
+      # The assertions live in a script rather than inline here because this
+      # workflow's own shell-syntax loop is the repository's canonical example of
+      # a gate that passed while enforcing nothing; the script self-tests its
+      # extraction and can be run by hand against any env file.
+      - name: the rendered environment is bootable (no empty-string values)
+        run: |
+          set -euo pipefail
+          cd docker
+          docker compose -f compose.prod.yml --env-file .env.prod config --format json \
+            | node check-rendered-env.mjs
+
       - name: every shell script parses
         run: |
           set -euo pipefail

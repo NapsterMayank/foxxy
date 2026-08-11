@@ -1,8 +1,9 @@
-import type { Clock } from '../clock/index';
+import { createRealSleeper, type Clock, type Sleeper } from '../clock/index';
 import type { CircuitBreaker } from '../circuit-breaker/index';
 import type { ConcurrencyLimiter } from '../concurrency/index';
 import type { TimeoutRule } from '../config/index';
 import { DependencyError } from '../errors/index';
+import { retry } from '../retry/index';
 
 /**
  * platform/resilience — the three §3-§5 mechanisms, composed once.
@@ -31,6 +32,43 @@ export interface GuardedCallOptions<T> {
   readonly timeoutMs?: number;
   /** Lets a returned value be classified as a dependency failure. */
   readonly isFailureResult?: (value: T) => boolean;
+  /**
+   * DECLARES THIS CALL SAFE TO REPEAT — D-237, and the thing that finally makes
+   * `TimeoutRule.retries` mean something.
+   *
+   * ==========================================================================
+   * WHY THE BUDGET ALONE WAS NOT ENOUGH TO WIRE.
+   *
+   * `retries` has been in the §4 table since the plan was written, is parsed,
+   * validated, min/maxed, documented as "a non-zero value here is a statement
+   * that the call is idempotent" — and was READ BY NOTHING. `payments: 0`
+   * reads as a deliberate safety property ("retrying a payment is worse than
+   * failing it") and was exactly as inert as `mail: 3`. An unwired safety
+   * setting is worse than an absent one, because it is read as a guarantee.
+   *
+   * It could not simply be applied to every `guard.run`, and that is why it sat
+   * unwired rather than being an oversight. The guard wraps a PORT, not an
+   * operation, and the port's rule cannot know which operation it is:
+   *
+   *   `cache` carries `retries: 1`, and `cache.incr` is the rate limiter's
+   *   counter. Retrying it DOUBLE-COUNTS A LOGIN ATTEMPT — a retry budget
+   *   silently tightening authentication limits.
+   *
+   *   `mail` carries `retries: 3`, and `mail.send` is not idempotent. Blanket
+   *   wiring would send a verification email up to four times, from a fix whose
+   *   stated purpose was reliability.
+   *
+   * So the rule supplies the BUDGET and the call site supplies the PERMISSION,
+   * and a retry needs both. Absent (the default) means one attempt, which is
+   * exactly today's behaviour — this change cannot retry anything that is not
+   * explicitly declared repeatable.
+   *
+   * `payments: 0` is now load-bearing in the direction it always claimed: even
+   * a call site that declares itself idempotent gets one attempt, because the
+   * budget is zero. The permission cannot override the policy.
+   * ==========================================================================
+   */
+  readonly idempotent?: boolean;
 }
 
 export interface PortGuard {
@@ -71,6 +109,47 @@ export interface PortGuardOptions {
    * what a metric is called.
    */
   readonly onTimeout?: (name: string, timeoutMs: number) => void;
+  /**
+   * How the retry loop waits — D-237. Required by `platform/retry`, which has
+   * no un-jittered path: "synchronised retries are a self-inflicted denial of
+   * service" (§4).
+   *
+   * Optional, defaulting to the real one, so the dozens of registries built by
+   * the resilience unit tests do not each have to supply a sleeper to assert
+   * something unrelated to retrying. A test that asserts the DELAYS injects a
+   * `RecordingSleeper` and reads the sequence back in microseconds — §9.5 bans
+   * `sleep` in a test, and this is the seam that makes obeying it possible.
+   */
+  readonly sleeper?: Sleeper;
+  /** Injected so a test can assert the exact jittered sequence. */
+  readonly random?: () => number;
+  /** Observability hook, fired before each backoff wait. */
+  readonly onRetry?: (name: string, info: { attempt: number; delayMs: number }) => void;
+}
+
+/**
+ * WHAT IS WORTH ANOTHER ATTEMPT — D-237.
+ *
+ * Only a `DependencyError`, and NOT the two the guard itself raises:
+ *
+ *  - A BREAKER REJECTION means the breaker has already decided the dependency
+ *    is down and is refusing calls WITHOUT a network attempt. Retrying it turns
+ *    the breaker into a slow retry loop against something known to be broken —
+ *    the precise failure `recordFailure`'s "asking again as soon as last time"
+ *    comment names, arrived at from the caller's side.
+ *  - A CONCURRENCY REJECTION means WE are sending too much. Backing off and
+ *    trying again from inside a held slot adds load to an overloaded port.
+ *
+ * Both are distinguished structurally, by the `details` the guard's own
+ * throwers stamp, rather than by matching on message text.
+ */
+function isWorthRetrying(error: unknown): boolean {
+  if (!(error instanceof DependencyError)) return false;
+  const details: unknown = error.details;
+  if (typeof details !== 'object' || details === null) return true;
+  const record = details as Record<string, unknown>;
+  // `breaker` is stamped by the breaker's `reject()`; `max` by the limiter's.
+  return record.breaker === undefined && record.max === undefined;
 }
 
 /**
@@ -114,6 +193,7 @@ export async function withTimeout<T>(
 
 export function createPortGuard(options: PortGuardOptions): PortGuard {
   const { name, breaker, limiter, timeout } = options;
+  const sleeper: Sleeper = options.sleeper ?? createRealSleeper();
 
   return {
     name,
@@ -125,13 +205,63 @@ export function createPortGuard(options: PortGuardOptions): PortGuard {
       callOptions?: GuardedCallOptions<T>,
     ): Promise<T> {
       const timeoutMs = callOptions?.timeoutMs ?? timeout.totalMs;
-      return limiter.run(() =>
+
+      /**
+       * THE BUDGET AND THE PERMISSION, D-237. Both, or one attempt.
+       *
+       * `timeout.retries` is "attempts AFTER the first", so total attempts is
+       * `retries + 1`. `platform/retry` throws if asked for more than one
+       * attempt on a non-idempotent operation, which is why the flag gates the
+       * arithmetic rather than being passed straight through — `idempotent:
+       * false` must mean "one attempt", not "an error at every call site that
+       * never opted in".
+       */
+      const attempts = callOptions?.idempotent === true ? timeout.retries + 1 : 1;
+
+      const attempt = (): Promise<T> =>
         breaker.execute(
           () => withTimeout(name, timeoutMs, operation, options.onTimeout),
           callOptions?.isFailureResult === undefined
             ? undefined
             : { isFailureResult: callOptions.isFailureResult },
-        ),
+        );
+
+      /**
+       * ONE SLOT FOR THE WHOLE RETRIED OPERATION — the limiter is OUTSIDE the
+       * retry loop, and the breaker is INSIDE it.
+       *
+       * Limiter outside: re-acquiring per attempt would make real in-flight
+       * concurrency exceed the configured limit during a retry storm, with the
+       * limiter's count reporting the configured number the whole time. That is
+       * precisely the class of defect D-262 was — accounting that diverges from
+       * reality, with no symptom — and there is no reason to introduce a second
+       * instance of it while fixing the first.
+       *
+       * Breaker inside: each attempt IS a real call to the dependency, and §5
+       * counts failed calls. A retry loop hidden from the breaker would let one
+       * caller make four failing calls that the breaker scores as one, so the
+       * five-failure threshold would need twenty. It also means an OPEN breaker
+       * short-circuits the second attempt for free — see `isWorthRetrying`,
+       * which declines to retry that rejection at all.
+       *
+       * The fast path is preserved exactly: with `attempts === 1` — every call
+       * site that has not opted in, and every call site at all on a port whose
+       * rule says `retries: 0` — this is the same single `attempt()` the guard
+       * has always run, with no sleeper, no policy and no loop.
+       */
+      if (attempts === 1) return limiter.run(attempt);
+
+      return limiter.run(() =>
+        retry(attempt, {
+          attempts,
+          idempotent: true,
+          isRetryable: isWorthRetrying,
+          sleeper,
+          ...(options.random === undefined ? {} : { random: options.random }),
+          onRetry: (info) => {
+            options.onRetry?.(name, { attempt: info.attempt, delayMs: info.delayMs });
+          },
+        }),
       );
     },
   };

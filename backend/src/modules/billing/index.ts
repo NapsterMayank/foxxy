@@ -3,6 +3,7 @@ import { createNoopAudit, type AuditPort } from '@/platform/audit/index';
 import type { Clock } from '@/platform/clock/index';
 import type { Logger } from '@/platform/logger/index';
 import type { PaymentsPort } from '@/platform/payments/index';
+import type { RateLimiter } from '@/platform/rate-limit/index';
 import { createBillingRepository, type BillingDbHandle } from './billing.repository';
 import { registerBillingRoutes } from './billing.routes';
 import { createBillingService, type BillingService } from './billing.service';
@@ -78,6 +79,20 @@ export interface BillingModuleDeps {
    * always supplies the real one and a test asserts that it does.
    */
   readonly audit?: AuditPort;
+  /**
+   * The counters behind the webhook's REJECTION BUDGET — D-258.
+   *
+   * The limiter is built at the composition root, from `platform/rate-limit`,
+   * for the same reason `payments` and `audit` are: this module holds the
+   * POLICY (which key, which rule, which branch spends it) and platform holds
+   * the mechanism. Handing the built limiter in also keeps the fallback metric
+   * name a deployment concern rather than a module constant.
+   *
+   * REQUIRED. An optional limiter with a permissive default would restore the
+   * defect — an unauthenticated endpoint writing durable audit rows at whatever
+   * rate the caller chooses — and would do it silently.
+   */
+  readonly rateLimiter: RateLimiter;
 }
 
 export interface BillingModule {
@@ -103,6 +118,7 @@ export function createBillingModule(deps: BillingModuleDeps): BillingModule {
     readTenantOfUser: deps.readTenantOfUser,
     resolvePayer: deps.resolvePayer,
     audit: deps.audit ?? createNoopAudit(),
+    rateLimiter: deps.rateLimiter,
   });
 
   return {
@@ -130,7 +146,11 @@ export function createBillingModule(deps: BillingModuleDeps): BillingModule {
  * ---------------------------------------------------------------------------
  */
 export type { BillingService } from './billing.service';
-export { BILLING_AUDIT_ACTIONS } from './billing.service';
+export {
+  BILLING_AUDIT_ACTIONS,
+  WEBHOOK_REJECTION_RATE_LIMIT,
+  WEBHOOK_REJECTION_RATE_LIMIT_KEY,
+} from './billing.service';
 export { BILLING_WEBHOOK_PATH } from './billing.routes';
 
 /**

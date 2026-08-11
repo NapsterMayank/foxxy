@@ -48,6 +48,15 @@ export const rateLimitKeys = {
    * regardless of the address.
    */
   loginByEmail: (emailHash: string): string => `${RATE_LIMIT_KEY_PREFIX}:login:email:${emailHash}`,
+  /**
+   * Logout, keyed by IP — D-220.
+   *
+   * Its own namespace rather than sharing `login:ip:`, because a shared counter
+   * would let a flood of anonymous logouts spend the budget a real user needs to
+   * sign IN. Throttling the cheap unauthenticated endpoint must never be able to
+   * lock anybody out of the expensive authenticated one.
+   */
+  logoutByIp: (ipHash: string): string => `${RATE_LIMIT_KEY_PREFIX}:logout:ip:${ipHash}`,
   forgotByIp: (ipHash: string): string => `${RATE_LIMIT_KEY_PREFIX}:forgot:ip:${ipHash}`,
   forgotByEmail: (emailHash: string): string =>
     `${RATE_LIMIT_KEY_PREFIX}:forgot:email:${emailHash}`,

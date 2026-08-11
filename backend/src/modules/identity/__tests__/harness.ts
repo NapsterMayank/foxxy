@@ -5,10 +5,11 @@ import { FixedClock } from '@/platform/clock/index';
 import { parseConfig } from '@/platform/config/load-config';
 import { CounterIdGen } from '@/platform/id-gen/index';
 import { FakeLogger } from '@/platform/logger/index';
-import { RecordingMail } from '@/platform/mail/index';
+import { RecordingMail, type MailPort } from '@/platform/mail/index';
 import { createContainer, type Container } from '../../../app/container';
 import { createServer } from '../../../app/server';
 import { createIdentityModule, type IdentityModule } from '../index';
+import type { MetricsSink } from '../identity.rate-limit';
 import type { PasswordHasher } from '../identity.types';
 import { applyAllMigrations, startTestPostgres } from '../../../../tests/helpers/postgres';
 import type { TestPostgres } from '../../../../tests/helpers/postgres';
@@ -75,6 +76,32 @@ export const TEST_TENANT_ID = DEFAULT_TENANT_ID;
  */
 export const OTHER_TENANT_ID = '22222222-2222-4222-8222-222222222222';
 
+/**
+ * The salt every harness account's identifier hashes use — D-221.
+ *
+ * Fixed and explicit rather than left to the module's unconfigured fallback, so
+ * that a test asserting "the digest is not the bare SHA-256" is asserting about
+ * a salt it can name.
+ */
+export const TEST_IP_HASH_SALT = 'harness-ip-hash-salt';
+
+/** Records every metric the module emits. Assertions run against `counts`. */
+export class RecordingMetrics implements MetricsSink {
+  readonly emitted: { metric: string; tags: Readonly<Record<string, string>> | undefined }[] = [];
+
+  increment(metric: string, tags?: Readonly<Record<string, string>>): void {
+    this.emitted.push({ metric, tags });
+  }
+
+  countOf(metric: string): number {
+    return this.emitted.filter((entry) => entry.metric === metric).length;
+  }
+
+  clear(): void {
+    this.emitted.length = 0;
+  }
+}
+
 export interface IdentityHarness {
   readonly postgres: TestPostgres;
   readonly container: Container;
@@ -85,6 +112,8 @@ export interface IdentityHarness {
   readonly mail: RecordingMail;
   readonly logger: FakeLogger;
   readonly hasher: FakeHasher;
+  /** Every metric the module emitted — the mail-deferral signal lives here. */
+  readonly metrics: RecordingMetrics;
   /** Empties every identity table and the cache. Call between tests. */
   reset(): Promise<void>;
   stop(): Promise<void>;
@@ -111,6 +140,13 @@ export async function startIdentityHarness(
      * MemoryCache, so `reset()` behaves the same either way.
      */
     cache?: CachePort;
+    /**
+     * Substitute the mail port the MODULE receives — used to prove that signup
+     * survives a mail outage (D-217) and that the send is off the request path
+     * (D-218). `harness.mail` still refers to the `RecordingMail`, so a test
+     * that overrides this asserts against its own fake.
+     */
+    mail?: MailPort;
   } = {},
 ): Promise<IdentityHarness> {
   const postgres = await startTestPostgres();
@@ -133,6 +169,7 @@ export async function startIdentityHarness(
   const mail = new RecordingMail();
   const logger = new FakeLogger();
   const hasher = new FakeHasher();
+  const metrics = new RecordingMetrics();
 
   const config = parseConfig({
     NODE_ENV: 'test',
@@ -156,13 +193,15 @@ export async function startIdentityHarness(
   const identity = createIdentityModule({
     db: container.poolFor('identity'),
     cache: options.cache ?? cache,
-    mail,
+    mail: options.mail ?? mail,
     clock,
     logger,
     session: { name: TEST_COOKIE_NAME, ttlDays: config.session.ttlDays, secure: true },
     defaultTenantId: config.tenancy.defaultTenantId,
     urls: { apiBaseUrl: 'http://api.test', appBaseUrl: 'http://app.test' },
     hasher: options.hasher ?? hasher,
+    metrics,
+    ipHashSalt: TEST_IP_HASH_SALT,
   });
 
   const app = await createServer(container, { modules: { identity } });
@@ -178,12 +217,14 @@ export async function startIdentityHarness(
     mail,
     logger,
     hasher,
+    metrics,
     async reset(): Promise<void> {
       await postgres.client.query(
         `truncate table ${IDENTITY_TABLES.join(', ')} restart identity cascade`,
       );
       await cache.close();
       mail.sent.length = 0;
+      metrics.clear();
       hasher.verifyCalls.length = 0;
       hasher.hashCalls.length = 0;
       clock.setTo('2026-06-01T09:00:00.000Z');

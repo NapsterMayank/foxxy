@@ -17,6 +17,27 @@ import type { MailMessage, MailPort } from './mail.port';
 export function createGuardedMail(inner: MailPort, guard: PortGuard): MailPort {
   return {
     send(message: MailMessage): Promise<void> {
+      /**
+       * DELIBERATELY NOT `idempotent: true` — D-237.
+       *
+       * `mail`'s §4 rule carries the largest retry budget in the table,
+       * `retries: 3`, and this is the single most dangerous place it could
+       * have been spent. An SMTP send that TIMES OUT has very often been
+       * accepted: the message went, the acknowledgement did not. Three retries
+       * on top of that sends a verification link up to four times, from a
+       * change whose stated purpose was reliability — and a password-reset link
+       * arriving four times is a security signal a user cannot interpret.
+       *
+       * The correct answer for mail is not a retry, it is §3.3's overflow
+       * behaviour, which this port already has: the caller catches
+       * `DependencyError` and DEFERS TO THE WORKER, where the job queue's own
+       * at-least-once semantics and de-duplication apply. A retry here would be
+       * a second, worse delivery mechanism competing with the good one.
+       *
+       * The budget therefore stays unspent, which is a decision and is why it
+       * is written down. `retries: 3` remains the ceiling if a genuinely
+       * repeatable mail operation ever exists.
+       */
       return guard.run(() => inner.send(message));
     },
   };

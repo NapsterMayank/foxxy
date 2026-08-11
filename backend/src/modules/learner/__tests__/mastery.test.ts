@@ -4,6 +4,7 @@ import {
   MASTERY_DECIMALS,
   MASTERY_MAX,
   MASTERY_MIN,
+  assertAttemptIncrement,
   clampMastery,
   fromMasteryColumn,
   nextAttemptCount,
@@ -155,5 +156,52 @@ describe('nextAttemptCount', () => {
 
   it('refuses a fractional increment', () => {
     expect(() => nextAttemptCount(3, 0.5)).toThrow(ValidationError);
+  });
+});
+
+/**
+ * ===========================================================================
+ * D-243 — the guard that is ACTUALLY ON THE WRITE PATH.
+ *
+ * Everything in `nextAttemptCount` above has always refused a negative
+ * increment, and none of it ever ran on a write: `upsertMastery` increments in
+ * SQL (`attempts + $n`) precisely so two concurrent writers cannot lose the
+ * update, and SQL adds a negative number without complaint.
+ *
+ * Nor does the CHECK constraint close it — `attempts >= 0` only fires when the
+ * RESULT would go below zero, so `attempts = 7` with an increment of `-3` lands
+ * 4 and satisfies the constraint. A validation that catches one case in seven
+ * is the worst kind, because it looks installed.
+ *
+ * `assertAttemptIncrement` is what `learner.service.updateMastery` calls, and
+ * these are its tests. The service-level proof that it is really wired in lives
+ * in `learner.write-path.test.ts` against a real database.
+ * ===========================================================================
+ */
+describe('assertAttemptIncrement — D-243, the attempt counter is monotonic', () => {
+  it('returns a positive increment unchanged, so it can be used inline', () => {
+    expect(assertAttemptIncrement(1)).toBe(1);
+    expect(assertAttemptIncrement(4)).toBe(4);
+  });
+
+  it('accepts zero — a mastery correction is not an attempt', () => {
+    expect(assertAttemptIncrement(0)).toBe(0);
+  });
+
+  it('REFUSES -1, the increment the CHECK constraint would have accepted', () => {
+    expect(() => assertAttemptIncrement(-1)).toThrow(ValidationError);
+  });
+
+  it('refuses a large negative increment', () => {
+    expect(() => assertAttemptIncrement(-3)).toThrow(ValidationError);
+  });
+
+  it('refuses a fractional increment — `attempts` is an integer column', () => {
+    expect(() => assertAttemptIncrement(0.5)).toThrow(ValidationError);
+  });
+
+  it('refuses NaN and Infinity rather than letting them reach SQL', () => {
+    expect(() => assertAttemptIncrement(Number.NaN)).toThrow(ValidationError);
+    expect(() => assertAttemptIncrement(Number.POSITIVE_INFINITY)).toThrow(ValidationError);
   });
 });

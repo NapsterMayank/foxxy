@@ -1,0 +1,1 @@
+{"code":"import{createAccessGuard}from\"./can-access\";export{createAccessGuard};\n","warnings":[],"map":{"version":3,"mappings":"AAAA,OAAS,sBAAyB","names":[],"ignoreList":[],"sources":["D:\\personal\\foxxy\\backend\\src\\platform\\authz\\index.ts"],"sourcesContent":[null]}}

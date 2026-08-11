@@ -80,6 +80,42 @@ export interface MetricsSink {
 export const DEFAULT_FALLBACK_METRIC = 'rate_limit.in_process_fallback';
 
 /**
+ * THE COUNTER VANISHED WHILE ITS WINDOW WAS STILL OPEN — D-230.
+ *
+ * ===========================================================================
+ * THE FAILURE THIS MAKES VISIBLE, WHICH HAD NO SIGNAL AT ALL.
+ *
+ * Valkey is configured with `allkeys-lru` eviction. Under memory pressure it
+ * evicts the least recently used keys — and a rate-limit counter is, by
+ * construction, one of the least recently used things in the store: it is
+ * touched a handful of times and then not again for fifteen minutes.
+ *
+ * When one is evicted mid-window, the next `incr` returns 1. The limiter reads
+ * that as a first attempt. So an attacker on their fifth login attempt is back
+ * to their first, the limit never fires, and there is NO ERROR: the cache is
+ * up, `incr` succeeded, the breaker is closed, and the in-process fallback —
+ * which does have a metric — never activates. Rate limiting silently stops
+ * limiting while every signal says it is working.
+ *
+ * ===========================================================================
+ * HOW IT IS DETECTED WITHOUT A SECOND ROUND TRIP.
+ *
+ * The limiter remembers, per key, when the window it just counted into is due
+ * to close. If a later `incr` for that same key returns 1 while that deadline
+ * has NOT passed, the counter was destroyed by something other than time. That
+ * is eviction (or a flush, or a failover to an empty replica — all three have
+ * the same consequence and the same remedy).
+ *
+ * The memory is bounded by the same cap as the fallback counters and evaluated
+ * against the injected clock, so it costs nothing and can be tested without
+ * sleeping. It is a HINT, not a source of truth: it can only ever miss
+ * evictions (a key evicted after its window closed is indistinguishable from a
+ * key that expired), never invent one. A metric that under-reports is
+ * actionable; one that over-reports gets muted.
+ */
+export const RATE_LIMIT_COUNTER_EVICTED_METRIC = 'rate_limit.counter_evicted';
+
+/**
  * How many distinct keys the in-process counter will track.
  *
  * A bound, not a guess at capacity. While the cache is down, every new IP
@@ -157,6 +193,102 @@ export class InProcessRateLimitCounters {
   }
 }
 
+/**
+ * Remembers when each key's current window is due to close, so that a counter
+ * which restarts early can be told apart from one that expired on time.
+ *
+ * See `RATE_LIMIT_COUNTER_EVICTED_METRIC`. Bounded by `MAX_TRACKED_KEYS` for
+ * the same reason the fallback counters are: while something is wrong, every
+ * new key would otherwise add an entry, and that is a memory-exhaustion lever
+ * handed to a caller at the worst possible moment.
+ */
+export class WindowDeadlines {
+  private readonly deadlines = new Map<string, number>();
+
+  constructor(private readonly clock: Clock) {}
+
+  /**
+   * Records the deadline for a window that has just started, and reports
+   * whether the PREVIOUS one for this key was still open.
+   *
+   * Called only when the cache said "this is attempt 1", which is the only
+   * moment eviction is observable.
+   */
+  observeWindowStart(key: string, windowSeconds: number): boolean {
+    const nowMs = this.clock.now().getTime();
+    const previous = this.deadlines.get(key);
+    const evicted = previous !== undefined && previous > nowMs;
+
+    if (this.deadlines.size >= MAX_TRACKED_KEYS && !this.deadlines.has(key)) {
+      this.prune(nowMs);
+    }
+    this.deadlines.set(key, nowMs + windowSeconds * 1000);
+    return evicted;
+  }
+
+  /**
+   * HOW LONG THIS KEY ACTUALLY HAS LEFT — the `Retry-After` a 429 should carry.
+   *
+   * ==========================================================================
+   * D-266 (H6) — THE HEADER USED TO REPORT THE FULL WINDOW, ALWAYS.
+   *
+   * `consume` threw `new RateLimitError(rule.windowSeconds)`, so a caller who
+   * tripped the login limiter fourteen minutes and fifty seconds into a
+   * fifteen-minute window was told to wait FIFTEEN MINUTES. `Retry-After` is
+   * not advisory decoration: a well-behaved client — a mobile app, a retrying
+   * SDK, our own frontend — obeys it exactly. So the honest ten-second wait
+   * became a fifteen-minute lockout for every client that does the right thing,
+   * and only a client that IGNORES the header discovered it could have retried.
+   * The limiter punished good behaviour.
+   *
+   * Worse for the operator: because the window never actually extends (see
+   * `countInCache` — `expire` is set once, on attempt 1, precisely so the
+   * lockout cannot creep forward), the header and the truth diverged silently.
+   * Nothing failed. Users reported "it locks me out for ages"; the limit said
+   * 5-per-15-minutes and was correct.
+   *
+   * WHEN THE DEADLINE IS UNKNOWN the full window is still returned, and that is
+   * deliberate rather than a leftover. This map only learns a deadline when
+   * THIS process saw the window open, so a window started by another replica,
+   * or before a restart, has no entry. Guessing "nearly over" there would tell
+   * a caller to come straight back and be refused again; over-reporting is the
+   * safe direction, and it is the behaviour that already shipped.
+   * ==========================================================================
+   */
+  remainingSeconds(key: string, windowSeconds: number): number {
+    const deadline = this.deadlines.get(key);
+    if (deadline === undefined) return windowSeconds;
+
+    const remainingMs = deadline - this.clock.now().getTime();
+    if (remainingMs <= 0) return windowSeconds;
+
+    // Rounded UP, never down. A `Retry-After: 0` invites an immediate retry
+    // that is certain to be refused, and rounding 1.2s down to 1s puts the
+    // client back 200ms early — a retry loop that looks like an attack.
+    return Math.min(windowSeconds, Math.ceil(remainingMs / 1000));
+  }
+
+  /** A counter that was deliberately cleared must not look like an eviction. */
+  forget(key: string): void {
+    this.deadlines.delete(key);
+  }
+
+  /** Live entries. Test seam. */
+  size(): number {
+    return this.deadlines.size;
+  }
+
+  private prune(nowMs: number): void {
+    for (const [key, deadline] of this.deadlines) {
+      if (deadline <= nowMs) this.deadlines.delete(key);
+    }
+    if (this.deadlines.size < MAX_TRACKED_KEYS) return;
+    // Still full: drop the entry closest to being forgotten anyway.
+    const first = this.deadlines.keys().next();
+    if (!first.done) this.deadlines.delete(first.value);
+  }
+}
+
 export interface RateLimiterDeps {
   readonly cache: CachePort;
   /** Injected — the fallback's window arithmetic must be testable. */
@@ -181,6 +313,8 @@ export function createRateLimiter(deps: RateLimiterDeps): RateLimiter {
   const metrics = deps.metrics ?? NO_METRICS;
   const fallbackMetric = deps.fallbackMetric ?? DEFAULT_FALLBACK_METRIC;
   const fallback = new InProcessRateLimitCounters(deps.clock);
+  // See RATE_LIMIT_COUNTER_EVICTED_METRIC. Costs one map entry per active key.
+  const deadlines = new WindowDeadlines(deps.clock);
 
   /**
    * Counts in the cache, or throws so the caller can fall back.
@@ -193,6 +327,34 @@ export function createRateLimiter(deps: RateLimiterDeps): RateLimiter {
   async function countInCache(key: string, rule: RateLimitRule): Promise<number> {
     const count = await cache.incr(key);
     if (count === 1) {
+      /**
+       * A COUNTER THAT RESTARTED BEFORE ITS WINDOW CLOSED WAS EVICTED — D-230.
+       *
+       * Checked here, on the 0 -> 1 transition, because that is the only place
+       * the fact is observable: everywhere else a counter simply has a value.
+       * `allkeys-lru` destroys the least recently used keys under memory
+       * pressure, a rate-limit counter is almost by definition among them, and
+       * the consequence is that the limit stops applying with the cache up, the
+       * breaker closed and the in-process fallback never activating. Nothing
+       * else in the system reports this.
+       */
+      if (deadlines.observeWindowStart(key, rule.windowSeconds)) {
+        logger.warn(
+          {
+            event: 'rate_limit.counter_evicted',
+            metric: RATE_LIMIT_COUNTER_EVICTED_METRIC,
+            // The RULE's shape, never the key — it identifies an account or an
+            // IP. The window length is what tells an operator which limit lost
+            // its counter.
+            windowSeconds: rule.windowSeconds,
+            limit: rule.limit,
+          },
+          'a rate-limit counter restarted before its window closed; it was evicted, and the ' +
+            'limit it enforces was not applied to the attempts already counted',
+        );
+        metrics.increment(RATE_LIMIT_COUNTER_EVICTED_METRIC);
+      }
+
       try {
         await cache.expire(key, rule.windowSeconds);
       } catch (error) {
@@ -239,7 +401,11 @@ export function createRateLimiter(deps: RateLimiterDeps): RateLimiter {
       }
 
       if (count > rule.limit) {
-        throw new RateLimitError(rule.windowSeconds, {
+        // D-266 — what is LEFT of the window, not the whole of it. See
+        // `WindowDeadlines.remainingSeconds`: the window never extends, so the
+        // full value was simply wrong for every attempt after the first, and a
+        // client that obeys `Retry-After` was penalised for obeying it.
+        throw new RateLimitError(deadlines.remainingSeconds(key, rule.windowSeconds), {
           // Log-side only. The key is already hashed where it needs to be, and
           // the safe message is the fixed "Too many requests." string.
           message: `Rate limit exceeded: ${count} attempts against a limit of ${rule.limit}`,
@@ -256,6 +422,10 @@ export function createRateLimiter(deps: RateLimiterDeps): RateLimiter {
      */
     async reset(key: string): Promise<void> {
       fallback.del(key);
+      // A DELIBERATE clear is not an eviction. Without this, the next attempt
+      // after a successful login would report a counter that "vanished early"
+      // — which is true and is not the failure the metric names.
+      deadlines.forget(key);
       try {
         await cache.del(key);
       } catch (error) {

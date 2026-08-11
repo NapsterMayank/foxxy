@@ -56,13 +56,19 @@ import type { RecipientReader } from './notify.types';
  *    the same failure as a delivery that silently never arrives.
  *
  * ---------------------------------------------------------------------------
- * KNOWN GAP, REPORTED RATHER THAN HIDDEN: preferences are held in
- * `platform/cache` because a `notification_preferences` table needs a migration
- * and this module was built while the migration chain was being rewritten. The
- * shape is behind `NotifyPreferencesStore`, so the swap is one line at the
- * composition root. A lost preference reverts to the defaults, which are
- * strictly more conservative (quiet hours on, nothing opted out) — see the long
- * note in `notify.preferences-store.ts`.
+ * KNOWN GAP, REPORTED RATHER THAN HIDDEN — D-260. Preferences are still held in
+ * `platform/cache` in production. `allkeys-lru` makes eviction ordinary, and
+ * eviction restores the DEFAULT channel set — so an opt-out is lost silently and
+ * the user's next signal is the email they asked not to receive. The claim this
+ * module used to make, that a lost preference only makes the product quieter, is
+ * exactly backwards: the default is no opt-outs.
+ *
+ * The durable adapter (`createDbPreferencesStore`) and the composition that
+ * makes the database authoritative (`createWriteThroughPreferencesStore`) are
+ * both FINISHED AND UNWIRED. They need the `notification_preferences` table,
+ * which is a migration, and `drizzle/` belongs to another change in flight — so
+ * the DDL is reported precisely instead of being written here. It is latent
+ * rather than live only because there is no service-level write path yet.
  * ---------------------------------------------------------------------------
  */
 
@@ -180,6 +186,8 @@ export type {
   NotifyJobEnqueuer,
   NotifyService,
 } from './notify.service';
+/** The composite keyset cursor — `(createdAt, id)`, never a bare instant (D-259). */
+export type { ListCursor } from './notify.repository';
 
 /** The routing table, and the policy the dispatcher is built with. */
 export {
@@ -191,7 +199,24 @@ export {
 } from './domain/kinds';
 export type { KindPolicy, NotifyKind, NotifyUrgency } from './domain/kinds';
 
-/** Preferences: the defaults, the resolver, and the store port. */
+/**
+ * Preferences: the defaults, the resolver, the store port and its adapters.
+ *
+ * THREE ADAPTERS, AND ONLY ONE OF THEM IS WIRED TODAY (D-260):
+ *
+ *   createCachePreferencesStore        cache only. What production runs, and the
+ *                                      thing D-260 exists to retire — eviction
+ *                                      silently restores the default channels.
+ *   createDbPreferencesStore           the durable one. COMPLETE AND UNWIRED:
+ *                                      `notification_preferences` needs a
+ *                                      migration, which is reported rather than
+ *                                      written because `drizzle/` is owned by
+ *                                      another change in flight.
+ *   createWriteThroughPreferencesStore the composition of the two — database
+ *                                      authoritative, cache demoted to a read
+ *                                      cache. The one to wire when the table
+ *                                      exists.
+ */
 export {
   DEFAULT_PREFERENCES,
   DEFAULT_QUIET_HOURS,
@@ -199,8 +224,18 @@ export {
   resolvePreferences,
 } from './domain/preferences';
 export type { NotifyPreferences, StoredPreferences } from './domain/preferences';
-export { createCachePreferencesStore } from './notify.preferences-store';
-export type { NotifyPreferencesStore } from './notify.preferences-store';
+export {
+  createCachePreferencesStore,
+  createWriteThroughPreferencesStore,
+} from './notify.preferences-store';
+export type {
+  NotifyPreferencesStore,
+  WriteThroughPreferencesStoreOptions,
+} from './notify.preferences-store';
+export {
+  NOTIFICATION_PREFERENCES_TABLE,
+  createDbPreferencesStore,
+} from './notify.preferences.repository';
 
 /** Week arithmetic, shared with the worker's scheduler. */
 export { digestScanKey, weekKey, weekStartOf } from './domain/digest-week';

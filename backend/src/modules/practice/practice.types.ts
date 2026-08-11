@@ -121,11 +121,28 @@ export type MasteryWriter = (
     readonly studentUserId: string;
     readonly chapterId: string;
     readonly masteryScore: number;
+    /**
+     * The mastery `masteryScore` was blended FROM — D-241.
+     *
+     * `learner` applies the write only if the row still holds this value, which
+     * is what makes a read taken here and a write executed there atomic with
+     * respect to each other. `null` means "no row was found".
+     */
+    readonly expectedPreviousScore: number | null;
     readonly attemptIncrement?: number;
     readonly practised?: boolean;
     readonly executor?: TransactionToken;
   },
-) => Promise<unknown>;
+  /**
+   * The row AS WRITTEN, or `null` when the compare-and-set was refused because
+   * another submission moved the mastery in between.
+   *
+   * Returning the row rather than `unknown` is not a convenience: the evidence
+   * label shown to the student is computed from the mastery and the attempt
+   * count, and computing it from what this module *intended* to write is how
+   * the label comes to disagree with the row it describes.
+   */
+) => Promise<MasterySnapshot | null>;
 
 /**
  * The tenant a student's account belongs to — D-073, D-091.

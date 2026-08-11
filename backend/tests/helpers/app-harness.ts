@@ -540,8 +540,18 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     },
     readLanguage: async (actor, studentUserId) =>
       (await learner.service.getProfile(actor, studentUserId)).preferredLanguage,
-    // `billing` does not exist. Same stand-in as `app/routes.ts`.
-    readPlan: (): Promise<null> => Promise.resolve(null),
+    /**
+     * THE HARNESS BUILDS NO BILLING MODULE, so there is no `getEntitlements` to
+     * ask and every harness account is on the free allowance.
+     *
+     * That is a statement about this harness, not about the product: `readPlan`
+     * is a REQUIRED dependency as of D-257 precisely so that a construction
+     * site which has not answered the plan question fails to compile rather
+     * than silently inheriting the cheapest tier — which is what
+     * `app/routes.ts` did to every paying customer. The paid-limit behaviour is
+     * covered where the seam actually is, in `foxy.service.test.ts`.
+     */
+    readPlan: (): Promise<'free'> => Promise.resolve('free'),
     model: 'harness-model',
   });
 

@@ -13,10 +13,9 @@ import type { Citation } from './domain/citations';
  *   readStudentContext   the grade and enrolled subjects, from `learner`
  *   readTenantOfStudent  `users.tenant_id`, from `identity`
  *   search               the hybrid retrieval, from `retrieval`
- *   readPlan             the subscription plan, from `billing` — WHICH DOES NOT
- *                        EXIST YET, so `app/routes.ts` supplies a reader that
- *                        returns `free`. Stated as a default rather than hidden
- *                        as one.
+ *   readPlan             the subscription plan, from `billing` — resolved from
+ *                        `getEntitlements` and the `foxy.unlimited` CAPABILITY,
+ *                        never from a plan name. Takes the ACTOR; see the type.
  *   requireSession       identity's session validator, as a preHandler
  *
  * Every one of them is a FUNCTION TYPE declared here and bound in
@@ -51,13 +50,44 @@ export type StudentContextReader = (
 export type LanguageReader = (actor: FoxyActor, studentUserId: string) => Promise<LanguageCode>;
 
 /**
- * `billing.getEntitlements`, once it exists.
+ * THE BILLING EDGE — `billing.getEntitlements`, translated at the composition
+ * root into the one word this module reasons about.
  *
- * NULL means "no subscription row", which is `free`. The service defaults it
- * rather than treating it as an error, because the overwhelming majority of
- * accounts will never have a row and an absent subscription is not a failure.
+ * ===========================================================================
+ * IT TAKES AN ACTOR, AND THAT IS THE WHOLE OF D-257.
+ *
+ * This signature used to be `(studentUserId) => Promise<FoxyPlan | null>` — no
+ * actor — while `billing.getEntitlements(actor, subjectUserId)` requires one
+ * and runs `authoriseSubscription` on it. The mismatch was recorded in a
+ * comment and then never resolved, so `app/routes.ts` wired a reader returning
+ * `null` FOREVER and every paying customer silently received the 20-message
+ * free cap.
+ *
+ * There were two honest ways to close it: give this reader an actor, or invent
+ * a system actor at the composition root whose authority is narrow and named.
+ * THE ACTOR WINS, because it is the one that needs no new authority at all.
+ * Foxy only ever asks about the plan of the student who is making the request —
+ * both call sites pass `actor.userId` — so the caller IS the subject, billing's
+ * ownership rule is satisfied by the real session actor, and no code anywhere
+ * gains the ability to read a third party's entitlements. A system actor would
+ * have been a new principal that can read anybody's billing, minted to answer a
+ * question that never needed it.
+ *
+ * ===========================================================================
+ * THE COMPOSITION ROOT ASKS ABOUT A CAPABILITY, NOT A PLAN NAME.
+ *
+ * `hasFeature(entitlements, 'foxy.unlimited')` — never `planCode === 'monthly'`.
+ * A plan is a commercial artefact that marketing renames; a capability is what
+ * this code actually depends on. `FoxyPlan` stays a two-value vocabulary
+ * (`free` | `plus`) because that is what `FOXY_DAILY_MESSAGE_LIMIT` is keyed
+ * by, and the translation from grant to allowance happens in exactly one line,
+ * in `app/routes.ts`, where every other cross-module edge already lives.
+ *
+ * NULL still means "this account has no paid grant", which the service reads as
+ * `free`. It is returned for the overwhelmingly common case of an account that
+ * never subscribed, and an absent subscription is not a failure.
  */
-export type PlanReader = (studentUserId: string) => Promise<FoxyPlan | null>;
+export type PlanReader = (actor: FoxyActor, studentUserId: string) => Promise<FoxyPlan | null>;
 
 /** One chunk as `retrieval` hands it back. Text plus citation fields. */
 export interface RetrievedChunkView {

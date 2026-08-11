@@ -6,6 +6,7 @@ import { createBillingRepository, type BillingRepository } from '../billing.repo
 import { createBillingService, BILLING_AUDIT_ACTIONS } from '../billing.service';
 import type { BillingActor } from '../billing.types';
 import {
+  createBillingTestRateLimiter,
   OTHER_TENANT_ID,
   TEST_TENANT_ID,
   WEBHOOK_SECRET,
@@ -401,6 +402,8 @@ describe('rule 3 — the status change and the payment record are ATOMIC', () =>
       readTenantOfUser: (userId) => harness.identity.service.getTenantOfUser(userId),
       resolvePayer: (subjectUserId) => Promise.resolve({ kind: 'user', id: subjectUserId }),
       audit: harness.audit,
+      // D-258 — a real limiter, built exactly as the composition root builds it.
+      rateLimiter: createBillingTestRateLimiter(harness.cache, harness.clock, harness.logger),
     });
 
     await expect(
@@ -604,6 +607,8 @@ describe('cancelSubscription', () => {
       readTenantOfUser: (userId) => harness.identity.service.getTenantOfUser(userId),
       resolvePayer: (subjectUserId) => Promise.resolve({ kind: 'user', id: subjectUserId }),
       audit: harness.audit,
+      // D-258 — a real limiter, built exactly as the composition root builds it.
+      rateLimiter: createBillingTestRateLimiter(harness.cache, harness.clock, harness.logger),
     });
 
     await expect(service.cancelSubscription(actor, actor.userId)).rejects.toThrow('unreachable');

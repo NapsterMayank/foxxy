@@ -5,6 +5,7 @@ import { createBillingRepository, type BillingRepository } from '../billing.repo
 import { createBillingService, type BillingService } from '../billing.service';
 import type { BillingActor, TenantReader } from '../billing.types';
 import {
+  createBillingTestRateLimiter,
   OTHER_TENANT_ID,
   TEST_TENANT_ID,
   moveToOtherTenant,
@@ -103,6 +104,8 @@ function serviceWith(mutations: Mutations, actor?: BillingActor): BillingService
     readTenantOfUser,
     resolvePayer: (subjectUserId) => Promise.resolve({ kind: 'user', id: subjectUserId }),
     audit: harness.audit,
+    // D-258 — a real limiter, built exactly as the composition root builds it.
+    rateLimiter: createBillingTestRateLimiter(harness.cache, harness.clock, harness.logger),
   });
 }
 

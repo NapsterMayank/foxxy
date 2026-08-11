@@ -37,6 +37,13 @@ C="docker compose -f compose.prod.yml --env-file .env.prod"
 #    what "before" was.
 grep BACKEND_IMAGE .env.prod        # <- write this down
 
+# 1b. THE CONFIGURATION IS VALID BEFORE ANYTHING IS PULLED.
+#     `config` performs variable interpolation, so every ${VAR:?...} in
+#     compose.prod.yml is checked here — it creates nothing, starts nothing and
+#     costs a second. A missing credential names itself now, instead of after
+#     the image is on the host (D-250).
+$C config > /dev/null && echo "compose config OK"
+
 # 2. Pull the new image and MIGRATE, as its own step.
 export BACKEND_IMAGE=foxxy/backend:<new-sha>
 $C pull migrate
@@ -57,6 +64,47 @@ $C exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
 
 `deploy-app.sh` waits for `/health/ready` and exits non-zero if it never
 arrives. **If it exits non-zero, go to section 3 immediately.**
+
+### 1.0 <a id="preflight"></a>When the API and worker will not start at all
+
+**A restart loop on `backend-api` and `backend-worker` is a missing environment
+variable until proven otherwise.** `src/app/container.ts` refuses to construct in
+production without the Voyage key, the LLM key, all three Razorpay credentials
+or the SMTP settings — each of those guards a fake adapter that is
+interchangeable to the type system and silently wrong at runtime, so the refusal
+is correct. What it *looks* like is not: an exception inside `createContainer`
+exits the process, `restart: unless-stopped` starts it again, and the one line
+naming the variable scrolls past inside a restart storm. It reads as a crash, or
+as a bad image, or as postgres not being ready (D-250).
+
+Two things now stand in front of that, in order:
+
+1. **Compose interpolation.** Every required credential is `${VAR:?message}`, so
+   `docker compose config` (step 1b above) refuses and names the variable
+   **before an image is pulled**. It cannot be skipped: interpolation happens on
+   every compose invocation, including `deploy-app.sh`'s `up -d --no-deps`.
+2. **The `preflight` service.** A one-shot container running the same image and
+   the same config parser as the API, depended on by api, worker and alerts via
+   `service_completed_successfully`. It catches what interpolation cannot see,
+   because to compose a value is just a string: a variable that is present but
+   blank, and a `RAZORPAY_PLAN_IDS` whose pairs are malformed or missing a
+   purchasable plan code — which otherwise resolves to an empty map, boots,
+   reports healthy, and fails at the checkout of the first customer who tries to
+   pay us (D-253).
+
+   It reports **every** problem at once, not the first, so bringing up a new
+   deployment is one list rather than five deploys.
+
+```bash
+# Nothing came up? Read the pre-flight, not the api log.
+$C logs preflight
+
+# Run it on demand, without starting anything else:
+$C run --rm preflight
+```
+
+A failure here means **api, worker and alerts were never started**. That is the
+intended outcome: one legible error instead of three containers cycling.
 
 ### 1.1 Smoke checks after a backend deploy
 

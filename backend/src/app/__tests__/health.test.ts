@@ -106,12 +106,34 @@ describe('GET /health/ready — with the database DOWN', () => {
     expect(response.statusCode).toBe(503);
   }, 20_000);
 
-  it('says which check failed', async () => {
+  /**
+   * D-229 — A STATUS AND NOTHING ELSE.
+   *
+   * This test used to assert the OPPOSITE: that the body carried a `checks` map
+   * naming what failed. It also carried a `database` object with the raw pg
+   * error string in it, and a node-postgres connection failure reads
+   * `connect ECONNREFUSED 10.0.3.14:5432` or
+   * `password authentication failed for user "foxxy_app"`. Host, port, username
+   * and the application's own private address, to anything that can open a
+   * socket, at the exact moment the database is down.
+   *
+   * Readiness is consumed by a load balancer, which reads the STATUS CODE. The
+   * body was for humans, and the humans it reached were not only ours.
+   */
+  it('returns a status and NOTHING else — no checks map, no vendor detail', async () => {
     const response = await app.inject({ method: 'GET', url: '/health/ready' });
-    expect(response.json()).toMatchObject({
-      status: 'not_ready',
-      checks: { database: false, migrations: false, config: true },
-    });
+    expect(response.json()).toEqual({ status: 'not_ready' });
+  }, 20_000);
+
+  it('leaks no host, port or username with the database down', async () => {
+    // The named mutation for D-229. Re-render `cause.message` into this body
+    // and this assertion is what goes red.
+    const response = await app.inject({ method: 'GET', url: '/health/ready' });
+
+    expect(response.body).not.toContain('127.0.0.1');
+    expect(response.body).not.toContain('foxxy');
+    expect(response.body).not.toContain('ECONNREFUSED');
+    expect(response.body).not.toMatch(/:\d{2,5}\b/u);
   }, 20_000);
 
   it('returns 503 immediately once shutdown has begun, before probing anything', async () => {
@@ -195,7 +217,12 @@ describe('GET /health/deps', () => {
       'auth:2',
       'core:20',
       'ai:8',
-      'worker:6',
+      // D-228 — SIX WAS THE OLD ANSWER, and six in this process plus six in the
+      // worker is how 44 became 88 of a default `max_connections=100`. An api
+      // process only ever ENQUEUES onto the worker pool (one indexed INSERT,
+      // plus the metrics sink), so the role profile caps it at two. Restore the
+      // role cap to `null` and this line goes red.
+      'worker:2',
     ]);
   }, 20_000);
 
@@ -204,6 +231,122 @@ describe('GET /health/deps', () => {
     expect(response.body).not.toContain('pw@');
     expect(response.body).not.toContain('foxxy:pw');
   }, 20_000);
+
+  /**
+   * D-229 — `/health/deps` may name WHICH dependency is unhealthy, never WHY in
+   * vendor terms.
+   *
+   * `db/health.ts` carried a comment at the old line 107 acknowledging exactly
+   * this risk, beside code that did not act on it. The failure is now a closed
+   * union — 'unreachable' | 'timeout' | 'schema_incomplete' — which cannot grow
+   * a hostname because it is not a string.
+   */
+  it('classifies the failure without a vendor message', async () => {
+    const response = await app.inject({ method: 'GET', url: '/health/deps' });
+    const body: { database: { failure: string | null } } = response.json();
+
+    expect(body.database.failure).toBe('unreachable');
+    expect(response.body).not.toContain('ECONNREFUSED');
+    expect(response.body).not.toContain('127.0.0.1');
+    expect(response.body).not.toContain('5432');
+  }, 20_000);
+
+  it('reports the cache alongside the database — D-230', async () => {
+    // Readiness probed the database and nothing else, so a replica with no
+    // Valkey stayed in rotation serving logins on the in-process rate-limit
+    // fallback. `/health/deps` has to be able to show which half is broken.
+    const response = await app.inject({ method: 'GET', url: '/health/deps' });
+    const body: { cache: { reachable: boolean; failure: string | null } } = response.json();
+
+    expect(body.cache.reachable).toBe(true);
+    expect(body.cache.failure).toBeNull();
+  }, 20_000);
+});
+
+/**
+ * =============================================================================
+ * D-230 — READINESS COVERS THE CACHE.
+ *
+ * The database is UP for this block (a probe that always fails would make a
+ * cache regression invisible), and the cache is what breaks. If the cache check
+ * is deleted from `/health/ready`, this whole block goes red and nothing else
+ * does.
+ *
+ * The database being "up" is faked at the container's edge rather than with a
+ * container: what is under test is the readiness EXPRESSION, not SQL.
+ * =============================================================================
+ */
+describe('GET /health/ready — with the CACHE down', () => {
+  /** A cache whose every read fails, the way a lost Valkey connection does. */
+  class UnreachableCache extends MemoryCache {
+    override get(): Promise<string | null> {
+      return Promise.reject(new Error('connect ECONNREFUSED 10.0.3.14:6379'));
+    }
+  }
+
+  let cacheApp: FastifyInstance;
+  let cacheContainer: Container;
+
+  beforeEach(async () => {
+    cacheContainer = createContainer(CONFIG, {
+      clock,
+      idGen: new CounterIdGen(),
+      logger: new FakeLogger(),
+      cache: new UnreachableCache(clock),
+      mail: new RecordingMail(),
+    });
+    cacheApp = await createServer(
+      {
+        ...cacheContainer,
+        // The database half reports healthy, so only the cache can fail this.
+        databaseProbe: {
+          manifest: cacheContainer.databaseProbe.manifest,
+          check: () =>
+            Promise.resolve({
+              reachable: true,
+              migrationsApplied: true,
+              latencyMs: 1,
+              failure: null,
+              pools: [],
+            }),
+        },
+      },
+      { isShuttingDown: () => false },
+    );
+    await cacheApp.ready();
+  });
+
+  afterEach(async () => {
+    await cacheApp.close();
+    await cacheContainer.shutdown();
+  });
+
+  it('returns 503 — a replica that cannot rate-limit must leave the rotation', async () => {
+    const response = await cacheApp.inject({ method: 'GET', url: '/health/ready' });
+    expect(response.statusCode).toBe(503);
+  });
+
+  it('still says only `not_ready`, with no vendor detail about the cache either', async () => {
+    // An ioredis error carries the host and port just as a pg error does.
+    const response = await cacheApp.inject({ method: 'GET', url: '/health/ready' });
+
+    expect(response.json()).toEqual({ status: 'not_ready' });
+    expect(response.body).not.toContain('10.0.3.14');
+    expect(response.body).not.toContain('6379');
+  });
+
+  it('names the cache as the unhealthy dependency on /health/deps', async () => {
+    const response = await cacheApp.inject({ method: 'GET', url: '/health/deps' });
+    const body: {
+      cache: { reachable: boolean; failure: string | null };
+      database: { reachable: boolean };
+    } = response.json();
+
+    // WHICH, never WHY: an operator can route to the right runbook page from
+    // this and cannot learn an address from it.
+    expect(body.cache).toMatchObject({ reachable: false, failure: 'unreachable' });
+    expect(body.database.reachable).toBe(true);
+  });
 });
 
 describe('GET /health — the deprecated alias', () => {

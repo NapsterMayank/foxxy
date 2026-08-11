@@ -1,5 +1,6 @@
 export { JOB_BACKOFF_POLICY } from './job.port';
 export type {
+  ClaimedJob,
   EnqueueInput,
   EnqueueResult,
   FailureOutcome,

@@ -61,6 +61,31 @@ export interface JobRecord {
   readonly createdAt: Date;
 }
 
+/**
+ * A job PLUS THE LEASE THE CLAIM HOLDS ON IT — D-233.
+ *
+ * ===========================================================================
+ * WHY THIS IS A SEPARATE TYPE RATHER THAN TWO MORE FIELDS ON `JobRecord`.
+ *
+ * `(lockedBy, lockedAt)` only exists for a job that is currently claimed, and
+ * only the completion methods have any use for it. A HANDLER does not: it
+ * receives the work, not the bookkeeping, and `JobHandler` stays
+ * `(job: JobRecord)` so that nothing in a module has to know this concept
+ * exists.
+ *
+ * Splitting it also makes the fence structural. `succeed` and `fail` take a
+ * `ClaimedJob`, and the ONLY way to obtain one is `claim` — so there is no way
+ * to complete a job without holding the lease the database handed you. A
+ * `jobId: string` parameter, which is what these took before, could be
+ * satisfied by any id from anywhere.
+ */
+export interface ClaimedJob extends JobRecord {
+  /** `jobs.locked_by` as the claim wrote it. This worker's id. */
+  readonly lockedBy: string;
+  /** `jobs.locked_at` as the claim wrote it. Together these ARE the lease. */
+  readonly lockedAt: Date;
+}
+
 export interface EnqueueInput {
   readonly kind: string;
   /** Derived from the work. Never a timestamp, never random. See the header. */
@@ -83,8 +108,17 @@ export interface EnqueueResult {
   readonly created: boolean;
 }
 
-/** What `fail()` decided to do next. */
-export type FailureOutcome = 'retry' | 'dead';
+/**
+ * What `fail()` decided to do next.
+ *
+ * `lease_lost` is D-233: the row had already been reclaimed by the reaper and
+ * handed to another worker, so THIS worker's failure was not recorded and must
+ * not be. It is a third outcome rather than an exception because it is an
+ * expected, benign race — the documented at-least-once edge — and a throw would
+ * make the runner's `catch` treat a successfully-avoided double-write as a job
+ * failure.
+ */
+export type FailureOutcome = 'retry' | 'dead' | 'lease_lost';
 
 export interface JobQueue {
   enqueue(input: EnqueueInput): Promise<EnqueueResult>;
@@ -98,10 +132,40 @@ export interface JobQueue {
    * kinds must not claim the others, or it will fail them repeatedly until they
    * are dead.
    */
-  claim(workerId: string, kinds: readonly string[], now: Date): Promise<JobRecord | null>;
-  succeed(jobId: string, now: Date): Promise<void>;
-  /** Records a failure and schedules the retry, or gives up. */
-  fail(jobId: string, error: string, now: Date): Promise<FailureOutcome>;
+  claim(workerId: string, kinds: readonly string[], now: Date): Promise<ClaimedJob | null>;
+  /**
+   * Marks the job succeeded, FENCED BY THE LEASE THE CALLER STILL HOLDS — D-233.
+   *
+   * ==========================================================================
+   * THE RACE THIS CLOSES, AND WHY IT COULD CORRUPT THE FINAL STATE.
+   *
+   * A handler may legitimately outrun the 120-second lock timeout. When it
+   * does, `reapStuck` returns the row to `pending`, a second worker claims it,
+   * and now TWO workers believe they own the job. Both eventually complete.
+   *
+   * These methods used to update BY JOB ID ALONE. So the slow worker's write
+   * landed on a row it no longer owned:
+   *
+   *   - a `succeed` from the stale worker overwrote the second worker's
+   *     `running`, and the second worker's later `fail` then wrote `failed`
+   *     over a job that had genuinely succeeded, scheduling a THIRD run;
+   *   - or the stale worker's `fail` overwrote a genuine `succeeded`, so the
+   *     final state of a job that worked says it did not.
+   *
+   * At-least-once delivery is a documented, accepted property of this queue.
+   * A final state that flips to the WRONG value is not, and no amount of
+   * handler idempotency fixes it, because the corruption is in the queue's own
+   * bookkeeping rather than in the side effect.
+   *
+   * Taking the whole `JobRecord` rather than an id is what makes the fence
+   * unforgettable: there is no way to call this without the lease in hand.
+   *
+   * @returns false when the lease was lost — the write did not land, and the
+   *          job now belongs to whoever reclaimed it.
+   */
+  succeed(job: ClaimedJob, now: Date): Promise<boolean>;
+  /** Records a failure and schedules the retry, or gives up. Same fence. */
+  fail(job: ClaimedJob, error: string, now: Date): Promise<FailureOutcome>;
   /**
    * Returns jobs stuck in `running` past the lock timeout to the queue.
    *

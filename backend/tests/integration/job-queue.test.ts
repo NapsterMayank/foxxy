@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { FixedClock } from '@/platform/clock/index';
 import { createDb, type DbHandle } from '@/platform/db/index';
-import { JOB_BACKOFF_POLICY, createPostgresJobQueue, type JobQueue } from '@/platform/jobs/index';
+import {
+  JOB_BACKOFF_POLICY,
+  createPostgresJobQueue,
+  type ClaimedJob,
+  type JobQueue,
+} from '@/platform/jobs/index';
 import { backoffMs } from '@/platform/retry/index';
 import { applyAllMigrations, startTestPostgres, type TestPostgres } from '../helpers/postgres';
 
@@ -47,6 +52,31 @@ beforeEach(async () => {
   // "with backoff" a measurement rather than a hope.
   queue = createPostgresJobQueue({ db: handle, random: () => 0 });
 });
+
+/**
+ * Claims and INSISTS on getting something — D-233.
+ *
+ * `succeed` and `fail` take the `ClaimedJob` rather than an id now, because the
+ * lease is what fences the write. Most tests here previously discarded the claim
+ * result; this keeps them one line long while making the lease impossible to
+ * skip.
+ */
+async function claimOne(worker = 'w', kind: string = KIND): Promise<ClaimedJob> {
+  const claimed = await queue.claim(worker, [kind], clock.now());
+  if (claimed === null) throw new Error(`nothing claimable for ${worker}`);
+  return claimed;
+}
+
+/** The lease columns, for the reaper-race tests. */
+async function lockOf(id: string): Promise<{ status: string; locked_by: string | null }> {
+  const result = await postgres.client.query<{ status: string; locked_by: string | null }>(
+    'select status, locked_by from jobs where id = $1',
+    [id],
+  );
+  const row = result.rows[0];
+  if (row === undefined) throw new Error(`no job ${id}`);
+  return row;
+}
 
 async function statusOf(id: string): Promise<{ status: string; run_at: Date; attempts: number }> {
   const result = await postgres.client.query<{ status: string; run_at: Date; attempts: number }>(
@@ -129,8 +159,7 @@ describe('a job runs exactly once under concurrent workers', () => {
     // queue — the backoff would then never take effect and the failing job
     // would hammer the dependency it is backing off from.
     const { id } = await queue.enqueue({ kind: KIND, idempotencyKey: 'k' });
-    await queue.claim('w', [KIND], clock.now());
-    await queue.fail(id, 'provider down', clock.now());
+    await queue.fail(await claimOne(), 'provider down', clock.now());
     const backedOff = await statusOf(id);
 
     await queue.enqueue({ kind: KIND, idempotencyKey: 'k' });
@@ -164,9 +193,8 @@ describe('a failed job retries with backoff', () => {
 
     const observed: number[] = [];
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const claimed = await queue.claim('w', [KIND], clock.now());
-      expect(claimed).not.toBeNull();
-      const outcome = await queue.fail(id, 'provider down', clock.now());
+      const claimed = await claimOne();
+      const outcome = await queue.fail(claimed, 'provider down', clock.now());
       expect(outcome).toBe('retry');
 
       const row = await statusOf(id);
@@ -189,8 +217,7 @@ describe('a failed job retries with backoff', () => {
     // The backoff has to be enforced by the CLAIM, not merely recorded. A
     // `run_at` nobody checks is a comment.
     const { id } = await queue.enqueue({ kind: KIND, idempotencyKey: 'waiting' });
-    await queue.claim('w', [KIND], clock.now());
-    await queue.fail(id, 'boom', clock.now());
+    await queue.fail(await claimOne(), 'boom', clock.now());
 
     expect(await queue.claim('w', [KIND], clock.now())).toBeNull();
 
@@ -211,11 +238,9 @@ describe('a failed job retries with backoff', () => {
       maxAttempts: 2,
     });
 
-    await queue.claim('w', [KIND], clock.now());
-    expect(await queue.fail(id, 'nope', clock.now())).toBe('retry');
+    expect(await queue.fail(await claimOne(), 'nope', clock.now())).toBe('retry');
     clock.advanceMs(60_000);
-    await queue.claim('w', [KIND], clock.now());
-    expect(await queue.fail(id, 'nope again', clock.now())).toBe('dead');
+    expect(await queue.fail(await claimOne(), 'nope again', clock.now())).toBe('dead');
 
     const row = await statusOf(id);
     expect(row.status).toBe('dead');
@@ -228,8 +253,7 @@ describe('a failed job retries with backoff', () => {
     // `last_error` is read during incidents. A stack trace or a payload dump
     // here is how PII accumulates in the one column everybody greps.
     const { id } = await queue.enqueue({ kind: KIND, idempotencyKey: 'msg' });
-    await queue.claim('w', [KIND], clock.now());
-    await queue.fail(id, 'x'.repeat(5_000), clock.now());
+    await queue.fail(await claimOne(), 'x'.repeat(5_000), clock.now());
 
     const row = await postgres.client.query<{ last_error: string }>(
       'select last_error from jobs where id = $1',
@@ -326,16 +350,69 @@ describe('claiming', () => {
     });
     expect(await queue.claim('w', [KIND], clock.now())).toBeNull();
   });
+
+  /**
+   * =========================================================================
+   * D-267 — EVERY TIMESTAMP ON A CLAIMED JOB IS A REAL `Date`.
+   *
+   * `ClaimedJob` declares `runAt`, `createdAt` and `lockedAt` as `Date`, and
+   * for two of the three that was a promise the queue was not keeping.
+   * `db.execute` runs raw SQL through node-postgres and what comes back for a
+   * `timestamptz` is decided by the driver's type parsers, not by the
+   * annotation in `JobRow`. D-233 typed `locked_at` honestly and left the
+   * other two as `Date` on the grounds that "nothing ever calls a method on
+   * them" — an explanation of why it had not blown up yet, not a guarantee.
+   *
+   * `lockedAt` was found exactly this way: the first run of this suite threw
+   * `job.lockedAt.toISOString is not a function`. The first caller to write
+   * `job.runAt.getTime()` — a scheduler, a lateness metric, a log line — would
+   * have got the same `TypeError` in a worker, past a compiler that had
+   * already signed off on it.
+   *
+   * ONLY AN INTEGRATION TEST CAN ASSERT THIS. A unit test with a fake row
+   * supplies whatever type it declares and proves nothing about the driver.
+   * This runs against real Postgres through the real `db.execute`, so it
+   * observes what node-postgres actually returns — and `instanceof Date` is a
+   * runtime check, which is the only kind that can catch the compiler lying.
+   * =========================================================================
+   */
+  it('hands out real Date objects for runAt, createdAt AND lockedAt', async () => {
+    await queue.enqueue({
+      kind: KIND,
+      idempotencyKey: 'timestamps',
+      runAt: new Date('2026-08-09T08:00:00.000Z'),
+    });
+
+    const job = await queue.claim('w', [KIND], new Date('2026-08-09T11:00:00.000Z'));
+    if (job === null) throw new Error('expected to claim the job');
+
+    expect(job.runAt).toBeInstanceOf(Date);
+    expect(job.createdAt).toBeInstanceOf(Date);
+    expect(job.lockedAt).toBeInstanceOf(Date);
+
+    // Not merely `instanceof` — a `new Date(undefined)` is also a Date, and an
+    // Invalid Date would satisfy the checks above while carrying no time.
+    expect(Number.isNaN(job.runAt.getTime())).toBe(false);
+    expect(Number.isNaN(job.createdAt.getTime())).toBe(false);
+    expect(Number.isNaN(job.lockedAt.getTime())).toBe(false);
+
+    // The value survived the round trip, so the normalisation converts rather
+    // than merely producing something Date-shaped.
+    expect(job.runAt.toISOString()).toBe('2026-08-09T08:00:00.000Z');
+
+    // The method call the type system has been promising all along. This is the
+    // line that would have thrown.
+    expect(() => job.createdAt.toISOString()).not.toThrow();
+  });
 });
 
 describe('countByStatus', () => {
   it('reports every status, including the ones with no rows', async () => {
     // A missing key and a zero are different things to a dashboard, and only
     // one of them renders.
-    const { id } = await queue.enqueue({ kind: KIND, idempotencyKey: 'a' });
+    await queue.enqueue({ kind: KIND, idempotencyKey: 'a' });
     await queue.enqueue({ kind: KIND, idempotencyKey: 'b' });
-    await queue.claim('w', [KIND], clock.now());
-    await queue.succeed(id, clock.now());
+    await queue.succeed(await claimOne(), clock.now());
 
     expect(await queue.countByStatus()).toEqual({
       pending: 1,
@@ -344,5 +421,124 @@ describe('countByStatus', () => {
       failed: 0,
       dead: 0,
     });
+  });
+});
+
+/**
+ * =============================================================================
+ * THE REAPER RACE — D-233. The defect this file did not previously reach.
+ *
+ * `succeed` and `fail` used to update BY JOB ID ALONE, and `fail` additionally
+ * did a SELECT and then an UPDATE despite a comment directly above it promising
+ * a single statement with a `CASE` precisely because "a read-modify-write here
+ * races with the reaper".
+ *
+ * The race is not exotic. A handler that legitimately outruns the 120-second
+ * lock timeout — a large digest, a slow provider — is reclaimed by
+ * `reapStuck`, a second worker claims the row, and now two workers are running
+ * the same job. Both finish. Unfenced, whichever finishes LAST wins, so:
+ *
+ *   - a stale `succeed` overwrites the new owner's `running`, whose later
+ *     `fail` then marks a genuinely successful job `failed` and schedules a
+ *     third run; or
+ *   - a stale `fail` overwrites a genuine `succeeded`.
+ *
+ * At-least-once execution is an accepted, documented property of this queue.
+ * A FINAL STATE THAT IS WRONG is not, and handler idempotency cannot fix it,
+ * because the damage is in the queue's own bookkeeping.
+ *
+ * Every step below moves the injected clock. Nothing sleeps.
+ * =============================================================================
+ */
+describe('a completion is fenced by the lease the caller still holds', () => {
+  /** Drives a job to the exact state the race needs: claimed, reaped, reclaimed. */
+  async function reclaimedUnderneath(): Promise<{
+    readonly stale: ClaimedJob;
+    readonly fresh: ClaimedJob;
+  }> {
+    await queue.enqueue({ kind: KIND, idempotencyKey: 'slow-handler' });
+
+    // Worker A claims it and starts a handler that will take too long.
+    const stale = await claimOne('worker-a');
+
+    // Past the lock timeout, so the reaper returns the row to the queue. This
+    // is the runner's own `DEFAULT_LOCK_TIMEOUT_MS`.
+    clock.advanceMs(120_001);
+    expect(await queue.reapStuck(120_000, clock.now())).toBe(1);
+
+    // Worker B claims it. Worker A is still running.
+    const fresh = await claimOne('worker-b');
+    expect(fresh.id).toBe(stale.id);
+    expect(fresh.lockedBy).toBe('worker-b');
+
+    return { stale, fresh };
+  }
+
+  it('refuses a stale succeed, leaving the new owner running', async () => {
+    const { stale, fresh } = await reclaimedUnderneath();
+
+    // Worker A finishes and reports success on a job it no longer owns.
+    expect(await queue.succeed(stale, clock.now())).toBe(false);
+
+    // The row still belongs to worker B, untouched.
+    const row = await lockOf(fresh.id);
+    expect(row.status).toBe('running');
+    expect(row.locked_by).toBe('worker-b');
+  });
+
+  it('refuses a stale fail, so a succeeded job cannot be flipped back', async () => {
+    // The direction that corrupts rather than merely confuses: without the
+    // fence this `fail` lands on top of worker B's `succeeded` and the job is
+    // scheduled to run for a third time, having already worked twice.
+    const { stale, fresh } = await reclaimedUnderneath();
+
+    expect(await queue.succeed(fresh, clock.now())).toBe(true);
+    expect(await queue.fail(stale, 'timed out', clock.now())).toBe('lease_lost');
+
+    const row = await statusOf(fresh.id);
+    expect(row.status).toBe('succeeded');
+    // Never rescheduled: a third run was exactly what the unfenced write caused.
+    clock.advanceMs(86_400_000);
+    expect(await queue.claim('w', [KIND], clock.now())).toBeNull();
+  });
+
+  it('lets the CURRENT owner complete normally — the fence is not a blanket refusal', async () => {
+    // A fence that rejected everything would also pass the two tests above, and
+    // would break the queue entirely. This is the control.
+    const { fresh } = await reclaimedUnderneath();
+
+    expect(await queue.succeed(fresh, clock.now())).toBe(true);
+    expect((await statusOf(fresh.id)).status).toBe('succeeded');
+  });
+
+  it('refuses a second completion from the SAME worker', async () => {
+    // `succeed` nulls the lock columns, so the lease is spent. A retried call —
+    // from a runner that crashed between the database write and its own
+    // bookkeeping — must not re-stamp a row that may have been claimed again.
+    await queue.enqueue({ kind: KIND, idempotencyKey: 'double-report' });
+    const claimed = await claimOne();
+
+    expect(await queue.succeed(claimed, clock.now())).toBe(true);
+    expect(await queue.succeed(claimed, clock.now())).toBe(false);
+  });
+
+  it('decides dead-versus-failed from the row, in ONE statement', async () => {
+    // The `CASE` the old comment promised and the old code did not deliver.
+    // Proved by the outcome tracking `max_attempts` as the DATABASE holds it:
+    // the row is lowered to a single permitted attempt after the claim, so a
+    // decision read from the pre-claim record would say 'retry' and a decision
+    // taken in SQL says 'dead'.
+    const { id } = await queue.enqueue({
+      kind: KIND,
+      idempotencyKey: 'case-in-sql',
+      maxAttempts: 5,
+    });
+    const claimed = await claimOne();
+    expect(claimed.maxAttempts).toBe(5);
+
+    await postgres.client.query('update jobs set max_attempts = 1 where id = $1', [id]);
+
+    expect(await queue.fail(claimed, 'exhausted', clock.now())).toBe('dead');
+    expect((await statusOf(id)).status).toBe('dead');
   });
 });

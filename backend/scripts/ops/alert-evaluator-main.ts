@@ -31,7 +31,12 @@ import { createSystemClock } from '../../src/platform/clock/index';
 import { config } from '../../src/platform/config/index';
 import { createDb } from '../../src/platform/db/index';
 import { createLogger } from '../../src/platform/logger/index';
-import { createConsoleMail, type MailPort } from '../../src/platform/mail/index';
+import {
+  createConsoleMail,
+  createNodemailerTransport,
+  createSmtpMail,
+  type MailPort,
+} from '../../src/platform/mail/index';
 import {
   createEmailChannel,
   createInAppChannel,
@@ -97,40 +102,111 @@ function parseArgs(argv: readonly string[]): Options {
     onCallEmail: required('on-call-email'),
     readinessUrl: flags.get('readiness-url') ?? 'http://backend-api:4000/health/ready',
     backupDir: flags.get('backup-dir'),
-    mailTransport: flags.get('mail') ?? 'console',
+    // DEFAULTS TO THE REAL PAGER, NOT TO STDOUT (D-251). See createAlertMail.
+    mailTransport: flags.get('mail') ?? 'smtp',
   };
 }
 
 /**
- * The mail transport for `page` alerts.
+ * THE MAIL TRANSPORT FOR `page` ALERTS — D-251.
  *
- * `console` writes to stdout, where the container log driver keeps it. It is a
- * real, working delivery path for a single-operator deployment reading
- * `docker compose logs` — but it is NOT a pager, and pretending otherwise is
- * the failure this whole file is about. So it warns, loudly, every start.
+ * =============================================================================
+ * WHAT WAS BROKEN.
  *
- * `resend` is the real path and lands with the `notify` module's Resend adapter
- * (build step 14). Selecting it before that adapter exists THROWS, rather than
- * silently falling back to console — a deployment that asked for a pager and
- * got stdout would believe it had one.
+ * `--mail` defaulted to `console`, and `resend` — the only other value — threw,
+ * because no Resend adapter was ever written. So there was exactly one reachable
+ * transport, and it was stdout. Every page-severity alert this evaluator has
+ * ever raised was written to a container log and read by nobody. The stack had a
+ * rule set, a dispatcher, a recipient, a 60-second loop and a dashboard's worth
+ * of correct behaviour, and it could not wake anyone up.
+ *
+ * That is worse than having no monitoring, because it is BELIEVED. "No page came
+ * in" was being read as "nothing was wrong", and the two were indistinguishable.
+ *
+ * =============================================================================
+ * `smtp` IS NOW THE DEFAULT, NOT `console`, AND THAT INVERSION IS THE FIX.
+ *
+ * The old default made the quiet outcome the automatic one: an operator who
+ * passed no flag got a silent pager and no indication of it. The loud outcome is
+ * automatic now — with no SMTP configured this THROWS and the alerts container
+ * fails to start, so its absence from `docker compose ps` is itself the signal.
+ * A monitoring component that refuses to run is legible; one that runs and
+ * delivers nowhere is not.
+ *
+ * `console` remains selectable and is a genuinely real delivery path for a
+ * single operator watching `docker compose logs` — it is simply not a pager, and
+ * choosing it now requires typing it, which puts the choice in `.env.prod` where
+ * a reviewer sees it. It still warns on every start.
+ *
+ * `resend` is REMOVED rather than left throwing-with-a-TODO: the owner's mail
+ * provider is Google Workspace, so there is no Resend adapter coming. Naming it
+ * in the error keeps an existing `ALERT_MAIL_TRANSPORT=resend` from failing with
+ * "unknown transport" and instead points at the value that replaced it.
+ *
+ * =============================================================================
+ * IT USES THE SAME ADAPTER THE APPLICATION USES.
+ *
+ * `createSmtpMail` over `createNodemailerTransport`, from `platform/mail` — not
+ * a second SMTP client written for ops. A monitoring path built out of different
+ * parts than the product's can succeed while the product's fails, and the one
+ * message that would have told you is the one that goes through the ops path.
  */
 function createAlertMail(transport: string, logger: ReturnType<typeof createLogger>): MailPort {
   if (transport === 'console') {
     logger.warn(
       { event: 'alerts.mail_transport_console' },
       'ALERT EMAIL IS GOING TO STDOUT. Page-severity alerts will not reach a phone. ' +
-        'Set --mail=resend once the Resend adapter exists (build step 14).',
+        'This is a deliberate, explicit choice — pass --mail=smtp for the real pager path.',
     );
     return createConsoleMail();
   }
+
+  if (transport === 'smtp') {
+    const { smtpHost, smtpPort, smtpUser, smtpPassword, smtpFrom } = config.mail;
+    // NAMES THE MISSING VARIABLES, ALL OF THEM, rather than failing on the first.
+    // An operator bringing up alerting should not learn about four variables
+    // across four restarts.
+    const missing = [
+      smtpHost === null ? 'SMTP_HOST' : null,
+      smtpUser === null ? 'SMTP_USER' : null,
+      smtpPassword === null ? 'SMTP_PASSWORD' : null,
+      smtpFrom === null ? 'SMTP_FROM' : null,
+    ].filter((name): name is string => name !== null);
+
+    if (smtpHost === null || smtpUser === null || smtpPassword === null || smtpFrom === null) {
+      throw new Error(
+        `--mail=smtp was selected but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} ` +
+          'not set. REFUSING TO FALL BACK TO STDOUT: a deployment that asked for a pager and ' +
+          'silently received a log line would believe it had one, and "no page came in" would ' +
+          'read as "nothing was wrong". Set the SMTP_* block in docker/.env.prod, or choose ' +
+          '--mail=console deliberately and know that alerts go to the container log.',
+      );
+    }
+
+    logger.info(
+      { event: 'alerts.mail_transport_smtp', host: smtpHost, port: smtpPort },
+      'page-severity alerts will be delivered over SMTP',
+    );
+    return createSmtpMail({
+      transport: createNodemailerTransport({
+        host: smtpHost,
+        port: smtpPort,
+        user: smtpUser,
+        password: smtpPassword,
+        from: smtpFrom,
+      }),
+      from: smtpFrom,
+    });
+  }
+
   if (transport === 'resend') {
     throw new Error(
-      "--mail=resend was requested but no Resend adapter exists yet (build step 14). " +
-        'Refusing to fall back to stdout silently: a deployment that asked for a pager and ' +
-        'received a log line would believe it had one.',
+      '--mail=resend no longer exists. The mail provider is Google Workspace and the transport ' +
+        'is SMTP (platform/mail/smtp-mail.ts). Use --mail=smtp and set the SMTP_* variables.',
     );
   }
-  throw new Error(`--mail: unknown transport '${transport}'. Known: console, resend.`);
+
+  throw new Error(`--mail: unknown transport '${transport}'. Known: smtp, console.`);
 }
 
 async function main(): Promise<void> {
@@ -156,13 +232,18 @@ async function main(): Promise<void> {
       'some rules have no signal source configured and will never fire',
     );
   }
-  if (options.backupDir === undefined) {
-    logger.warn(
-      { event: 'alerts.backup_not_watched' },
-      'no --backup-dir: the "no recent database backup" rule is NOT active. ' +
-        'Mount the backup volume read-only and pass --backup-dir=/backup.',
-    );
-  }
+  // NO `--backup-dir` WARNING HERE, and its absence is deliberate.
+  //
+  // There used to be one, and it was dead code that read as a safeguard:
+  // `assertRulesAreSatisfiable` above has ALREADY THROWN by this line, because
+  // `producibleSignals()` omits `backup.age_hours` when no directory is
+  // configured and the `backup_stale` rule watches exactly that signal. So the
+  // condition is unreachable, and a reader who found the warning would conclude
+  // that running without a backup directory is a degraded-but-permitted mode.
+  // It is not — the evaluator refuses to start, which is the correct posture for
+  // "there has never been a backup" being reported identically to "backups are
+  // fine". compose.prod.yml mounts backup_data read-only and passes
+  // --backup-dir=/backup (D-251).
 
   const mail = createAlertMail(options.mailTransport, logger);
   const dispatcher = createNotificationDispatcher({

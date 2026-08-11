@@ -102,6 +102,71 @@ export interface IdentityModuleDeps {
    * unchanged. `app/routes.ts` always passes the real one.
    */
   readonly audit?: AuditPort;
+  /**
+   * THE SALT FOR EVERY IDENTIFIER HASH IN THIS MODULE — D-221.
+   *
+   * `hashIp` was a bare SHA-256. There are 2^32 IPv4 addresses, so an unsalted
+   * digest over that space is a rainbow table anybody can build in minutes:
+   * `sessions.ip_hash` was pseudonymised in name only. The same digest also
+   * appeared as a rate-limit cache key, making it a stable cross-store
+   * correlator that joins a cache dump to a database dump exactly.
+   *
+   * OPTIONAL HERE AND REQUIRED ONE LAYER DOWN, deliberately. The service takes
+   * `ipHashSalt: string` with no default, so nothing INSIDE the module can
+   * forget it; at this boundary — the composition edge, where the harnesses and
+   * `app/routes.ts` meet — it may be omitted.
+   *
+   * IT IS NOT READ FROM `process.env` HERE, and an earlier draft of this fix did
+   * exactly that. `no-restricted-properties` forbids it in as many words: the
+   * environment is parsed ONCE, in `platform/config`, into a frozen object, so
+   * that the set of variables the process depends on is enumerable in one file
+   * rather than discovered by grep. A module reaching around that is how a
+   * deployment acquires an undocumented required variable.
+   *
+   * WHEN IT IS NOT SUPPLIED the module logs at `warn` and uses
+   * `UNCONFIGURED_IP_HASH_SALT` below. That is a REAL but PARTIAL fix and is
+   * labelled as such rather than dressed up: it removes the generic
+   * precomputed-rainbow-table attack over the IPv4 space and it does NOT defend
+   * against anyone holding this source. The durable fix is an
+   * `IDENTITY_IP_HASH_SALT` entry in `platform/config` threaded through
+   * `app/routes.ts` into this field — two files this module does not own, so the
+   * change is REPORTED rather than reached across for, and the warn line above
+   * is what makes the gap visible in the meantime.
+   */
+  readonly ipHashSalt?: string;
+}
+
+/**
+ * The salt used when none is configured. NOT a secret and documented as not one.
+ *
+ * A constant here is strictly better than no salt — it breaks every precomputed
+ * SHA-256 table, and it is stable across processes and restarts, which an
+ * per-process random salt would not be. That stability is not cosmetic: the
+ * digest is a rate-limit cache KEY, so a salt that differed per instance would
+ * silently turn the shared cross-instance counter into a per-instance one, which
+ * is the in-process-fallback security downgrade of D-034 arriving by accident and
+ * with no warning line.
+ */
+export const UNCONFIGURED_IP_HASH_SALT = 'identity.unconfigured-ip-hash-salt.v1';
+
+/**
+ * The variable `platform/config` should parse when the durable fix lands, named
+ * here so that the reported change and the code that consumes it agree.
+ *
+ * Declared and NOT read: this module never touches `process.env` (see
+ * `ipHashSalt`). It is a constant for the config owner to point at.
+ */
+export const IP_HASH_SALT_ENV_VAR = 'IDENTITY_IP_HASH_SALT';
+
+function resolveIpHashSalt(deps: IdentityModuleDeps): string {
+  const explicit = deps.ipHashSalt;
+  if (explicit !== undefined && explicit.length > 0) return explicit;
+
+  deps.logger.warn(
+    { event: 'identity.ip_hash_salt_unconfigured', envVar: IP_HASH_SALT_ENV_VAR },
+    'no IP-hash salt configured: identifier hashes fall back to a build constant, which is not secret',
+  );
+  return UNCONFIGURED_IP_HASH_SALT;
 }
 
 export interface IdentityModule {
@@ -128,6 +193,10 @@ export interface IdentityModule {
 export function createIdentityModule(deps: IdentityModuleDeps): IdentityModule {
   const repository = createIdentityRepository(deps.db);
   const hasher = deps.hasher ?? createArgon2PasswordHasher();
+  // Resolved ONCE. Two resolutions could disagree, and the service's keys and
+  // the routes' `ip_hash` must be the same function or the rate limit silently
+  // counts a different thing than the column records.
+  const ipHashSalt = resolveIpHashSalt(deps);
 
   const service = createIdentityService({
     repository,
@@ -139,6 +208,7 @@ export function createIdentityModule(deps: IdentityModuleDeps): IdentityModule {
     randomBytes: (size: number): Uint8Array => cryptoRandomBytes(size),
     randomInt: (max: number): number => cryptoRandomInt(max),
     sessionTtlDays: deps.session.ttlDays,
+    ipHashSalt,
     // D-073 — from configuration, never from a request body.
     defaultTenantId: deps.defaultTenantId,
     urls: deps.urls,
@@ -153,6 +223,7 @@ export function createIdentityModule(deps: IdentityModuleDeps): IdentityModule {
         service,
         cookie: deps.session,
         postVerifyRedirectUrl: `${deps.urls.appBaseUrl}/onboarding`,
+        ipHashSalt,
       });
     },
     requireSession: createRequireSession({ service, cookie: deps.session }),

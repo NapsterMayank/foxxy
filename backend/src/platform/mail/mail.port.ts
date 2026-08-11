@@ -1,10 +1,19 @@
 /**
  * platform/mail — the outbound email port.
  *
- * INTERFACE plus a development adapter. The Resend adapter lands with the
- * identity module (build step 4); until then the dev adapter prints to stdout
- * so the whole signup flow can be exercised with no API key and no external
- * call.
+ * INTERFACE plus a DEVELOPMENT adapter. The real one is `smtp-mail.ts`.
+ *
+ * This header used to say "the Resend adapter lands with the identity module
+ * (build step 4)". It never did. The console adapter below stayed the default
+ * at the composition root with NO ENVIRONMENT GATE, so production printed
+ * verification and password-reset links to stdout and delivered nothing, while
+ * every health probe stayed green (D-226). The gate now lives in
+ * `createContainer`, which refuses to boot in production without SMTP
+ * configuration — the same treatment `embed`, `llm` and `payments` already had.
+ *
+ * `createConsoleMail` remains, and remains the default OUTSIDE production, so
+ * the signup flow can still be exercised end to end with no credentials and no
+ * external call.
  */
 export type MailTemplate =
   | 'email-verification'

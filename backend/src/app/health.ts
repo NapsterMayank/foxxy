@@ -27,12 +27,24 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
  * application.
  */
 
-/** Structural. `app/` may not import `platform/db`, so it is described, not imported. */
+/**
+ * Structural. `app/` may not import `platform/db`, so it is described, not
+ * imported.
+ *
+ * `error: string | undefined` USED TO BE HERE and used to be rendered verbatim
+ * into both `/health/ready` and `/health/deps` — see D-229 and the header of
+ * `platform/db/health.ts`. It carried the host, the port and the database
+ * username to any unauthenticated caller the moment the database went down. It
+ * is replaced by a closed classification which cannot grow a hostname because
+ * it is not a string.
+ */
+export type DependencyFailure = 'unreachable' | 'timeout' | 'schema_incomplete';
+
 export interface DatabaseHealthReport {
   readonly reachable: boolean;
   readonly migrationsApplied: boolean;
   readonly latencyMs: number;
-  readonly error: string | undefined;
+  readonly failure: DependencyFailure | null;
   readonly pools: readonly {
     readonly name: string;
     readonly max: number;
@@ -40,6 +52,24 @@ export interface DatabaseHealthReport {
     readonly idle: number;
     readonly waiting: number;
   }[];
+}
+
+/**
+ * THE CACHE HALF OF READINESS — D-230.
+ *
+ * `/health/ready` checked the database and NOT the cache, and the cache is
+ * where every rate-limit counter lives. A replica whose Valkey connection is
+ * gone stayed in the load balancer's rotation serving requests on the
+ * in-process fallback — which is per-instance, resets on restart, and admits N
+ * times the configured limit across N replicas. The limiter's own header calls
+ * that "a silent security downgrade"; readiness is what makes it not silent,
+ * because it takes the degraded instance out of rotation instead of leaving it
+ * to answer login attempts.
+ */
+export interface CacheHealthReport {
+  readonly reachable: boolean;
+  readonly latencyMs: number;
+  readonly failure: DependencyFailure | null;
 }
 
 export interface BreakerReport {
@@ -70,6 +100,14 @@ export interface HealthDeps {
   readonly env: string;
   readonly now: () => Date;
   readonly checkDatabase: () => Promise<DatabaseHealthReport>;
+  /**
+   * §8 — readiness must cover the cache too. See `CacheHealthReport`.
+   *
+   * Required, not optional. An optional readiness dependency is one that a
+   * future call site omits by accident, and the omission looks exactly like a
+   * healthy system.
+   */
+  readonly checkCache: () => Promise<CacheHealthReport>;
   readonly breakers: () => readonly BreakerReport[];
   /**
    * THE LIVE PROCESS'S OWN COUNTERS — 04-RESILIENCE-PLAN.md §5.
@@ -104,39 +142,49 @@ export function registerHealthRoutes(app: FastifyInstance, deps: HealthDeps): vo
   });
 
   /**
-   * READINESS. Database reachable, migrations applied, config loaded.
+   * READINESS. Database reachable, FULLY migrated, and the cache reachable.
+   *
+   * "Fully migrated" is D-231: this used to accept any single row in
+   * `__drizzle_migrations`, so a half-applied deploy reported ready and traffic
+   * was routed into a schema missing four modules' tables. The cache check is
+   * D-230: without it, an instance whose Valkey is gone stayed in rotation
+   * serving logins on a per-instance rate-limit fallback.
    *
    * 503 while shutting down, before anything else is checked — during a drain
    * the process is perfectly healthy and must still stop receiving traffic.
    */
   app.get('/health/ready', async (_request, reply: FastifyReply) => {
     if (deps.isShuttingDown()) {
-      return reply.status(503).send({
-        status: 'shutting_down',
-        checks: { shutdown: false },
-      });
+      return reply.status(503).send({ status: 'shutting_down' });
     }
 
-    const database = await deps.checkDatabase();
-    const checks = {
-      database: database.reachable,
-      migrations: database.migrationsApplied,
-      // Reaching this line proves it: `platform/config` validates at import
-      // and exits the process on failure, so a running server has a valid
-      // config by construction. Reported anyway — an operator reading a
-      // readiness body should not have to know that.
-      config: true,
-    };
-    const ready = Object.values(checks).every(Boolean);
+    /**
+     * CONCURRENT, and both are awaited before either is judged.
+     *
+     * Sequencing them would make a readiness probe cost the sum of two
+     * deadlines while a load balancer holds the connection open, and the
+     * database probe already has its own deadline. `allSettled` is not needed:
+     * neither check rejects — each returns its own failure classification —
+     * which is a property of those two functions and is why this can be a
+     * plain `all`.
+     */
+    const [database, cache] = await Promise.all([deps.checkDatabase(), deps.checkCache()]);
 
-    return reply.status(ready ? 200 : 503).send({
-      status: ready ? 'ready' : 'not_ready',
-      checks,
-      database: {
-        latencyMs: database.latencyMs,
-        ...(database.error === undefined ? {} : { error: database.error }),
-      },
-    });
+    const ready =
+      database.reachable && database.migrationsApplied && cache.reachable;
+
+    /**
+     * A STATUS AND NOTHING ELSE — D-229.
+     *
+     * This body used to carry a `checks` map and a `database` object with the
+     * raw pg error in it. Readiness is consumed by a load balancer, which reads
+     * the STATUS CODE and nothing else; the body was for humans, and the humans
+     * it reached included anyone who could open a socket to the service. Every
+     * detail an operator needs is on `/health/deps`, which is the endpoint that
+     * exists for that question — and even there it is a classification, never a
+     * vendor message.
+     */
+    return reply.status(ready ? 200 : 503).send({ status: ready ? 'ready' : 'not_ready' });
   });
 
   /**
@@ -148,17 +196,31 @@ export function registerHealthRoutes(app: FastifyInstance, deps: HealthDeps): vo
    * the precise mistake §8 is written to prevent.
    */
   app.get('/health/deps', async () => {
-    const database = await deps.checkDatabase();
+    const [database, cache] = await Promise.all([deps.checkDatabase(), deps.checkCache()]);
     return {
       status: 'ok',
       time: deps.now().toISOString(),
       shuttingDown: deps.isShuttingDown(),
+      /**
+       * WHICH dependency is unhealthy, never WHY in vendor terms — D-229.
+       *
+       * `failure` is a closed union: 'unreachable' | 'timeout' |
+       * 'schema_incomplete'. That is enough to route an operator to the right
+       * runbook page and carries no host, no port, no username and no private
+       * address. The vendor detail belongs in the process's own logs, which
+       * are authenticated; this endpoint is not.
+       */
       database: {
         reachable: database.reachable,
         migrationsApplied: database.migrationsApplied,
         latencyMs: database.latencyMs,
-        ...(database.error === undefined ? {} : { error: database.error }),
+        failure: database.failure,
         pools: database.pools,
+      },
+      cache: {
+        reachable: cache.reachable,
+        latencyMs: cache.latencyMs,
+        failure: cache.failure,
       },
       breakers: deps.breakers().map((breaker) => ({
         name: breaker.name,

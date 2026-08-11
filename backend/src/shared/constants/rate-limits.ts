@@ -31,6 +31,23 @@ export const LOGIN_RATE_LIMIT: RateLimitRule = {
 /** forgot-password — 3 / hour, keyed by IP **and** by email. */
 export const FORGOT_PASSWORD_RATE_LIMIT: RateLimitRule = { limit: 3, windowSeconds: HOUR_SECONDS };
 
+/**
+ * logout — 30 / hour, keyed by IP. D-220.
+ *
+ * `POST /auth/logout` is deliberately NOT behind `requireSession` (logging out
+ * with an already-dead session must succeed, not 401), which for two build
+ * cycles also meant it was the ONE unauthenticated, UNTHROTTLED endpoint that
+ * reached the database — and the database it reached is the `auth` pool, the
+ * pool §3.1's bulkhead exists to keep free for login. Anyone could empty it from
+ * one host with a loop and no credentials.
+ *
+ * 30/hour rather than the 5 or the 3 above: logout is an ordinary action a real
+ * browser performs, a shared NAT multiplies it, and unlike login there is
+ * nothing to guess here — the limit is a flood bound, not a brute-force bound.
+ * A caller who exceeds it is not a user signing out.
+ */
+export const LOGOUT_RATE_LIMIT: RateLimitRule = { limit: 30, windowSeconds: HOUR_SECONDS };
+
 /** verify and reset — 10 / hour, keyed by IP. */
 export const TOKEN_ENDPOINT_RATE_LIMIT: RateLimitRule = { limit: 10, windowSeconds: HOUR_SECONDS };
 
