@@ -15,7 +15,7 @@ interface ChildSummaryProps {
 
 export function ChildSummary({ child }: ChildSummaryProps) {
   return (
-    <section aria-labelledby="child-summary-heading" className="product-anchor rounded-card border border-line bg-surface p-5 shadow-raised sm:p-6" id="child-summary">
+    <section aria-labelledby="child-summary-heading" className="product-anchor rounded-card border border-line bg-surface p-4 shadow-raised sm:p-6" id="child-summary">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-xs font-bold uppercase tracking-widest text-brand">Child summary</p>

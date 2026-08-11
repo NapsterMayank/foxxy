@@ -164,6 +164,26 @@ export async function registerIdentityRoutes(
   });
 
   /**
+   * THE FRONTEND'S SESSION BOOTSTRAP — 02-FRONTEND-IMPLEMENTATION-PLAN.md §5.5.
+   *
+   * The one endpoint that answers "am I signed in, and as whom". The session is
+   * an httpOnly cookie the browser cannot read, so this is not a convenience:
+   * it is the only way the question can be asked at all.
+   *
+   * 200 with the user, or 401. Nothing in between, and no 404 — a session
+   * whose user row has vanished is an unauthenticated caller, not a missing
+   * resource. See `IdentityService.getCurrentUser`.
+   *
+   * `LoginResponse` on purpose: sign-in and refresh return the identical shape,
+   * so the client parses one thing.
+   */
+  app.get(`${API_PREFIX}/auth/me`, authenticated, async (request, reply) => {
+    const user = await deps.service.getCurrentUser(requireActor(request));
+    const body: LoginResponse = { user: toUserProfile(user) };
+    return reply.status(200).send(body);
+  });
+
+  /**
    * §6.6. Deliberately NOT behind `requireSession`: logging out with an
    * already-dead session must succeed, not 401.
    *

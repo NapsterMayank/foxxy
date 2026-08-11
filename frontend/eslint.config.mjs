@@ -47,6 +47,47 @@ const architecturePlugin = {
         };
       },
     },
+    /**
+     * THE SILENT HALF OF A CLOSED SCALE — plan §9.1.
+     *
+     * `tailwind.config.ts` REPLACES the spacing scale rather than extending it,
+     * so `p-5` is not a utility. Tailwind does not warn about that; it emits
+     * nothing, and the element renders with no padding at all. This rule is
+     * what turns that silence into a build failure.
+     *
+     * The numbers below are the plan's eight values — 4 · 8 · 12 · 16 · 24 ·
+     * 32 · 48 · 64 px — and they must stay identical to `spacing` in the
+     * Tailwind config. Two lists that can disagree are one list too many, and
+     * the symptom of disagreement is either a false failure or a missing one.
+     */
+    'spacing-scale-only': {
+      meta: {
+        type: 'problem',
+        messages: {
+          offScale:
+            'Spacing utility "{{utility}}" is off the token scale (1 2 3 4 6 8 12 16). ' +
+            'Tailwind emits nothing for it, so the element renders with no spacing at all.',
+        },
+      },
+      create(context) {
+        const allowed = new Set(['0', 'px', '1', '2', '3', '4', '6', '8', '12', '16']);
+        const spacingUtility =
+          /\b(?:-)?(p|px|py|pt|pb|pl|pr|m|mx|my|mt|mb|ml|mr|gap|gap-x|gap-y|space-x|space-y|inset|inset-x|inset-y|top|right|bottom|left|scroll-m|scroll-p)-([0-9]+(?:\.[0-9]+)?|px)\b/g;
+
+        return {
+          JSXAttribute(node) {
+            if (node.name.name !== 'className') return;
+            const value = staticClassName(node);
+            if (!value) return;
+
+            for (const match of value.matchAll(spacingUtility)) {
+              if (allowed.has(match[2])) continue;
+              context.report({ node, messageId: 'offScale', data: { utility: match[0] } });
+            }
+          },
+        };
+      },
+    },
     'semantic-tailwind-only': {
       meta: {
         type: 'problem',
@@ -87,6 +128,7 @@ const config = [
     rules: {
       'architecture/no-cross-feature-imports': 'error',
       'architecture/semantic-tailwind-only': 'error',
+      'architecture/spacing-scale-only': 'error',
     },
   },
   {

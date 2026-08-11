@@ -45,7 +45,7 @@ function Field({
       {label}
       <input
         autoComplete={autoComplete}
-        className="mt-2 min-h-control w-full rounded-card border border-line bg-surface px-4 py-3 text-base font-normal text-ink outline-none transition-surface duration-150 placeholder:text-muted focus:border-brand focus:ring-4 focus:ring-brand/15"
+        className="mt-2 min-h-control w-full rounded-card border border-line bg-surface px-4 py-3 text-base font-normal text-ink outline-none transition-surface duration-micro placeholder:text-muted focus:border-brand focus:ring-4 focus:ring-brand/15"
         inputMode={inputMode}
         maxLength={maxLength}
         minLength={minLength}
@@ -175,7 +175,7 @@ export function AuthForm({ kind, preview, role }: AuthFormProps) {
   }
 
   return (
-    <form aria-busy={isLoading} className="space-y-5" method="post" onSubmit={handleSubmit}>
+    <form aria-busy={isLoading} className="space-y-6" method="post" onSubmit={handleSubmit}>
       {preview !== 'idle' ? (
         <p
           className="rounded-card border border-line bg-brand-subtle p-4 text-sm leading-6 text-ink"
@@ -198,7 +198,7 @@ export function AuthForm({ kind, preview, role }: AuthFormProps) {
       ) : null}
 
       <button
-        className="inline-flex min-h-control w-full items-center justify-center rounded-full bg-brand px-6 py-3 text-sm font-semibold text-white shadow-raised transition-surface duration-150 hover:bg-brand-strong hover:shadow-overlay focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press disabled:cursor-wait disabled:opacity-60"
+        className="inline-flex min-h-control w-full items-center justify-center rounded-full bg-brand px-6 py-3 text-sm font-semibold text-white shadow-raised transition-surface duration-micro hover:bg-brand-strong hover:shadow-overlay focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press disabled:cursor-wait disabled:opacity-60"
         data-motion="press"
         disabled={isLoading}
         type="submit"

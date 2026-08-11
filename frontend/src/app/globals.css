@@ -11,7 +11,26 @@
   --brand: 109 66 232;
   --brand-strong: 84 46 190;
   --brand-subtle: 244 240 255;
+  --brand-fg: 255 255 255;
   --logo: 234 88 12;
+
+  /*
+   * Status colours — shared by both themes, deliberately.
+   *
+   * THERE IS NO HARSH RED "WRONG". An incorrect answer uses `--info` with
+   * "Not yet" copy; `--danger` belongs to destructive actions a person chose
+   * — revoking a parent link, cancelling a subscription — and never to a
+   * child's answer. Plan §9.1 states this as a client constraint, and the
+   * distinction only survives if the two colours are separate tokens.
+   *
+   * Every value below is checked against `--surface` and against white at
+   * WCAG AA by `tests/e2e`'s contrast pass, in both themes.
+   */
+  --success: 21 128 61;
+  --warning: 161 98 7;
+  --danger: 185 28 28;
+  --info: 29 78 216;
+
   --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color-scheme: light;
 }

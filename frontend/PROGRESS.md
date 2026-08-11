@@ -1,8 +1,28 @@
 # Frontend Progress
 
-**Last verified:** 10 August 2026  
+**Last verified:** 12 August 2026  
 **Scope:** product application in `frontend/` and public marketing application in `website/`  
-**Status:** frontend-only preview is healthy; API/session, CMS and production content approval remain pending
+**Status:** the data layer is live — the product makes real, typed, credentialed API calls. Screens are still presentational; CMS and production content approval remain pending
+
+## Build-order step 0 and step 6 — 12 August 2026
+
+Four of the five foundation gaps in `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` §11 step 0 are closed, plus step 6 in full. **Tests 10 → 57.**
+
+| Piece | Files | What is load-bearing |
+|---|---|---|
+| Contract bridge | `scripts/sync-contracts.mjs`, `src/lib/api/generated/` | The backend's `shared/contracts` and `ERROR_CODES` are copied and committed; `contracts-drift.test.ts` runs the generator in `--check` mode. A direct cross-package import cannot work — `Dockerfile` copies `frontend/` alone, so `../backend/src` does not exist in the image and the build would fail on a path that resolves on every developer machine |
+| Error table (§5.6) | `src/lib/api/errors.ts` | Exhaustive switch over the GENERATED union, so a new backend code is a type error here. **A 403 on POST/PUT/PATCH/DELETE is `action-blocked`, never `session-expired`** — the backend returns 403 before 401 on state-changing requests, because the CSRF verdict must not depend on who the caller claims to be |
+| Typed client (§5.2) | `src/lib/api/client.ts` | `credentials: 'include'` on every request; the response is parsed against its Zod contract, so a backend change surfaces at the boundary instead of three components deep. It throws on 401 rather than redirecting — the redirect needs the query cache cleared in the same step, which a module-scope `location` assignment cannot do |
+| Session (§5.5) | `src/lib/session/`, `src/app/providers.tsx`, `src/components/layout/session-gate.tsx` | One bootstrap query, `loading \| authenticated \| unauthenticated`. **`loading` renders a skeleton and never redirects** — redirecting during bootstrap signs out every user on every refresh. Any 401 anywhere clears the cache and redirects with `?next=` |
+| Foxy streaming (§7) | `src/features/foxy/lib/sse.ts`, `hooks/use-foxy-stream.ts` | `fetch` + `ReadableStream` (the endpoint is a POST and `EventSource` is GET-only). Frames are buffered across chunk boundaries; unknown frame types are ignored so the backend can add a sixth. **All seven cases in §7 are tests.** The assistant bubble is created lazily on the first token, which is what makes "error before any token" an error state rather than an empty bubble |
+| Design tokens (§9.1) | `tailwind.config.ts`, `src/app/globals.css` | Spacing, type, radius, elevation and motion scales are REPLACED, not extended — an off-scale utility does not exist. Tailwind is silent about that (it emits nothing and the element renders with no spacing), so `architecture/spacing-scale-only` makes it a build failure. It caught five real breakages on existing screens the moment it was enabled |
+
+**Still open from step 0: the CI gates (§10.7)** — per-route and shared bundle budgets, Lighthouse LCP/TBT, axe on both journeys, contrast in both themes, visual regression, coverage floors. None has been proven to fail on a deliberate violation, which is the bar the backend's eight gates met.
+
+### Two plan corrections this work forced
+
+1. **The session bootstrap moved to a new backend endpoint.** §5.5 named `GET /me/profile` as the single source of truth for "am I authenticated". It cannot be: it returns a student profile, so a signed-in **parent gets 403** and an **un-onboarded student gets 404**, and neither response carries the role §5.5 needs for navigation and theme. `GET /api/v1/auth/me` now exists on the identity module, returns the same shape as login, and 401s without a session. Pinned by `backend/tests/integration/session-bootstrap.test.ts`.
+2. **There is no `proxy.ts` cookie presence check, deliberately.** §5.5 specifies one as a UX optimisation. The session cookie is host-only — the API sets no `Domain` — so the Next server on `app.<domain>` never receives it and the check would bounce every signed-in user to login. It would appear to work locally, where both apps are `localhost` and cookies ignore the port. Making it work means widening the cookie to `Domain=.<domain>`, handing it to the marketing site and every future subdomain. Declined; the cost is one skeleton render on a cold load. Recorded at the top of `session-gate.tsx`.
 
 ## Completed in this wave
 
@@ -75,7 +95,7 @@ The optimized production server was queried directly. `/`, all five secondary la
 |---|---|---|
 | Product | `npm run typecheck` | Pass |
 | Product | `npm run lint` | Pass, zero warnings |
-| Product | `npm test` | Pass: 10 tests in 6 files |
+| Product | `npm test` | Pass: **57 tests in 11 files** (12 August) |
 | Product | `npm run build` | Pass: 12 generated routes; preview dashboards static |
 | Product | `npm run test:e2e` | Pass: 8 tests across mobile and desktop production builds |
 | Product | `npm audit --omit=dev` | Pass: 0 vulnerabilities |
@@ -87,11 +107,12 @@ The optimized production server was queried directly. `/`, all five secondary la
 
 ## Still blocked by backend/database contracts
 
-1. Auth forms are intentionally presentational: no session creation, authenticated redirect, verification token, reset token, logout or current-user bootstrap exists yet.
-2. `/student` and `/parent` are public preview routes until the authoritative API session/role check is available. They must not be treated as protected data screens.
-3. The future browser API client must send `credentials: 'include'`; the API must use credentialed CORS with an explicit product origin, never `*`.
-4. Onboarding values, parent/child linking, progress evidence and dashboard activity do not persist yet.
-5. Foxy streaming, practice, billing, notifications and failure-state integration remain future phases. SSE work must include abort/reconnect handling and proxy buffering/timeouts.
+1. Auth forms are still presentational: no login, signup, verification-resend or reset call is wired to the client yet. **The current-user bootstrap now exists** (`GET /api/v1/auth/me`) and the session context consumes it.
+2. ~~`/student` and `/parent` are public preview routes~~ — **both route groups are now behind `SessionGate`**, which reads the session context, redirects an unauthenticated visitor with `?next=`, and refuses the wrong role. The authoritative check remains the API's, on every request.
+3. ~~The future browser API client must send `credentials: 'include'`~~ — **it does, on every request, and a test asserts it.** The API must still use credentialed CORS with an explicit product origin, never `*`; `CORS_READ_ORIGINS`/`CORS_WRITE_ORIGINS` must name the deployed product origin.
+4. Onboarding values, parent/child linking, progress evidence and dashboard activity do not persist yet — the screens are not wired to the client.
+5. **Foxy streaming is built and tested** (abort on unmount, retry after a mid-stream drop, no reconnect loop by design). Practice, billing, notifications and their failure states remain future phases. **Proxy buffering is still an unverified deployment risk**: the backend sends `X-Accel-Buffering: no`, and nothing has yet observed a real socket to confirm Caddy honours it — see the root progress file on the wire boundary.
+6. **Onboarding submits `english`/`hindi` where the generated contract accepts `en`/`hi`, and hardcodes grades 6-10.** Latent until the form is wired; the generated contract is now in the repository, so the disagreement is checkable.
 
 ## Still required before main-domain launch
 
@@ -107,9 +128,11 @@ The optimized production server was queried directly. `/`, all five secondary la
 
 ## Next implementation order
 
-1. Freeze the identity/session and shared response contracts with the backend team.
-2. Add one credentialed API client and wire auth/current-user behavior without duplicating server state.
-3. Protect role layouts with authoritative session/role handling, then replace preview fixtures incrementally.
-4. Implement the marketing CMS/editor preview and independent deployment pipeline.
-5. Complete i18n, legal content, approved assets and launch-content review.
-6. Implement Foxy, practice, progress, parent reporting and billing only as their backend contracts become stable.
+1. ✅ ~~Freeze the identity/session and shared response contracts~~ — generated from the backend, with a drift test.
+2. ✅ ~~Add one credentialed API client and wire current-user behavior~~ — done; the auth FORMS still need wiring to it.
+3. ✅ ~~Protect role layouts with session/role handling~~ — `SessionGate` on both route groups. Preview fixtures still need replacing screen by screen.
+4. **Close the CI gates (§10.7).** Bundle budgets, Lighthouse, axe, contrast, visual regression, coverage floors — and prove each one fails on a deliberate violation before trusting it. `@vitest/coverage-v8` is still not installed, so the floors cannot even be measured. **The build environment must set `NEXT_PUBLIC_API_URL`** — `lib/config/env.ts` throws without it, which is deliberate and will fail a CI build that does not.
+5. `components/ui` primitives and `components/patterns`, then the auth screens onto the live client.
+6. Implement the marketing CMS/editor preview and independent deployment pipeline.
+7. Complete i18n, legal content, approved assets and launch-content review.
+8. Build the Foxy chat UI on top of `useFoxyStream`, then practice, progress, parent reporting and billing.

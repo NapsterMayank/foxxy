@@ -148,6 +148,18 @@ export type UserProfile = z.infer<typeof userProfileSchema>;
 export const loginResponseSchema = z.object({ user: userProfileSchema });
 export type LoginResponse = z.infer<typeof loginResponseSchema>;
 
+/**
+ * `GET /api/v1/auth/me` — the frontend's session bootstrap, §5.5.
+ *
+ * DELIBERATELY THE SAME SHAPE AS LOGIN, and aliased rather than re-declared so
+ * it cannot become a different shape by accident. The frontend has one parser
+ * for "who am I", used on sign-in and on every page load, so the refresh path
+ * cannot drift from the sign-in path — which is the drift that produces a UI
+ * showing one identity and an API enforcing another.
+ */
+export const currentUserResponseSchema = loginResponseSchema;
+export type CurrentUserResponse = LoginResponse;
+
 export const okResponseSchema = z.object({ status: z.literal('ok') });
 export type OkResponse = z.infer<typeof okResponseSchema>;
 

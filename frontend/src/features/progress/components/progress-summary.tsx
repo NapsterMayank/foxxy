@@ -13,7 +13,7 @@ interface ProgressSummaryProps {
 
 export function ProgressSummary({ items, title }: ProgressSummaryProps) {
   return (
-    <section aria-labelledby="progress-heading" className="product-anchor rounded-card border border-line bg-surface p-5 shadow-raised sm:p-6" id="progress">
+    <section aria-labelledby="progress-heading" className="product-anchor rounded-card border border-line bg-surface p-4 shadow-raised sm:p-6" id="progress">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-xs font-bold uppercase tracking-widest text-brand">Learning evidence</p>

@@ -1,6 +1,6 @@
 export function StudentIllustration() {
   return (
-    <svg className="h-28 w-28" viewBox="0 0 120 120" fill="none" role="presentation">
+    <svg className="h-illustration w-illustration" viewBox="0 0 120 120" fill="none" role="presentation">
       <circle cx="60" cy="60" r="52" fill="currentColor" opacity="0.08" />
       <path d="M35 87c2-20 12-30 25-30s23 10 25 30" fill="currentColor" opacity="0.22" />
       <circle cx="60" cy="42" r="17" fill="currentColor" opacity="0.35" />
@@ -12,7 +12,7 @@ export function StudentIllustration() {
 
 export function ParentIllustration() {
   return (
-    <svg className="h-28 w-28" viewBox="0 0 120 120" fill="none" role="presentation">
+    <svg className="h-illustration w-illustration" viewBox="0 0 120 120" fill="none" role="presentation">
       <circle cx="60" cy="60" r="52" fill="currentColor" opacity="0.08" />
       <circle cx="45" cy="43" r="15" fill="currentColor" opacity="0.4" />
       <circle cx="77" cy="49" r="12" fill="currentColor" opacity="0.28" />

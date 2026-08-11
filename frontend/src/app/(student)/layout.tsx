@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { ProductShell, type ProductNavigationItem } from '@/components/layout/product-shell';
+import { SessionGate } from '@/components/layout/session-gate';
 
 const navigation: readonly ProductNavigationItem[] = [
   { href: '/student', isCurrent: true, label: 'Learn', marker: '⌂' },
@@ -10,9 +11,11 @@ const navigation: readonly ProductNavigationItem[] = [
 export default function StudentLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
     <div data-theme="student">
-      <ProductShell navigation={navigation} roleLabel="Student preview" userName="Aarav">
-        {children}
-      </ProductShell>
+      <SessionGate role="student">
+        <ProductShell navigation={navigation} roleLabel="Student preview" userName="Aarav">
+          {children}
+        </ProductShell>
+      </SessionGate>
     </div>
   );
 }

@@ -104,10 +104,10 @@ export function OnboardingForm({ role }: OnboardingFormProps) {
   }
 
   return (
-    <form className="space-y-5" method="post" onSubmit={handleSubmit}>
+    <form className="space-y-6" method="post" onSubmit={handleSubmit}>
       {role === 'parent' ? <ParentFields /> : <StudentFields />}
       <button
-        className="inline-flex min-h-control w-full items-center justify-center rounded-full bg-brand px-6 py-3 text-sm font-semibold text-white shadow-raised transition-surface duration-150 hover:bg-brand-strong hover:shadow-overlay focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press"
+        className="inline-flex min-h-control w-full items-center justify-center rounded-full bg-brand px-6 py-3 text-sm font-semibold text-white shadow-raised transition-surface duration-micro hover:bg-brand-strong hover:shadow-overlay focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press"
         data-motion="press"
         type="submit"
       >

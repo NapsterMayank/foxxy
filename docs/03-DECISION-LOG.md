@@ -6327,3 +6327,132 @@ container, no module and no database. Their value is the NEGATIVE cases —
 inside `content`, and a non-`Error` rejection — every one of which was a 404 before
 D-325 and would be a 404 again the moment somebody "simplified" the catch. Restoring
 the bare catch turns five named tests red.
+
+---
+
+### D-335 · `GET /me/profile` cannot be the session bootstrap — a signed-in parent gets 403
+
+`02-FRONTEND-IMPLEMENTATION-PLAN.md` §5.5 names one endpoint as the single source of
+truth for "am I authenticated, and as whom", and forbids any other route to that
+question. It named `GET /api/v1/me/profile`.
+
+That route returns a STUDENT profile for `actor.userId`. Measured, not reasoned about:
+
+| Caller | `/me/profile` |
+|---|---|
+| Signed-in parent | **403** — `platform/authz` refuses a parent reading a student profile before any row is looked for |
+| Signed-in student who has not onboarded | **404** — no `students` row yet |
+| No session | 401 |
+
+So the two commonest authenticated states on a cold page load produce two different
+error statuses, and §5.6 assigns 403-on-a-GET the treatment "show a no-access state".
+A frontend bootstrapping here has to read "you are signed in" out of the one response
+the error table says means the opposite — and the failure mode is the worst one in a
+cookie-session application: signed-in users bounced to login on refresh.
+
+`studentProfileSchema` also carries no `role` and no `email`, and §5.5 requires the
+role in the bootstrap response to choose navigation and theme.
+
+**Decision:** `GET /api/v1/auth/me` on `identity`, the module that owns sessions.
+It returns `LoginResponse` — the SAME shape as login, aliased in the contract as
+`currentUserResponseSchema` rather than re-declared, so the frontend has one parser
+for "who am I" and the refresh path cannot drift from the sign-in path.
+
+A session whose user row has vanished is `UnauthenticatedError`, **never**
+`NotFoundError`: the actor came from a validated session, so a missing row means the
+account was deleted underneath it. 404 would tell the client "you are signed in and
+the thing you asked for is gone" and it would keep the dead session; 401 is what the
+whole client already handles — clear the context, clear the cache, go to login.
+
+`tests/integration/session-bootstrap.test.ts` pins all three states with identity AND
+learner mounted, which is the only configuration where the contrast is visible; the
+identity-only route suite would assert a 404 that is really "route not registered".
+
+---
+
+### D-336 · The frontend proxy cookie check is impossible, and would have worked in development
+
+§5.5 specifies a Next proxy (the 16.x rename of middleware) doing a cookie PRESENCE
+check ahead of the layout guard — cookie absent, redirect to login — explicitly as a
+user-experience optimisation and explicitly not a security boundary.
+
+It cannot work. `identity.plugin.ts`'s `buildCookieOptions` sets no `Domain`, so the
+session cookie is HOST-ONLY to `api.<domain>`. The Next server on `app.<domain>` never
+receives it. A presence check there reads "absent" for every signed-in user and
+redirects all of them to login.
+
+The dangerous part is that it would pass every local test: in development both apps are
+`localhost` and cookies ignore the port, so the cookie IS visible to the Next server.
+Correct on every developer machine, broken for every real user — the shape of defect
+this log exists to prevent.
+
+**Decision:** no proxy check. Route protection is the layout guard reading the session
+context, which §5.5 also requires and which works regardless of cookie scope. The
+alternative — widening the cookie to `Domain=.<domain>` — hands it to the marketing
+site and every future subdomain, a real security downgrade bought with a skeleton
+flash. The cost of the deviation is one render of a skeleton on a cold load.
+
+Recorded at the top of `frontend/src/components/layout/session-gate.tsx`, where
+somebody about to "fix the missing middleware" will read it.
+
+---
+
+### D-337 · Backend contracts are GENERATED into the frontend, not imported
+
+§5.1 is absolute: a type the backend returns is defined once, in
+`backend/src/shared/contracts/`, and a hand-written mirror on the frontend is
+forbidden. The obvious way to honour that is a direct import across the two packages.
+
+It cannot exist. `frontend/Dockerfile` copies `frontend/` and nothing else, so
+`../backend/src` is absent inside the image: the production build fails on a path that
+resolves perfectly on every developer's machine and in every test run. §5.1 anticipates
+this — "if the two packages cannot import from each other directly, generate the types
+from the backend contracts as a build step — but there is still exactly one
+definition".
+
+**Decision:** `frontend/scripts/sync-contracts.mjs` copies the eight `*.contract.ts`
+files, the four constants modules they import, and the `ERROR_CODES` declaration into
+`frontend/src/lib/api/generated/`, which is committed. `--check` mode fails on any
+difference, and `contracts-drift.test.ts` runs it — so a stale copy, or an edit made
+directly to a generated file, fails the build with the command that fixes it.
+
+The test SKIPS when `../backend` is absent rather than failing, because the frontend
+image builds from `frontend/` alone and a check that cannot run there would become a
+red suite people learn to ignore. CI checks out the whole repository, so the gate is
+real where it matters.
+
+The `ERROR_CODES` extraction is deliberately brittle: it throws if the declaration is
+renamed or stops ending in `} as const;`. A generator that silently emitted an empty
+union would make §5.6's exhaustive switch vacuous — every code would compile as
+handled, which is the precise failure the switch exists to prevent.
+
+---
+
+### D-338 · The frontend spacing scale is CLOSED, and Tailwind is silent about violations
+
+§9.1 fixes the scales — spacing at 4·8·12·16·24·32·48·64px, "nothing between". The
+config previously EXTENDED Tailwind's defaults, which meant the scale was a suggestion:
+`p-5`, `w-64` and `h-80` were all in use and all rendered fine.
+
+Replacing `theme.spacing` rather than extending it makes an off-scale utility not
+exist. That is the correct behaviour and it has one hazard: **Tailwind does not warn.**
+It emits no class, and the element renders with no padding at all — a visual defect
+with no error, no log line and no failing test.
+
+**Decision:** replace the scales AND add `architecture/spacing-scale-only` to
+`eslint.config.mjs`, which rejects any numeric spacing utility outside the eight
+values. The allowed list must stay identical to `spacing` in `tailwind.config.ts`; two
+lists that can disagree produce either a false failure or a missed one.
+
+Switching the rule on immediately found five real breakages the migration had missed,
+including `pb-28` on the mobile bottom-navigation clearance — which would have silently
+put the last card of every student screen underneath the nav bar.
+
+Layout sizes are NOT spacing and are named instead: `w-sidebar`, `h-panel`,
+`w-illustration`, `pb-nav`. A sidebar is 16rem because that is how wide a sidebar is,
+not because 16rem is four steps up a padding scale.
+
+The rule inherits D-031's known hole: `staticClassName()` only unwraps a bare literal,
+so `className={cx('p-5')}` is not flagged. That matters more here than for the brand
+rule — a missed brand literal renders the wrong colour, a missed spacing utility
+renders no spacing at all.

@@ -21,7 +21,7 @@ function NavigationLink({ href, isCurrent = false, label, marker }: ProductNavig
     <Link
       aria-current={isCurrent ? 'page' : undefined}
       className={cx(
-        'group flex min-h-control items-center gap-3 rounded-xl px-3 py-2 text-sm font-semibold transition-surface duration-150 hover:bg-brand-subtle hover:text-brand-strong focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press',
+        'group flex min-h-control items-center gap-3 rounded-md px-3 py-2 text-sm font-semibold transition-surface duration-micro hover:bg-brand-subtle hover:text-brand-strong focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press',
         isCurrent ? 'bg-brand-subtle text-brand-strong' : 'text-muted',
       )}
       data-motion="press"
@@ -29,7 +29,7 @@ function NavigationLink({ href, isCurrent = false, label, marker }: ProductNavig
     >
       <span
         aria-hidden="true"
-        className="grid size-8 place-items-center rounded-lg bg-brand-subtle text-xs font-extrabold text-brand group-hover:bg-surface"
+        className="grid size-8 place-items-center rounded bg-brand-subtle text-xs font-extrabold text-brand group-hover:bg-surface"
       >
         {marker}
       </span>
@@ -41,7 +41,7 @@ function NavigationLink({ href, isCurrent = false, label, marker }: ProductNavig
 function Brand() {
   return (
     <Link className="inline-flex items-center gap-2 font-extrabold tracking-tight text-ink" href="/">
-      <span aria-hidden="true" className="grid size-9 place-items-center rounded-xl bg-brand text-white">
+      <span aria-hidden="true" className="grid size-9 place-items-center rounded-md bg-brand text-white">
         A
       </span>
       <span>Alfanumrik</span>
@@ -72,7 +72,7 @@ export function ProductShell({ children, navigation, roleLabel, userName }: Prod
       </header>
 
       <div className="mx-auto flex max-w-shell">
-        <aside className="hidden w-64 shrink-0 border-r border-line px-4 py-8 lg:block">
+        <aside className="hidden w-sidebar shrink-0 border-r border-line px-4 py-8 lg:block">
           <nav aria-label={`${roleLabel} navigation`} className="space-y-2">
             {navigation.map((item) => (
               <NavigationLink key={item.href} {...item} />
@@ -86,7 +86,7 @@ export function ProductShell({ children, navigation, roleLabel, userName }: Prod
           </div>
         </aside>
 
-        <main className="min-w-0 flex-1 px-4 pb-28 pt-6 sm:px-6 sm:pt-8 lg:px-8 lg:pb-10">{children}</main>
+        <main className="min-w-0 flex-1 px-4 pb-nav pt-6 sm:px-6 sm:pt-8 lg:px-8 lg:pb-12">{children}</main>
       </div>
 
       <nav
@@ -98,7 +98,7 @@ export function ProductShell({ children, navigation, roleLabel, userName }: Prod
           <Link
             aria-current={item.isCurrent ? 'page' : undefined}
             className={cx(
-              'flex min-h-control flex-col items-center justify-center gap-1 rounded-xl px-2 py-1 text-center text-xs font-semibold transition-surface duration-150 hover:bg-brand-subtle hover:text-brand-strong focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press',
+              'flex min-h-control flex-col items-center justify-center gap-1 rounded-md px-2 py-1 text-center text-xs font-semibold transition-surface duration-micro hover:bg-brand-subtle hover:text-brand-strong focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press',
               item.isCurrent ? 'bg-brand-subtle text-brand-strong' : 'text-muted',
             )}
             data-motion="press"

@@ -29,7 +29,7 @@ export default function ParentDashboardPage() {
 
       <ChildSummary child={sampleChild} />
 
-      <section aria-labelledby="updates-heading" className="product-anchor rounded-card border border-line bg-surface p-5 shadow-raised sm:p-6" id="updates">
+      <section aria-labelledby="updates-heading" className="product-anchor rounded-card border border-line bg-surface p-4 shadow-raised sm:p-6" id="updates">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <p className="text-xs font-bold uppercase tracking-widest text-brand">Recent updates</p>

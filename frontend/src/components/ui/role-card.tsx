@@ -13,7 +13,7 @@ interface RoleCardProps {
 export function RoleCard({ action, description, href, illustration, label, theme }: RoleCardProps) {
   return (
     <article
-      className="group flex h-full flex-col overflow-hidden rounded-card border border-line bg-surface shadow-raised transition-surface duration-200 hover:-translate-y-1 hover:shadow-overlay"
+      className="group flex h-full flex-col overflow-hidden rounded-card border border-line bg-surface shadow-raised transition-surface duration-transition hover:-translate-y-1 hover:shadow-overlay"
       data-motion="lift"
       data-theme={theme}
     >

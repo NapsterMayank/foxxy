@@ -355,6 +355,7 @@ describe('the authenticated routes', () => {
     ['POST', '/api/v1/links/00000000-0000-4000-8000-000000000001/approve'],
     ['POST', '/api/v1/links/00000000-0000-4000-8000-000000000001/revoke'],
     ['GET', '/api/v1/links/children'],
+    ['GET', '/api/v1/auth/me'],
     ['POST', '/api/v1/auth/logout-all'],
   ])('%s %s returns 401 without a session', async (method, url) => {
     const response =
@@ -388,6 +389,59 @@ describe('the authenticated routes', () => {
   it('refuses a student listing children', async () => {
     const cookie = await onboard('s@example.test', 'student');
     expect((await get('/api/v1/links/children', cookie)).statusCode).toBe(403);
+  });
+});
+
+/**
+ * THE FRONTEND'S SESSION BOOTSTRAP — 02-FRONTEND-IMPLEMENTATION-PLAN.md §5.5.
+ *
+ * §5.5 originally named `GET /me/profile` as the single source of truth for
+ * "am I authenticated". It cannot be: that route returns a STUDENT profile, so
+ * a signed-in parent gets a 404 and an un-onboarded student gets the same 404
+ * for a different reason, and neither response carries the role §5.5 needs to
+ * pick navigation and theme. A frontend reading "authenticated" out of a 404 is
+ * a frontend that signs people out on refresh.
+ *
+ * The tests below pin the three properties the client depends on: BOTH ROLES
+ * get 200, the shape is the login shape, and no session is 401 rather than
+ * anything else (asserted in the table above, alongside the other authenticated
+ * routes, so a new route cannot be added without meeting the same bar).
+ */
+describe('GET /api/v1/auth/me — the session bootstrap', () => {
+  it('answers a student with the same shape as login', async () => {
+    const cookie = await onboard('kid@example.test', 'student');
+    const response = await get('/api/v1/auth/me', cookie);
+
+    expect(response.statusCode).toBe(200);
+    const body = loginResponseSchema.parse(response.json());
+    expect(body.user.email).toBe('kid@example.test');
+    expect(body.user.role).toBe('student');
+    expect(body.user.emailVerifiedAt).not.toBeNull();
+  });
+
+  /**
+   * THE CASE `/me/profile` CANNOT SERVE. A parent has no `students` row, so the
+   * route §5.5 first named would 404 here — which is why the bootstrap moved.
+   */
+  it('answers a parent with 200, not the 404 a student-profile route would give', async () => {
+    const cookie = await onboard('mum@example.test', 'parent');
+    const response = await get('/api/v1/auth/me', cookie);
+
+    expect(response.statusCode).toBe(200);
+    expect(loginResponseSchema.parse(response.json()).user.role).toBe('parent');
+
+    // The contrast — a parent getting 404 from `/me/profile` — is NOT asserted
+    // here on purpose: this harness registers identity alone, so that route
+    // does not exist and the assertion would pass for the wrong reason. It is
+    // pinned where learner's routes are actually mounted, in
+    // `tests/integration/session-bootstrap.test.ts`.
+  });
+
+  it('never returns the password hash', async () => {
+    const cookie = await onboard('kid@example.test', 'student');
+    const raw = (await get('/api/v1/auth/me', cookie)).payload;
+    expect(raw).not.toContain('passwordHash');
+    expect(raw).not.toContain('fake$');
   });
 });
 

@@ -14,7 +14,7 @@ export function ButtonLink({ children, className, href, label }: ButtonLinkProps
     <Link
       aria-label={label}
       className={cx(
-        'inline-flex min-h-control items-center justify-center rounded-full bg-brand px-6 py-3 text-sm font-semibold text-white shadow-raised transition-surface duration-150 hover:bg-brand-strong hover:shadow-overlay focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press',
+        'inline-flex min-h-control items-center justify-center rounded-full bg-brand px-6 py-3 text-sm font-semibold text-white shadow-raised transition-surface duration-micro hover:bg-brand-strong hover:shadow-overlay focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25 active:scale-press',
         className,
       )}
       data-motion="press"

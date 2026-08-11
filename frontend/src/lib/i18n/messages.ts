@@ -25,4 +25,17 @@ export const messages = {
     description: 'Try loading this section again. Check your entries before continuing.',
     action: 'Try again',
   },
+  /**
+   * The session gate. Deliberately says nothing about WHY access was refused —
+   * §5.6's rule for a 403 on a read is "a no-access state carrying no detail
+   * about what exists", and a message naming the required role is that detail.
+   */
+  session: {
+    checking: 'Checking your account',
+    noAccess: {
+      title: 'This space is not available for your account',
+      description: 'Sign in with the account that has access, or return to the start.',
+      action: 'Back to sign in',
+    },
+  },
 } as const;

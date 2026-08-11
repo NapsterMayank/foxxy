@@ -12,7 +12,7 @@ export default function RoleSelectionPage() {
         </span>
       </header>
 
-      <section className="mx-auto flex w-full max-w-4xl flex-1 flex-col justify-center py-10 sm:py-16">
+      <section className="mx-auto flex w-full max-w-4xl flex-1 flex-col justify-center py-12 sm:py-16">
         <div className="mx-auto max-w-xl text-center">
           <p className="text-sm font-semibold uppercase tracking-widest text-brand">{messages.eyebrow}</p>
           <h1 className="mt-3 text-3xl font-extrabold tracking-tight text-ink sm:text-4xl">

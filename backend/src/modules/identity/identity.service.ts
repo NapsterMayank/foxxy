@@ -254,6 +254,40 @@ export interface IdentityService {
   logout(token: string | undefined, context: RequestContext): Promise<void>;
   logoutAll(actor: SessionActor): Promise<number>;
   validateSession(token: string | undefined): Promise<SessionActor>;
+  /**
+   * ==========================================================================
+   * THE FRONTEND'S BOOTSTRAP — 02-FRONTEND-IMPLEMENTATION-PLAN.md §5.5.
+   *
+   * The session lives in an httpOnly cookie, so the browser CANNOT READ IT.
+   * "Am I signed in, and as whom" therefore has exactly one answer in the whole
+   * product: ask the API. §5.5 names one endpoint for it and forbids any other
+   * route to that question, because a second one is a second thing to keep
+   * consistent and the symptom of inconsistency is auth flicker on every page
+   * load.
+   *
+   * §5.5 named `GET /me/profile` for this and that route CANNOT serve it. It
+   * returns a STUDENT profile — a parent has no `students` row, so a signed-in
+   * parent gets 404, and an un-onboarded student gets the same 404 for an
+   * entirely different reason. It also carries no role and no email, and §5.5
+   * requires the role in the bootstrap response in order to choose navigation
+   * and theme. Any frontend built on it would have to read "authenticated" out
+   * of a 404, which is how a logged-in user gets bounced to login.
+   *
+   * So the bootstrap is here, on the module that owns sessions, and it returns
+   * THE SAME SHAPE AS LOGIN. One parser on the frontend, one contract, and the
+   * refresh path cannot diverge from the sign-in path.
+   *
+   * ---------------------------------------------------------------------------
+   * A MISSING USER IS `UnauthenticatedError`, NOT `NotFoundError`.
+   *
+   * The actor came from a validated session, so reaching this with no row means
+   * the account was deleted underneath a live session. 404 would tell the
+   * frontend "you are signed in and the thing you asked for is gone", and it
+   * would keep the dead session. 401 is what the whole client already knows how
+   * to handle — clear the context, clear the query cache, go to login.
+   * ==========================================================================
+   */
+  getCurrentUser(actor: SessionActor): Promise<UserRecord>;
   requestPasswordReset(input: ForgotPasswordRequest, context: RequestContext): Promise<void>;
   resetPassword(input: ResetPasswordRequest, context: RequestContext): Promise<void>;
   generateLinkCode(actor: SessionActor): Promise<{ code: string; expiresAt: Date }>;
@@ -867,6 +901,29 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
       }
 
       return { userId: found.userId, role: found.role, tenantId: found.tenantId };
+    },
+
+    /**
+     * The frontend bootstrap. See the interface for why it lives here and not
+     * on `learner`.
+     *
+     * It re-reads the row rather than projecting the actor, and that is the
+     * point: the actor carries `userId`, `role` and `tenantId` and nothing a
+     * person sees. The email and the verification timestamp decide whether the
+     * client shows a resend-verification affordance, and they can change during
+     * a session — a row read answers as of now, a session projection answers as
+     * of sign-in.
+     */
+    async getCurrentUser(actor: SessionActor): Promise<UserRecord> {
+      const user = await repository.findUserById(actor.userId);
+      if (user === null) {
+        // 401, never 404. See the interface.
+        throw new UnauthenticatedError('Authentication required.', {
+          message: 'Session valid but user row absent',
+          details: { userId: actor.userId },
+        });
+      }
+      return user;
     },
 
     /**
