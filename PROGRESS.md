@@ -16,6 +16,7 @@ Last updated: **10 August 2026**
 | Flows | Student · Parent |
 | Core capability | Foxy — NCERT-grounded RAG tutor with citations |
 | Retrieval | **CALIBRATED.** Sparse half rewritten to OR + `ts_rank_cd`: zero-candidate rate **44.4% to 0.0%**, mean candidates 3.87 to 49.19. Abstain threshold is now **MEASURED** (0.029877) against real voyage-3 distributions, on a 5% false-abstain budget rather than the midpoint, which would have wrongly refused 24% of answerable questions (D-216) |
+| Dev database | **`foxxy_dev`, provisioned clean 11 August.** The previous one was a fossil of the superseded chain - it held the corpus but had none of the practice, parent, foxy, billing or notification-preference tables, and its ledger carried timestamps above the current baseline, so `db:migrate` would have skipped two migrations and reported success. New database, 7 migrations verified table by table, corpus re-imported from the local extract. **The armed migration hazard is gone** |
 | Corpus | **IMPORTED.** 137 chapters · 4,686 chunks · 2,741 questions · 639 concepts · 176 edges · 57 misconception patterns |
 | Architecture | Modular backend + isolated product frontend + marketing/CMS deployable |
 | Team | 1 engineer |
@@ -25,53 +26,42 @@ Last updated: **10 August 2026**
 | Backend processes | **2** — `api` and `worker`. The worker exists and runs one real job |
 | Frontend | **scaffolded** - 81 source files under `frontend/src`, committed. Build-order step 0 (the five foundation gaps) not yet closed |
 | Marketing site | **scaffolded** - 32 files under `website/`, committed. Per `06-FRONTEND-SEPARATION-PLAN.md` |
-| Tests | **2,926 passing**, 165 files. Two audit waves added 416 between them. Every guard in the codebase has now been broken deliberately and confirmed to turn a named test red - see D-214 and section 9 |
+| Tests | **3,166 passing**, 184 files. Three audit waves have added 656 between them. **Every guard, threshold and validation in the codebase has been broken deliberately and confirmed to turn a named test red** - see D-214 |
 | Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice` + `0003_parent` + **`0004_billing`** + **`0005_foxy`**. Every one has a rollback test, because the round-trip is asserted over the DISCOVERED set rather than per file (D-126) — neither `0004` nor `0005` needed an edit to that test. **Neither has been applied to the development database**, deliberately, for the same reason `0002` has not: see open item 16. ✅ **`0004_billing`'s journal `when` is FIXED** — it was 1786374108357, below `0003_parent`'s 1786700000000, which is the exact D-109 hazard: drizzle selects by `when` and not by `idx`, so on any database already past `0003` it printed "Migrations applied." and applied nothing. **Reproduced on a scratch database before the fix** (`subscriptions` and `payment_events` absent, `0005` applied over the hole, exit code zero), corrected to **1786750000000**, and re-verified both from empty and from a ledger primed to `0003`. The rule is now enforced by `tests/integration/migration-journal-order.test.ts`, which was itself proved to fire by reverting the value. The round-trip test could not have caught this and never could: it applies by `idx` and never reads `when` (D-173, D-174) |
 | Gates | type-check · lint · build · test — all green. `platform/authz` stays **100%**; `billing/domain` 98.5% statements / 96.2% branches / 100% functions, `billing.service` 99.2% / 95.1% / 90%, `platform/payments` 100% statements. `parent/domain` 100%, `parent.service` 94.0%, `retrieval` 99.1%, `practice/domain` 100%. **`modules/foxy` 96.3% statements / 90.4% branches / 94.6% functions**, with `foxy/domain` at 100%/99.0%/100% and `platform/llm` at 98.5% — the real LLM adapter is fully covered and never called |
 | Deployment | **BUILT, 10 August.** `docker/compose.prod.yml` — postgres+pgvector · valkey · api · worker · alert evaluator · frontend · website · Caddy · backup. Three multi-stage non-root Dockerfiles, resource limits on EVERY service, an `internal: true` data network with no published ports, and volume names (`foxxy_prod_*`) that cannot collide with the development ones holding the corpus (D-140). Validated with `docker compose config` |
 | CI/CD | **BUILT, 10 August.** `.github/workflows/` — `ci.yml` (change detection · secret scan · infrastructure checks · `ci-gate` fan-in) calling per-app `backend-ci.yml` / `frontend-ci.yml` / `website-ci.yml`. A documentation-only change runs the secret scan and nothing else. Migrations are an EXPLICIT step, never on boot (D-145). **Eight gates, each proven to FAIL on a deliberate violation** — see §3 |
 | Backups | **BUILT AND DRILLED, 10 August.** Continuous WAL archiving plus a nightly base backup to a SECOND volume; `restore.sh`, `restore-drill.sh` and `drill-selftest.sh`. The drill was EXECUTED against a scratch database: PASS on a good backup, FAIL on a tampered one. Two real defects were found by running it (D-149) |
 | Alerting | **BUILT, 10 August.** `backend/scripts/ops/` — 11 rules over 9 signals read from `metrics_events`, split explicitly into what PAGES a human and what files a TICKET, delivered through the existing `notify-channel` port rather than a second notification path (D-147) |
-| Estimated remaining | **~85 days ≈ 17 weeks solo.** Backend is feature-complete and twice-audited; what remains is content generation, the frontend, and the integration suite |
-| Git | **8 commits**, latest `35466d7`. Working tree clean. No remote configured - **CI has therefore never executed a single job** across 165 test files |
+| Estimated remaining | **~80 days ≈ 16 weeks solo.** Backend is feature-complete and audited three times |
+| Git | **9 commits**, latest `b6225f2`. Working tree clean. No remote configured - **CI has never executed a single job** across 184 test files |
 
 ---
 
 ## 2. THE NEXT ACTION
 
-> **Two hazards to clear, then three things only the owner can supply.**
+> **Three things only the owner can supply. Everything else is unblocked, and the database hazard is now cleared.**
 
-### Hazard 1 - the dev corpus database has an ARMED migration hole
-
-Its `__drizzle_migrations` ledger holds **10 rows from the superseded chain**, ending at `when = 1786500000000`. The current chain's baseline is `1786339780311` - **below it**. drizzle selects by `when`, never by `idx`, so running `db:migrate` against that database would **skip `0000_baseline` and `0001_pedagogy`** and apply `0002` through `0006` over a schema built by entirely different files.
-
-It would print `Migrations applied.` and exit 0.
-
-**Do not run `db:migrate` against the corpus database until this ledger is reconciled.** This is D-174 sitting armed rather than theoretical.
-
-### Hazard 2 - `docker/.env.prod` drifted and nothing could see it
-
-It is gitignored, so no CI check could catch it falling behind `.env.prod.example` after the SMTP work. It has been filled in; a backup sits at `docker/.env.prod.bak-preflight` for the owner to delete. **The lesson is recorded in D-279:** "the env contract is green" and "the stack will start" are different claims, and only the first is testable in CI.
-
-### Then, three things only the owner can supply
-
-1. **`LLM_API_KEY` in `backend/.env`.** Foxy runs on a scripted fake that does not read the prompt, so **answer quality is entirely unmeasured**. This also gates all content generation - hint ladders, misconception tags and Hindi questions remain at zero.
-2. **A git remote.** Four workflows exist and every gate was proven to fail locally, but **GitHub Actions has never executed a single job** against 165 test files. Path-scoping, service containers and the secret scanner are unverified in their real environment.
-3. **Reconcile or accept the dev ledger** (hazard 1). A fresh database is the cheap answer if nothing in it is precious beyond the corpus, which can be re-imported from `.corpus-extract/` in minutes.
+1. **`LLM_API_KEY` in `backend/.env`.** Foxy runs on a scripted fake that does not read the prompt, so **answer quality is entirely unmeasured**. This also gates all content generation - hint ladders, misconception tags and Hindi questions are still at zero.
+2. **A git remote.** Four workflows exist and every gate was proven to fail locally, but **GitHub Actions has never executed a single job** across 184 test files.
+3. **Confirm the Foxy caps.** Set to `free: 20 / plus: 200` by default and now pinned to literals. They had drifted to 5000/9000, which is a 1.8x differentiator on a cap no student reaches - structurally a paid tier, commercially nothing.
 
 ### Unblocked and ready
 
 | | Days |
 |---|---|
-| Integration suite - the two golden journeys | 3 |
-| Frontend build-order step 0 - the five foundation gaps, still not closed | 4 |
-| Remaining open items in section 7, and the D-280 residue list | 3 |
+| **A socket-level smoke test** - the only untested boundary in the backend | 1 |
+| A Postman collection generated from the route definitions | 0.5 |
+| Frontend build-order step 0 - the five foundation gaps, still not started | 4 |
+| Remaining open items in section 7 | 3 |
 
-### The standard this codebase is now held to
+### The wire boundary is the one thing three audits could not reach
 
-**A guard is not enforced until a mutation of it has been shown to turn a named test red.** Two audit waves have found **fifteen** defects of one shape - enforcement that looks installed and enforces nothing - and every one was found by deliberate breakage rather than by review, coverage, or a passing suite. Among them: an ESLint rule whose glob matched zero files, a coverage gate never proven, a rate limiter hooked where no actor exists, four tenant checks comparing a value with itself, a CI shell gate whose glob matched nothing, a `trustProxy: true` that collapsed every IP-keyed limit, and a boot-gate test that asserted gate *order* while claiming to assert gate *content*.
+Every HTTP test runs through Fastify's `app.inject`, which calls the handler stack directly. Real routing, real plugins, real Postgres - **no socket**. So none of this has ever been exercised: CORS preflight from a browser origin, cookies as a client actually handles them, chunked transfer encoding, keep-alive, compression, TLS.
 
-Seven modules now carry an `*.authz-mutation.test.ts`. That is the pattern to copy for anything new.
+**The one that matters is SSE.** `app.inject` collects the whole response and hands it back as a single payload, so every Foxy streaming test - including the incremental citation-stripping fix, whose entire point is that a fabricated marker must never reach the student *mid-stream* - has only ever observed frames **after the response completed**. The property under test is "arrives incrementally"; the harness cannot distinguish incremental from buffered.
+
+A scripted smoke test over a real socket, asserting measurable time between frames, is the only thing that closes it.
 
 ---
 
@@ -744,6 +734,7 @@ per-chapter counts are in `.corpus-extract/reports/chapter-readiness.ndjson`.
 | 10 Aug 2026 | **Deployment, CI/CD, backups and alerting.** `docker/compose.prod.yml` (9 services, resource limits on every one, an `internal: true` data network with no published ports, volume names that cannot collide with the corpus); three multi-stage non-root Dockerfiles; Caddy for three hostnames with a **dedicated SSE policy** — buffering off, 300s upstream read — because getting it wrong breaks Foxy while looking like a model problem. Path-scoped per-app workflows plus a real `ci-gate` fan-in; a self-testing secret scanner closing D-096; migrations as an explicit step that CHECKS THE CATALOGUE (D-109). Continuous WAL archiving + nightly base backup to a SECOND volume, with a restore drill that was RUN and a self-test proving the drill can FAIL. An alert evaluator that finally READS `metrics_events`. **Eight gates each proven to fail on a deliberate violation**, and two of the proofs found defects in the gates themselves. D-140..D-149, D-160..D-162 | 1,993 |
 | 10-11 Aug 2026 | **Mutation audit and remediation.** Eleven agents broke every guard, threshold and validation in the codebase. **2,510 passing tests had not noticed 23 defects** - retrieval abstaining on 44% of answerable questions, Foxy's system prompt deletable with 170/170 green, anti-cheat rule 2 firing on 0.105% of its target, a session token in plaintext logs, four guards comparing a value with itself, and a coverage report calling a grade orderable while it produced zero paths. All fixed, three of them structurally rather than by adding assertions. D-178..D-216 | 2,654 |
 | 11 Aug 2026 | **Second audit wave - 40+ findings, six agents.** Two production blockers: Compose passed no Razorpay credentials while the container throws without them (both processes restart-loop), and there was **no real mail adapter at all**, so signup and password reset were dead in production behind green probes. Signup also returned 500 on a mail outage *after* committing the user. Three concurrency races fixed - mastery lost update, XP cap, unfenced job leases. `trustProxy: true` collapsed every IP-keyed rate limit. Sessions had no absolute lifetime. `/health/ready` accepted a half-migrated database and leaked host/port/user. Metrics sat in memory for 100 observations. A paying customer got the free tier. **Caught in the act: drizzle-kit generated migration `0006` with a timestamp 370M ms BELOW its predecessor** - D-174 recurring, caught by the test written for it. D-217..D-280 | 2,926 |
+| 11 Aug 2026 | **Third audit and remediation, plus a clean database.** Six auditors asked questions the first two waves structurally could not: a real end-to-end journey, a systematic sweep for tests that pass for the wrong reason, cross-module seams, the worker and the degradation matrix, comments claiming guarantees, and the frontend. **The worst defect in the project was found: a student could answer every question wrong, read the revealed indices back from the API, re-answer, and score 100% with `isValid: true`** - while the evidence table recorded a flawless first-time attempt. Also: every XP payout and the Foxy cap could be changed with 2,530 tests green; every production alert could be silently disabled with 23/23 green; module-to-pool wiring was asserted nowhere; worker shutdown hung on the common deploy path; and a dependency that failed *fast* was invisible to every alert rule. All fixed. D-281..D-334 | 3,166 |
 
 ## 12. Update protocol
 
