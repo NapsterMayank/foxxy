@@ -46,6 +46,47 @@ Last updated: **10 August 2026**
 2. **A git remote.** Four workflows exist and every gate was proven to fail locally, but **GitHub Actions has never executed a single job** across 184 test files.
 3. **Confirm the Foxy caps.** Set to `free: 20 / plus: 200` by default and now pinned to literals. They had drifted to 5000/9000, which is a 1.8x differentiator on a cap no student reaches - structurally a paid tier, commercially nothing.
 
+### How to clear the three — exact commands
+
+Run from `D:/personal/foxxy`. Nothing here touches the database.
+
+**1. LLM key.** `backend/.env` is git-ignored; `backend/.env.example` is tracked, so never put the real value there (that mistake is D-096).
+
+```bash
+# append to backend/.env  - do NOT edit .env.example
+echo 'LLM_API_KEY=sk-ant-...' >> backend/.env
+
+# prove the fake is gone: a real key makes this answer from the corpus
+cd backend && npm run dev
+# then, in a second shell:
+curl -s -X POST localhost:3000/foxy/ask   -H 'content-type: application/json' -H 'cookie: sid=<a real session>'   -d '{"question":"What is photosynthesis?","subject":"science","grade":"8"}' | head -40
+```
+The scripted fake ignores the prompt and returns a fixed string; a real key returns corpus citations. If the reply is identical for two different questions, the key did not load.
+
+**2. Git remote.** 184 test files, four workflows, zero CI runs ever.
+
+```bash
+gh repo create foxxy --private --source=. --remote=origin   # or: git remote add origin <url>
+git push -u origin main
+gh run list --limit 5     # first evidence CI can execute at all
+```
+Expect the first run to fail on something environmental (secrets, Node version, service containers). That failure is the point — it is unknown today.
+
+**3. Foxy caps.** One file, two literals.
+
+```bash
+grep -rn "FOXY_DAILY_CAP\|free: 20\|plus: 200" backend/src/shared/constants/
+```
+Confirm `free: 20 / plus: 200` or change both. They had drifted to 5000/9000 — a 1.8x gap on a ceiling no student reaches, which is a paid tier in name only. A test pins the literals, so changing them turns that test red **by design**: update the test in the same commit, never the constant alone.
+
+### After those, the three worth doing first
+
+Ordered by what breaks if ignored, not by size.
+
+1. **Item 25 — the false degradation row.** `docs/04-RESILIENCE-PLAN.md` §6 promises keyword-only fallback; `backend/src/modules/retrieval/retrieval.service.ts:52-70` throws instead. §11 calls every row a testable requirement, so this is a stated guarantee with no test and contradicting code. **Decide which is true, then make the other match** — do not write a test against the doc without reading the service first.
+2. **Item 33 — `next build` fails on this machine.** `kill EPERM` at worker teardown, Next 16.3 + Turbopack + Windows, both apps. Compile and static generation succeed *before* it, so it is not an application defect — but `.next/standalone/server.js` is what the Dockerfile consumes, so **no deployable artifact exists locally.** Try `--no-turbopack` first; if that clears it the cause is confirmed and the fix is a flag, not a rewrite.
+3. **Item 26 — read before touching the parent digest.** `recoveries` counts `answer_changed = true AND is_correct = true`, which immutable answers (D-281) made unsatisfiable. The metric will read zero. **That is the fix landing, not a regression** — the old numbers came from client testimony nothing verified.
+
 ### Unblocked and ready
 
 | | Days |
