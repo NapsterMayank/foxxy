@@ -172,7 +172,7 @@ function resolveIpHashSalt(deps: IdentityModuleDeps): string {
 export interface IdentityModule {
   /** Every identity use-case. The only object other modules should hold. */
   readonly service: IdentityService;
-  /** Registers the twelve identity endpoints under `/api/v1`. */
+  /** Registers the identity endpoints under `/api/v1`. */
   registerRoutes(app: FastifyInstance): Promise<void>;
   /**
    * The session-validation preHandler (§6.5), for other modules' routes.
@@ -237,6 +237,10 @@ export function createIdentityModule(deps: IdentityModuleDeps): IdentityModule {
  *   signup                 Creates an account and mails a verification link. An
  *                          address that already exists yields the IDENTICAL
  *                          result and mails its owner instead.
+ *   resendVerification     Re-mails a verification link (D-291) — the recovery
+ *                          path D-217's fire-and-forget send assumed and which
+ *                          did not exist. Constant response for an unknown, an
+ *                          unverified and an already-verified address.
  *   verifyEmail            Consumes a single-use token, marks the address
  *                          verified, and issues a session — one transaction.
  *   login                  Authenticates and issues a fresh session token.

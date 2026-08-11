@@ -11,6 +11,7 @@ import {
   PLATFORM_METRICS,
   createBreakerMetricsBridge,
   createNoopMetrics,
+  createPortFailureBridge,
   type MetricsPort,
 } from '../metrics/index';
 import { createPortGuard, type PortGuard } from './port-guard';
@@ -62,8 +63,9 @@ export interface ResilienceRegistryOptions {
    * WHERE EVERY RESILIENCE SIGNAL GOES — 04-RESILIENCE-PLAN.md §5.
    *
    * This is the parameter that makes the second half of §5 true. Supplying it
-   * wires FIVE emissions at once, and they are five because that is the list
-   * §5 and §3.3 and §4 actually name:
+   * wires SIX emissions at once — it said FIVE and wired five, and D-278 exists
+   * because that count went stale once already, so it is maintained here
+   * deliberately rather than left to be believed:
    *
    *   breaker transitions      §5  — "emitted as a metric"
    *   breaker rejections       §5  — how much the open breaker cost
@@ -72,8 +74,13 @@ export interface ResilienceRegistryOptions {
    *   port retries             §4  — the budget D-237 wired; a dependency that
    *                                  always succeeds on attempt two is failing
    *                                  every time and looks perfect
+   *   port call failures       D-331 — the dependency itself said no. The most
+   *                                  common outage shape, and until now the only
+   *                                  one that incremented NOTHING: an audit read
+   *                                  `metrics_events: []` back from a real
+   *                                  embeddings outage and a real payments one
    *
-   * All five are wired HERE rather than at six call sites, for the same reason
+   * All six are wired HERE rather than at six call sites, for the same reason
    * the guards are composed here: six ports each remembering to emit is five
    * chances to forget, and the one that forgets is discovered during an
    * incident.
@@ -135,6 +142,18 @@ export function createResilienceRegistry(
             timeoutMs: String(timeoutMs),
           });
         },
+        /**
+         * THE SIXTH EMISSION — D-331. One line, and it is the line that makes a
+         * connection-refused visible to an alert rule at all.
+         *
+         * The bridge, not a `metrics.counter` call, because the classification
+         * it performs is the entire point: it declines to emit for timeouts,
+         * breaker rejections and concurrency rejections, all three of which
+         * `alert-sources.ts` already sums into `dependency.errors`. Inlining a
+         * counter here would double-count every one of them and halve the
+         * meaning of the paging threshold.
+         */
+        onFailure: createPortFailureBridge(metrics),
         /**
          * D-237 — the FIFTH emission wired here, for the same reason as the
          * other four: six ports each remembering to emit is five chances to

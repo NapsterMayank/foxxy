@@ -285,6 +285,9 @@ describe('submitSession — a valid submission writes every table', () => {
     // 05-ROADMAP.md §8: the Phase 1 teacher screen and the Phase 4 principal
     // dashboard run on these, and a student who practised in September leaves
     // no trace of a changed answer unless the column was written in September.
+    //
+    // THE REQUEST NO LONGER CARRIES `firstSelectedIndex` (D-282). Everything
+    // asserted below is written from what the server itself observed.
     const { account, chapterId } = await seedStudent({ questionCount: 1 });
     const started = await harness.practice.service.startSession(actorOf(account), {
       chapterId,
@@ -292,13 +295,11 @@ describe('submitSession — a valid submission writes every table', () => {
     });
     const question = started.questions[0]!;
     const correctPosition = question.options.findIndex((option) => option.endsWith('option 0'));
-    const otherPosition = question.options.findIndex((option) => option.endsWith('option 2'));
 
     harness.clock.advanceMs(9_000);
     await harness.practice.service.submitAnswer(actorOf(account), started.id, {
       questionId: question.id,
       selectedIndex: correctPosition,
-      firstSelectedIndex: otherPosition,
       timeSpentMs: 9_000,
       hintLevelUsed: 2,
       confidence: 'unsure',
@@ -318,13 +319,203 @@ describe('submitSession — a valid submission writes every table', () => {
 
     const row = rows[0]!;
     expect(row.first_selected_index).not.toBeNull();
-    expect(row.answer_changed).toBe(true);
+    expect(row.answer_changed).not.toBeNull();
     expect(row.hint_level_used).toBe(2);
     expect(row.confidence).toBe('unsure');
     expect(row.time_spent_ms).toBe(9_000);
     expect(row.authored_difficulty).toBe('medium');
     expect(row.explanation_format_used).toBe('worked_example');
   });
+});
+
+// ===========================================================================
+// THE ANSWER KEY IS DISCLOSED ONCE, AND THE RECORD CLOSES WITH IT — D-281
+//
+// The exploit these tests exist for was executed end to end by an auditor:
+// six questions answered wrong, each response read for the revealed correct
+// position, all six re-answered with it. 100%, six correct, full XP, and six
+// rows that looked like a flawless first attempt. Every anti-cheat rule passed,
+// correctly — none of them is about this.
+// ===========================================================================
+
+describe('submitAnswer — reveal-then-re-answer', () => {
+  /** Answers every question WRONG, keeping the revealed correct position. */
+  async function answerAllWrongAndCollectTheReveal(
+    account: HarnessAccount,
+    sessionId: string,
+  ): Promise<{ questionId: string; revealedCorrectPosition: number }[]> {
+    const session = await harness.practice.service.getSession(actorOf(account), sessionId);
+    const revealed: { questionId: string; revealedCorrectPosition: number }[] = [];
+
+    for (const question of session.questions) {
+      harness.clock.advanceMs(PASSING_TIME_MS);
+      const canonicalCorrect = Number(/correct=(\d)/.exec(question.questionText)?.[1] ?? '0');
+      const canonicalWrong = (canonicalCorrect + 1) % 4;
+      const wrongPosition = question.options.findIndex((option) =>
+        option.endsWith(`option ${canonicalWrong}`),
+      );
+
+      const result = await harness.practice.service.submitAnswer(actorOf(account), sessionId, {
+        questionId: question.id,
+        selectedIndex: wrongPosition,
+        timeSpentMs: PASSING_TIME_MS,
+        hintLevelUsed: 0,
+      });
+
+      expect(result.isCorrect).toBe(false);
+      revealed.push({
+        questionId: question.id,
+        revealedCorrectPosition: result.correctPresentationIndex,
+      });
+    }
+
+    return revealed;
+  }
+
+  it('REFUSES a second answer to a question whose answer key was already disclosed', async () => {
+    const { account, chapterId } = await seedStudent({ questionCount: 4 });
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 4,
+    });
+
+    const revealed = await answerAllWrongAndCollectTheReveal(account, started.id);
+
+    for (const { questionId, revealedCorrectPosition } of revealed) {
+      harness.clock.advanceMs(PASSING_TIME_MS);
+      await expect(
+        harness.practice.service.submitAnswer(actorOf(account), started.id, {
+          questionId,
+          selectedIndex: revealedCorrectPosition,
+          timeSpentMs: PASSING_TIME_MS,
+          hintLevelUsed: 0,
+        }),
+      ).rejects.toBeInstanceOf(ConflictError);
+    }
+  });
+
+  it('scores the session ZERO — the six re-answers changed nothing at all', async () => {
+    const { account, chapterId } = await seedStudent({ questionCount: 4 });
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 4,
+    });
+
+    const revealed = await answerAllWrongAndCollectTheReveal(account, started.id);
+
+    for (const { questionId, revealedCorrectPosition } of revealed) {
+      harness.clock.advanceMs(PASSING_TIME_MS);
+      await harness.practice.service
+        .submitAnswer(actorOf(account), started.id, {
+          questionId,
+          selectedIndex: revealedCorrectPosition,
+          timeSpentMs: PASSING_TIME_MS,
+          hintLevelUsed: 0,
+        })
+        .catch(() => undefined);
+    }
+
+    const result = await harness.practice.service.submitSession(actorOf(account), started.id);
+
+    // The numbers the auditor's run produced were 100 / 4 / 110.
+    expect(result.scorePercent).toBe(0);
+    expect(result.correctCount).toBe(0);
+    expect(result.xpAwarded).toBe(0);
+
+    const { rows } = await harness.postgres.client.query<{ is_correct: boolean }>(
+      `select is_correct from practice_responses where session_id = $1`,
+      [started.id],
+    );
+    expect(rows).toHaveLength(4);
+    expect(rows.every((row) => !row.is_correct)).toBe(true);
+  });
+
+  it('refuses the re-answer WITHOUT disclosing whether it was right', async () => {
+    // The refusal is thrown before the answer key is consulted, so a student
+    // cannot use the 409 itself as an oracle. Both branches are the same error.
+    const { account, chapterId } = await seedStudent({ questionCount: 1 });
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 1,
+    });
+    const question = started.questions[0]!;
+
+    harness.clock.advanceMs(PASSING_TIME_MS);
+    const first = await harness.practice.service.submitAnswer(actorOf(account), started.id, {
+      questionId: question.id,
+      selectedIndex: 0,
+      timeSpentMs: PASSING_TIME_MS,
+      hintLevelUsed: 0,
+    });
+
+    const wrongAgain = (first.correctPresentationIndex + 1) % question.options.length;
+
+    const refusals: string[] = [];
+    for (const selectedIndex of [first.correctPresentationIndex, wrongAgain]) {
+      harness.clock.advanceMs(PASSING_TIME_MS);
+      const error = await harness.practice.service
+        .submitAnswer(actorOf(account), started.id, {
+          questionId: question.id,
+          selectedIndex,
+          timeSpentMs: PASSING_TIME_MS,
+          hintLevelUsed: 0,
+        })
+        .then(
+          () => null,
+          (thrown: unknown) => thrown,
+        );
+
+      expect(error).toBeInstanceOf(ConflictError);
+      refusals.push((error as Error).message);
+    }
+
+    // A re-answer that would have been RIGHT and one that would have been WRONG
+    // are refused identically. Anything else turns the 409 itself into the
+    // oracle the 409 exists to remove.
+    expect(refusals[0]).toBe(refusals[1]);
+  });
+});
+
+// ===========================================================================
+// THE SERVER RECORDS THE FIRST ANSWER ITSELF — D-282
+// ===========================================================================
+
+describe('submitAnswer — the change-of-mind columns are the server’s own', () => {
+  it('populates first_selected_index and answer_changed on EVERY response, with the client sending neither', async () => {
+    // The audit found both null on five of six responses in an honest journey,
+    // because the only source was an optional request field the client omitted.
+    // `answerAll` sends `questionId`, `selectedIndex`, `timeSpentMs` and
+    // `hintLevelUsed` — nothing else — and the columns still land.
+    const { account, chapterId } = await seedStudent({ questionCount: 4 });
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 4,
+    });
+
+    await answerAll(account, started.id, [true, false, true, false]);
+    await harness.practice.service.submitSession(actorOf(account), started.id);
+
+    const { rows } = await harness.postgres.client.query<{
+      selected_index: number;
+      first_selected_index: number | null;
+      answer_changed: boolean | null;
+    }>(
+      `select selected_index, first_selected_index, answer_changed
+         from practice_responses where session_id = $1`,
+      [started.id],
+    );
+
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row.first_selected_index).not.toBeNull();
+      expect(row.answer_changed).not.toBeNull();
+      // Nothing was re-answered, so the first choice IS the final one — a real
+      // observation, where the old code wrote "the client did not tell us".
+      expect(row.first_selected_index).toBe(row.selected_index);
+      expect(row.answer_changed).toBe(false);
+    }
+  });
+
 });
 
 // ===========================================================================
@@ -1517,4 +1708,230 @@ describe('getHistory', () => {
 
     expect(await harness.practice.service.getHistory(actorOf(other), 10)).toEqual([]);
   });
+});
+
+// ===========================================================================
+// THE SAME NAME IS THE SAME NUMBER — D-283
+// ===========================================================================
+
+describe('getHistory — xpAwarded is the ledger credit, and submit agrees', () => {
+  it('reports the AWARDED figure on a capped session, not the uncapped one', async () => {
+    // `SubmissionResult.xpEarned` is pre-cap and `HistoryEntry`'s field was also
+    // called `xpEarned` while carrying the post-cap number. A capped session
+    // returned 110 from submit and 0 from history under one name in one contract
+    // file, so a client rendering its own history showed 0 for a session the
+    // student had just been congratulated on.
+    const { account, chapterId } = await seedStudent();
+
+    // Fill the day's cap outside practice, so the next session is fully clamped.
+    await harness.postgres.client.query(
+      `insert into xp_ledger (student_user_id, tenant_id, source, source_id, amount, created_at)
+       values ($1, $2, 'practice_session', $3, $4, $5)`,
+      [
+        account.userId,
+        TEST_TENANT_ID,
+        chapterId,
+        XP_RULES.dailyCap,
+        harness.clock.now().toISOString(),
+      ],
+    );
+
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 4,
+    });
+    await answerAll(account, started.id, [true, true, true, true]);
+    const result = await harness.practice.service.submitSession(actorOf(account), started.id);
+
+    // The cap really did bite — otherwise the two numbers agree by accident and
+    // this test would pass against the defect.
+    expect(result.dailyCapReached).toBe(true);
+    expect(result.xpAwarded).toBe(0);
+    expect(result.xpEarned).toBeGreaterThan(0);
+
+    const history = await harness.practice.service.getHistory(actorOf(account), 10);
+    const entry = history.find((row) => row.sessionId === started.id)!;
+
+    expect(entry.xpAwarded).toBe(result.xpAwarded);
+  });
+});
+
+// ===========================================================================
+// THE PROGRESS SCREEN DOES NOT ISSUE ONE QUERY PER CHAPTER — D-284
+// ===========================================================================
+
+describe('getProgress — chapter titles are fetched in bulk', () => {
+  /** A practice module that COUNTS the chapter reads its service performs. */
+  function createCountingPractice(): {
+    module: ReturnType<typeof createPracticeModule>;
+    counts: { readChapter: number; listChapters: number };
+  } {
+    const counts = { readChapter: 0, listChapters: 0 };
+
+    const module = createPracticeModule({
+      db: harness.container.poolFor('practice'),
+      clock: harness.clock,
+      logger: harness.logger,
+      requireSession: harness.identity.requireSession,
+      readQuestions: (actor, query) => harness.content.service.getQuestionsForChapter(actor, query),
+      readChapter: async (actor, id) => {
+        counts.readChapter += 1;
+        try {
+          return await harness.content.service.getChapter(actor, id);
+        } catch {
+          return null;
+        }
+      },
+      listChapters: (actor, filter) => {
+        counts.listChapters += 1;
+        return harness.content.service.listChapters(actor, {
+          grade: filter.grade,
+          subject: filter.subjectCode,
+          limit: filter.limit,
+        });
+      },
+      readStudentContext: async (actor, studentUserId) => {
+        const profile = await harness.learner.service.getProfile(actor, studentUserId);
+        const subjects = await harness.learner.service.getSubjects(actor, studentUserId);
+        return { grade: profile.grade, subjects };
+      },
+      readMastery: (actor, studentUserId) =>
+        harness.learner.service.getMastery(actor, studentUserId),
+      writeMastery: (actor, input) => harness.learner.service.updateMastery(actor, input),
+      readTenantOfStudent: (studentUserId) =>
+        harness.identity.service.getTenantOfUser(studentUserId),
+      random: () => 0.5,
+    });
+
+    return { module, counts };
+  }
+
+  it('issues NO per-chapter read for chapters in the student’s own grade', async () => {
+    // This was `await deps.readChapter(...)` inside the mastery loop: one query
+    // per chapter the student had ever practised, sequentially, growing every
+    // week they used the product.
+    const { account } = await seedStudent();
+    const { module, counts } = createCountingPractice();
+
+    const chapterIds: string[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      seedCounter += 1;
+      const chapterId = await insertChapter(
+        harness.postgres.client,
+        makeChapter(`bulk${seedCounter}`, {
+          grade: '8',
+          subjectCode: 'science',
+          chapterNumber: index + 2,
+        }),
+      );
+      chapterIds.push(chapterId);
+      await harness.learner.service.updateMastery(actorOf(account), {
+        studentUserId: account.userId,
+        chapterId,
+        masteryScore: 60,
+        expectedPreviousScore: null,
+        attemptIncrement: 1,
+        practised: true,
+      });
+    }
+
+    counts.readChapter = 0;
+    counts.listChapters = 0;
+
+    const progress = await module.service.getProgress(actorOf(account));
+
+    expect(progress.chapters).toHaveLength(chapterIds.length);
+    // Every title is real — a bulk fetch that silently blanked them would
+    // otherwise satisfy the count assertion below.
+    expect(progress.chapters.every((chapter) => chapter.chapterTitleEn.length > 0)).toBe(true);
+
+    // One `listChapters` for the student's one subject, and nothing per chapter.
+    expect(counts.readChapter).toBe(0);
+    expect(counts.listChapters).toBe(1);
+  });
+});
+
+// ===========================================================================
+// THE MISSION'S PER-SUBJECT READS ARE ISSUED TOGETHER — D-284
+// ===========================================================================
+
+describe('getTodaysMission — the subject chapter lists do not wait for each other', () => {
+  it('has BOTH subject reads in flight at once', async () => {
+    /**
+     * A BARRIER ON THE INJECTED SEAM, not a stopwatch — the D-246 pattern.
+     *
+     * `listChapters` here does not resolve until it has been ENTERED once per
+     * subject. Issued together, both calls arrive, the barrier opens and the
+     * mission is built. Issued sequentially — the shape this was before — the
+     * first call waits for a second that cannot happen until it returns, and the
+     * test fails on its timeout rather than on a timing threshold that would be
+     * flaky on a loaded machine.
+     */
+    const subjects = ['science', 'math'];
+    let entered = 0;
+    let open: (() => void) | null = null;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+
+    seedCounter += 1;
+    const account = await onboardAccount(harness, `two${seedCounter}@example.test`, 'student');
+    await harness.learner.service.createProfile(actorOf(account), {
+      displayName: `Two subjects ${seedCounter}`,
+      grade: '8',
+      subjects,
+    });
+    for (const [index, subjectCode] of subjects.entries()) {
+      await insertChapter(
+        harness.postgres.client,
+        makeChapter(`two${seedCounter}-${subjectCode}`, {
+          grade: '8',
+          subjectCode,
+          chapterNumber: index + 1,
+        }),
+      );
+    }
+
+    const module = createPracticeModule({
+      db: harness.container.poolFor('practice'),
+      clock: harness.clock,
+      logger: harness.logger,
+      requireSession: harness.identity.requireSession,
+      readQuestions: (actor, query) => harness.content.service.getQuestionsForChapter(actor, query),
+      readChapter: async (actor, id) => {
+        try {
+          return await harness.content.service.getChapter(actor, id);
+        } catch {
+          return null;
+        }
+      },
+      listChapters: async (actor, filter) => {
+        entered += 1;
+        if (entered >= subjects.length) {
+          open?.();
+        }
+        await opened;
+        return harness.content.service.listChapters(actor, {
+          grade: filter.grade,
+          subject: filter.subjectCode,
+          limit: filter.limit,
+        });
+      },
+      readStudentContext: async (actor, studentUserId) => {
+        const profile = await harness.learner.service.getProfile(actor, studentUserId);
+        const studentSubjects = await harness.learner.service.getSubjects(actor, studentUserId);
+        return { grade: profile.grade, subjects: studentSubjects };
+      },
+      readMastery: (actor, studentUserId) =>
+        harness.learner.service.getMastery(actor, studentUserId),
+      writeMastery: (actor, input) => harness.learner.service.updateMastery(actor, input),
+      readTenantOfStudent: (studentUserId) =>
+        harness.identity.service.getTenantOfUser(studentUserId),
+      random: () => 0.5,
+    });
+
+    await module.service.getTodaysMission(actorOf(account));
+
+    expect(entered).toBe(subjects.length);
+  }, 15_000);
 });

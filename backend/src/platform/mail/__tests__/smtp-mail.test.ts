@@ -1,5 +1,15 @@
-import { describe, expect, it } from 'vitest';
-import { createSmtpMail, type MailEnvelope, type MailTransport } from '../smtp-mail';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_TIMEOUT_POLICY } from '../../config/timeouts';
+import {
+  SMTP_TIMEOUT_DEFAULTS,
+  createNodemailerTransport,
+  createSmtpMail,
+  type MailEnvelope,
+  type MailTransport,
+  type SmtpConfig,
+  type SmtpTransportFactory,
+  type SmtpTransportOptions,
+} from '../smtp-mail';
 import type { MailMessage } from '../mail.port';
 
 /**
@@ -218,5 +228,184 @@ describe('header injection', () => {
       }),
     ).rejects.toThrow(/line break/u);
     expect(transport.sent).toHaveLength(0);
+  });
+});
+
+/**
+ * =============================================================================
+ * THE SOCKET HAS A DEADLINE — D-332.
+ *
+ * `createNodemailerTransport` set NO `connectionTimeout`, NO `greetingTimeout`
+ * and NO `socketTimeout`. nodemailer's defaults are effectively "wait for the
+ * OS", which for a silently dropped TCP connection is minutes.
+ *
+ * The expensive consequence is not signup. It is that the ALERT EVALUATOR
+ * awaits `deliver()` inside `runCycle`, and its loop awaits `runCycle` — so one
+ * wedged SMTP socket stalls EVERY rule: readiness, pool saturation, backup age.
+ * The monitoring goes dark at precisely the moment something is wrong enough to
+ * be sending mail about it. `createGuardedMail` bounds the caller's wait, and
+ * that is real, but a race cannot close a socket: the wedged connection keeps
+ * its file descriptor and one of the five `mail` concurrency slots regardless.
+ *
+ * HOW THIS IS TESTED WITHOUT A SOCKET, stated plainly because the honesty of the
+ * second test depends on it. `createNodemailerTransport` now takes a transport
+ * FACTORY, defaulting to nodemailer's. The tests supply their own, so:
+ *
+ *  - the first test asserts the exact deadlines handed to the transport. That is
+ *    the whole of what this adapter controls; enforcing them is nodemailer's job
+ *    and is not re-implemented here.
+ *  - the second drives a send that never settles through a fake which applies
+ *    the `socketTimeout` IT WAS GIVEN, the way a real socket does. It is a
+ *    contract test — "the number we hand over is the number that bounds the
+ *    send" — and it goes red when the option is absent, because the fake then
+ *    has no deadline to apply and the promise hangs forever, which is exactly
+ *    the production behaviour being pinned.
+ *
+ * NO `sleep`, per §9.5: the budget is spent with vitest's fake timers.
+ * =============================================================================
+ */
+
+const SMTP: SmtpConfig = {
+  host: 'smtp.gmail.com',
+  port: 587,
+  user: 'no-reply@foxxy.app',
+  password: 'app-password',
+  from: FROM,
+};
+
+/** Every options object a factory was handed, for assertion. */
+function recordingFactory(): {
+  readonly options: SmtpTransportOptions[];
+  readonly factory: SmtpTransportFactory;
+} {
+  const options: SmtpTransportOptions[] = [];
+  return {
+    options,
+    factory: (given) => {
+      options.push(given);
+      return { sendMail: () => Promise.resolve(undefined) };
+    },
+  };
+}
+
+/**
+ * A send that never completes, bounded only by the `socketTimeout` it was
+ * configured with — a wedged socket, in the small.
+ *
+ * The option is read through a widened type ON PURPOSE. The defect being pinned
+ * is an ABSENT value, and reading it at its declared `number` would make the
+ * fake assume the very thing under test.
+ */
+const hangingFactory: SmtpTransportFactory = (given) => ({
+  sendMail: () =>
+    new Promise((_resolve, reject) => {
+      const budget = (given as { socketTimeout?: number }).socketTimeout;
+      if (budget === undefined) return; // No deadline: hangs forever, as production did.
+      setTimeout(() => {
+        reject(new Error('Socket timeout'));
+      }, budget);
+    }),
+});
+
+const ENVELOPE: MailEnvelope = {
+  from: FROM,
+  to: 'aditi.sharma@example.com',
+  subject: 'Verify your email',
+  text: 'https://foxxy.app/verify?token=abc123',
+};
+
+describe('createNodemailerTransport sets all three socket deadlines — D-332', () => {
+  it('passes connectionTimeout, greetingTimeout and socketTimeout to the transport', () => {
+    const { options, factory } = recordingFactory();
+
+    createNodemailerTransport(SMTP, factory);
+
+    expect(options).toHaveLength(1);
+    expect(options[0]).toMatchObject({
+      connectionTimeout: SMTP_TIMEOUT_DEFAULTS.connectionTimeoutMs,
+      greetingTimeout: SMTP_TIMEOUT_DEFAULTS.greetingTimeoutMs,
+      socketTimeout: SMTP_TIMEOUT_DEFAULTS.socketTimeoutMs,
+    });
+  });
+
+  it('defaults come from the §4 mail row, not from a number invented here', () => {
+    // The point of the default is that it is the SAME budget the port guard
+    // uses. Two independently chosen numbers for one dependency's patience is
+    // how a socket outlives the call that opened it.
+    expect(SMTP_TIMEOUT_DEFAULTS.connectionTimeoutMs).toBe(DEFAULT_TIMEOUT_POLICY.mail.connectMs);
+    expect(SMTP_TIMEOUT_DEFAULTS.greetingTimeoutMs).toBe(DEFAULT_TIMEOUT_POLICY.mail.connectMs);
+    expect(SMTP_TIMEOUT_DEFAULTS.socketTimeoutMs).toBe(DEFAULT_TIMEOUT_POLICY.mail.totalMs);
+  });
+
+  it('an explicit budget overrides the default, including a deliberate zero', () => {
+    // `??`, not `||`. A caller asking for no patience at all is probably wrong,
+    // but substituting ten seconds for their zero would be a second wrong.
+    const { options, factory } = recordingFactory();
+
+    createNodemailerTransport(
+      { ...SMTP, connectionTimeoutMs: 1_500, greetingTimeoutMs: 0, socketTimeoutMs: 4_000 },
+      factory,
+    );
+
+    expect(options[0]).toMatchObject({
+      connectionTimeout: 1_500,
+      greetingTimeout: 0,
+      socketTimeout: 4_000,
+    });
+  });
+
+  it('still carries STARTTLS and the derived `secure`, so the deadlines cost no security', () => {
+    const { options, factory } = recordingFactory();
+    createNodemailerTransport(SMTP, factory);
+    expect(options[0]).toMatchObject({ secure: false, requireTLS: true });
+
+    const implicit = recordingFactory();
+    createNodemailerTransport({ ...SMTP, port: 465 }, implicit.factory);
+    expect(implicit.options[0]).toMatchObject({ secure: true, requireTLS: false });
+  });
+});
+
+describe('a wedged SMTP socket rejects within its budget — D-332', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('rejects once the socket budget is spent, instead of hanging forever', async () => {
+    const transport = createNodemailerTransport({ ...SMTP, socketTimeoutMs: 4_000 }, hangingFactory);
+
+    const send = transport.sendMail(ENVELOPE);
+    const settled = send.then(
+      () => 'resolved',
+      () => 'rejected',
+    );
+
+    // One millisecond short: still waiting. Without this the test would pass
+    // against a transport that rejected instantly for some unrelated reason.
+    await vi.advanceTimersByTimeAsync(3_999);
+    await expect(
+      Promise.race([settled, Promise.resolve('pending')]),
+    ).resolves.toBe('pending');
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(settled).resolves.toBe('rejected');
+  });
+
+  it('bounds the DEFAULT-configured transport too — nobody has to remember', async () => {
+    // The production path: `container.ts` supplies the budget, but a caller that
+    // supplies nothing must still get one. "A call without a timeout is a
+    // defect" cannot be satisfiable by omission.
+    const transport = createNodemailerTransport(SMTP, hangingFactory);
+
+    const settled = transport.sendMail(ENVELOPE).then(
+      () => 'resolved',
+      () => 'rejected',
+    );
+
+    await vi.advanceTimersByTimeAsync(SMTP_TIMEOUT_DEFAULTS.socketTimeoutMs);
+    await expect(settled).resolves.toBe('rejected');
   });
 });

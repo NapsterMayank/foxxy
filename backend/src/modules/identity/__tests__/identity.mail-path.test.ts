@@ -497,4 +497,233 @@ describe('D-218: neither forgot-password nor signup is a latency oracle', () => 
       SAMPLES * 2,
     );
   }, 120_000);
+
+  /**
+   * THE SAME PROPERTY FOR THE ENDPOINT ADDED BY D-291.
+   *
+   * A resend endpoint is an enumeration oracle by default: one branch mints a
+   * token and mails it, the other does nothing at all. It is built with D-218's
+   * shape for that reason — both counters consumed first, the token generated
+   * BEFORE the existence branch, and the send deferred — and this is the
+   * assertion that the shape survived.
+   *
+   * Re-applying the defect at the resend call site (`await mail.send(...)` in
+   * place of `deferMail(...)` in `resendVerification`) puts `MAIL_LATENCY_MS` on
+   * the unverified branch alone and turns this red.
+   */
+  it('RESEND ANSWERS AN UNVERIFIED AND AN UNKNOWN ADDRESS IN THE SAME TIME', async () => {
+    // Each seed gets its own IP: signup is 3/hour per IP.
+    for (let sample = 0; sample < SAMPLES; sample += 1) {
+      await service.signup(
+        { email: `pending-${sample}@example.test`, password: GOOD_PASSWORD, role: 'student' },
+        contextFor(`seed-resend-${sample}`),
+      );
+    }
+
+    mail.delayMs = MAIL_LATENCY_MS;
+    const pending: number[] = [];
+    const unknown: number[] = [];
+
+    for (let sample = 0; sample < SAMPLES; sample += 1) {
+      // A fresh IP per sample: the resend is 10/hour per IP AND per address, and
+      // a limiter rejection would be the fastest branch of all.
+      const context = contextFor(`timing-resend-${sample}`);
+
+      const startPending = performance.now();
+      await service.resendVerification({ email: `pending-${sample}@example.test` }, context);
+      pending.push(performance.now() - startPending);
+
+      const startUnknown = performance.now();
+      await service.resendVerification({ email: `missing-${sample}@example.test` }, context);
+      unknown.push(performance.now() - startUnknown);
+    }
+
+    const pendingMedian = median(pending);
+    const unknownMedian = median(unknown);
+
+    // Neither branch may carry the send. Same bounds and same reasoning as
+    // forgot-password above: the residual is one small transaction.
+    expect(Math.abs(pendingMedian - unknownMedian)).toBeLessThan(MAIL_LATENCY_MS / 3);
+    expect(Math.max(pendingMedian, unknownMedian)).toBeLessThan(MAIL_LATENCY_MS / 3);
+    expect(anchoredRatio(pendingMedian, unknownMedian)).toBeLessThan(10);
+
+    // And the sends really happened — this measures a deferred send, not a
+    // missing one.
+    await mail.drain();
+    expect(mail.sent.filter((message) => message.template === 'email-verification')).toHaveLength(
+      SAMPLES * 2,
+    );
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+
+/**
+ * =============================================================================
+ * D-291 — THE RECOVERY PATH D-217 SAID ALREADY EXISTED.
+ *
+ * D-217's reasoning for a fire-and-forget verification email is quoted in
+ * `identity.service.ts` and reads, in as many words: "the RECOVERY PATH ALREADY
+ * EXISTS AND DOES NOT DEPEND ON IT — the verification and reset tokens are
+ * committed rows, so a resend re-mails the token that is already persisted."
+ *
+ * There was no resend. Seven `/auth/*` routes — signup, verify, login, logout,
+ * logout-all, forgot-password, reset-password — and not one of them re-mailed
+ * anything. An auditor confirmed it against a real server with mail down:
+ *
+ *     MAIL-DOWN signup:  201 {"status":"ok","message":"Check your email…"}
+ *     MAIL-DOWN user row created: { n: 1 }
+ *     MAIL-DOWN queued jobs: []
+ *
+ * The account survived the outage exactly as D-217 designed, and was useless:
+ * address taken, verification email gone, no way to ask for another, and no way
+ * to sign up again. The tests below are the outage-to-recovery journey end to
+ * end, in the one file that can make the provider fail.
+ * =============================================================================
+ */
+describe('D-291: a resend rescues the account a mail outage left unverifiable', () => {
+  /** Pulls the token out of the most recent verification email. */
+  function lastVerifyToken(): string {
+    const verifyUrl = mail.sent.at(-1)?.data.verifyUrl ?? '';
+    return verifyUrl === '' ? '' : (new URL(verifyUrl).searchParams.get('token') ?? '');
+  }
+
+  it('DELIVERS A WORKING TOKEN AFTER A SIGNUP WHOSE EMAIL WAS LOST', async () => {
+    // 1. Signup during the outage. The account is created; the email is not.
+    mail.failWith = 'dependency';
+    await service.signup(
+      { email: 'stranded@example.test', password: GOOD_PASSWORD, role: 'student' },
+      contextFor('stranded-signup'),
+    );
+    await mail.drain();
+
+    expect(await countRows('users')).toBe(1);
+    // The mailer was CALLED and the send failed, so nothing usable reached the
+    // user. This is the state the audit found on a real server.
+    expect(harness.metrics.countOf(MAIL_DEFERRED_METRIC)).toBe(1);
+
+    // 2. The provider comes back and the user asks again. Before D-291 there was
+    //    no endpoint to ask, and this account stayed unverifiable forever.
+    mail.reset();
+    await service.resendVerification(
+      { email: 'stranded@example.test' },
+      contextFor('stranded-resend'),
+    );
+    await mail.drain();
+
+    const resent = mail.sent.filter((message) => message.template === 'email-verification');
+    expect(resent).toHaveLength(1);
+
+    // 3. The token WORKS: it verifies the address and issues a session. A resend
+    //    that mailed an unusable link would satisfy every assertion above.
+    const result = await service.verifyEmail(lastVerifyToken(), contextFor('stranded-verify'));
+    expect(result.user.email).toBe('stranded@example.test');
+    expect(result.user.emailVerifiedAt).not.toBeNull();
+    expect(result.session.token.length).toBeGreaterThan(0);
+  });
+
+  it('RETIRES THE TOKEN IT REPLACES, so an old mailed link stops working', async () => {
+    /**
+     * The reissue is a REPLACEMENT, not an addition, and it happens in one
+     * transaction. A resend that merely inserted a second row would leave every
+     * previously mailed link live — so a token sitting in a forwarded message or
+     * a mail archive would still verify the account long after the user asked
+     * for a new one.
+     *
+     * This also documents why "reuses the persisted token if it is still valid"
+     * cannot be implemented literally: the table stores a SHA-256 OF the token
+     * and never the token, so there is nothing in a surviving row to re-mail.
+     */
+    await service.signup(
+      { email: 'replaced@example.test', password: GOOD_PASSWORD, role: 'student' },
+      contextFor('replaced-signup'),
+    );
+    await mail.drain();
+    const firstToken = lastVerifyToken();
+
+    await service.resendVerification(
+      { email: 'replaced@example.test' },
+      contextFor('replaced-resend'),
+    );
+    await mail.drain();
+    const secondToken = lastVerifyToken();
+
+    expect(secondToken).not.toBe(firstToken);
+    // Two rows, one live: the retired one is marked consumed, never deleted.
+    expect(await countRows('email_verification_tokens')).toBe(2);
+
+    await expect(service.verifyEmail(firstToken, contextFor('replaced-old'))).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    });
+
+    await expect(
+      service.verifyEmail(secondToken, contextFor('replaced-new')),
+    ).resolves.toMatchObject({ user: { email: 'replaced@example.test' } });
+  });
+
+  it('SENDS NOTHING for an unknown address and nothing for a verified one', async () => {
+    // Both resolve, both silently. The observable difference an attacker would
+    // want is whether an email was sent, and neither of these sends one.
+    await service.signup(
+      { email: 'done@example.test', password: GOOD_PASSWORD, role: 'student' },
+      contextFor('done-signup'),
+    );
+    await mail.drain();
+    await service.verifyEmail(lastVerifyToken(), contextFor('done-verify'));
+    mail.reset();
+
+    await expect(
+      service.resendVerification({ email: 'nobody@example.test' }, contextFor('resend-unknown')),
+    ).resolves.toBeUndefined();
+    await expect(
+      service.resendVerification({ email: 'done@example.test' }, contextFor('resend-verified')),
+    ).resolves.toBeUndefined();
+    await mail.drain();
+
+    expect(mail.sent).toHaveLength(0);
+    // And no token was minted for either — a verified account must not acquire a
+    // live verification link it never asked for.
+    expect(await countRows('email_verification_tokens')).toBe(1);
+  });
+
+  it('SURVIVES THE OUTAGE ITSELF: a failing resend still persists its token', async () => {
+    await service.signup(
+      { email: 'twice-down@example.test', password: GOOD_PASSWORD, role: 'student' },
+      contextFor('twice-signup'),
+    );
+    await mail.drain();
+    harness.metrics.clear();
+
+    mail.failWith = 'dependency';
+    await expect(
+      service.resendVerification({ email: 'twice-down@example.test' }, contextFor('twice-resend')),
+    ).resolves.toBeUndefined();
+    await mail.drain();
+
+    // Same contract as signup: a provider outage degrades to "queued", never to
+    // a failed request, and the deferral is counted rather than silent.
+    expect(harness.metrics.countOf(MAIL_DEFERRED_METRIC)).toBe(1);
+    expect(harness.metrics.countOf(MAIL_FAILED_METRIC)).toBe(0);
+    expect(await countRows('email_verification_tokens')).toBe(2);
+  });
+
+  it('never logs the recipient or the resent token', async () => {
+    await service.signup(
+      { email: 'quiet-resend@example.test', password: GOOD_PASSWORD, role: 'student' },
+      contextFor('quiet-resend-signup'),
+    );
+    await mail.drain();
+
+    await service.resendVerification(
+      { email: 'quiet-resend@example.test' },
+      contextFor('quiet-resend'),
+    );
+    await mail.drain();
+
+    const token = lastVerifyToken();
+    const logged = JSON.stringify(harness.logger.lines);
+    expect(token.length).toBeGreaterThan(0);
+    expect(logged).not.toContain('quiet-resend@example.test');
+    expect(logged).not.toContain(token);
+  });
 });

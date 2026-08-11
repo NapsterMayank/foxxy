@@ -16,6 +16,7 @@ import type {
   SubmissionResult,
 } from '@/shared/contracts/practice.contract';
 import { DEFAULT_SESSION_QUESTION_COUNT } from '@/shared/contracts/practice.contract';
+import { deriveAnswerChange } from './domain/answer-change';
 import { validateAttempt, type AttemptResponse } from './domain/anti-cheat';
 import { decideNext } from './domain/decide-next';
 import { evidenceLabel } from './domain/evidence';
@@ -665,14 +666,27 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
       const masteryByChapter = new Map(mastery.map((row) => [row.chapterId, row]));
       const dueByChapter = new Map(retention.map((row) => [row.chapterId, row.dueAt]));
 
-      const candidates: MissionCandidate[] = [];
-      for (const subjectCode of context.subjects) {
-        const chapters = await deps.listChapters(actor, {
-          grade: context.grade,
-          subjectCode,
-          limit: 100,
-        });
+      /**
+       * ONE ROUND TRIP PER SUBJECT, ISSUED TOGETHER — D-284.
+       *
+       * This was a sequential `await` inside the subject loop: a student with
+       * six subjects paid six round trips end to end on the screen §8.6 calls
+       * the client's most important. `listChapters` takes ONE subject, so the
+       * query count is a `content` API shape and cannot be reduced from here
+       * (see D-284 for the follow-up that would); what can be fixed here is that
+       * they no longer wait for each other. The count is bounded by the
+       * student's subject list, which is small and does not grow with use — the
+       * property that made the `getProgress` version of this worth a different
+       * fix.
+       */
+      const chaptersBySubject = await Promise.all(
+        context.subjects.map((subjectCode) =>
+          deps.listChapters(actor, { grade: context.grade, subjectCode, limit: 100 }),
+        ),
+      );
 
+      const candidates: MissionCandidate[] = [];
+      for (const chapters of chaptersBySubject) {
         for (const chapter of chapters) {
           const row = masteryByChapter.get(chapter.id);
           candidates.push({
@@ -778,6 +792,40 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
      * EVERY INDEX THAT ARRIVES HERE IS A PRESENTATION POSITION AND EVERY INDEX
      * THAT LEAVES IS CANONICAL. The two translations below are the only place
      * the vocabularies meet.
+     *
+     * =========================================================================
+     * ONE ANSWER PER QUESTION, AND IT IS FINAL — D-281.
+     *
+     * The response below discloses the answer key: `isCorrect`, the correct
+     * option's screen position and the explanation, immediately. That is the
+     * intended pedagogy and it is kept. What is NOT kept is the ability to
+     * answer again afterwards.
+     *
+     * The two together were a way to score 100% on a session answered entirely
+     * wrong, and an auditor executed it end to end: six questions answered
+     * wrong, each response read for the revealed position, all six re-answered
+     * with it. `saveAnswers` replaced each previous answer wholesale, so the
+     * discarded selections left no trace; the resulting rows recorded six
+     * correct first-time answers with `first_selected_index` null. Anti-cheat
+     * saw six responses to six questions across ample elapsed time with four
+     * distinct screen positions and passed, correctly — every one of its three
+     * rules was satisfied. Twelve taps, a flawless-looking attempt, and mastery,
+     * the parent digest and the retention schedule all read those rows.
+     *
+     * WITHHOLDING THE KEY UNTIL SUBMISSION WAS THE OTHER OPTION AND IT WAS
+     * REJECTED, for a product reason and a technical one. The product reason:
+     * feedback at the end of a six-question set is a different activity from
+     * guided practice — the hint ladder, the misconception explainer and
+     * `decideNext`'s confirm/remediate branches all exist to act on the answer
+     * the student just gave. The technical one: withholding
+     * `correctPresentationIndex` alone would not have closed the hole. With four
+     * options and a mutable answer, `isCorrect` on its own is a three-guess
+     * search, and `isCorrect` cannot be withheld without withholding the whole
+     * of step 5.
+     *
+     * So the reveal stays and the record closes with it. A second answer to the
+     * same question is a 409.
+     * =========================================================================
      */
     async submitAnswer(
       actor: PracticeActor,
@@ -806,14 +854,39 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         });
       }
 
+      /**
+       * THE IMMUTABILITY RULE — D-281, and the first of this fix's two halves.
+       *
+       * Checked BEFORE the answer key is looked up, so a refused re-answer
+       * discloses nothing at all: same status, same body, whatever the student
+       * picked. Read from `session.answers`, which is the accumulator the
+       * previous answer wrote, so the check is against what the SERVER recorded
+       * rather than anything the request claims.
+       */
+      const prior = session.answers[input.questionId];
+      if (prior !== undefined) {
+        throw new ConflictError('That question has already been answered.', {
+          message: 'Re-answer refused: the answer key was disclosed when the first answer landed',
+        });
+      }
+
       const map = shuffleFor(session, question.id, question.options.length);
 
       // --- THE TRANSLATION (D-058) -----------------------------------------
       const selectedIndex = toCanonicalIndex(map, input.selectedIndex);
-      const firstSelectedIndex =
-        input.firstSelectedIndex === undefined
-          ? null
-          : toCanonicalIndex(map, input.firstSelectedIndex);
+
+      /**
+       * THE SECOND HALF — D-282. Derived from the session's own record, never
+       * from the request, which no longer carries the field at all.
+       *
+       * `prior` is always `undefined` while the rule above stands, so this
+       * writes "the first choice was this one" — a real observation, and never
+       * null. The carry-forward branch inside `deriveAnswerChange` is what makes
+       * the exploit still recorded rather than erased if immutability is ever
+       * relaxed: the original index survives and `answer_changed` becomes true.
+       */
+      const change = deriveAnswerChange(prior, selectedIndex);
+      const firstSelectedIndex = change.firstSelectedIndex;
 
       const isCorrect = selectedIndex === question.correctIndex;
 
@@ -832,7 +905,7 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
       const decision = decideNext({
         isCorrect,
         confidence: input.confidence ?? null,
-        answerChanged: firstSelectedIndex !== null && firstSelectedIndex !== selectedIndex,
+        answerChanged: change.answerChanged,
         misconceptionCode,
         consecutiveWrongInChapter:
           persistedStreak + inSessionWrongStreak(session) + (isCorrect ? 0 : 1),
@@ -854,6 +927,9 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         answeredAt: clock.now().toISOString(),
       };
 
+      // AN ADDITION, NEVER A REPLACEMENT — the guard above is what makes that
+      // true. It used to be a replacement, and the discarded selection was the
+      // evidence that vanished (D-281).
       const saved = await repository.saveAnswers(
         session.id,
         { ...session.answers, [question.id]: answer },
@@ -876,7 +952,9 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         explanation: question.explanation,
         decision: decision.decision,
         misconceptionCode: decision.misconceptionCode,
-        answeredCount: Object.keys(session.answers).length + (session.answers[question.id] ? 0 : 1),
+        // Always one more than before: a question already answered never
+        // reaches here (D-281).
+        answeredCount: Object.keys(session.answers).length + 1,
         questionCount: session.questionIds.length,
       };
     },
@@ -1015,7 +1093,11 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         startedAt: row.startedAt.toISOString(),
         submittedAt: row.submittedAt?.toISOString() ?? null,
         scorePercent: row.scorePercent,
-        xpEarned: row.xpEarned,
+        // `practice_sessions.xp_earned` STORES THE POST-CAP AMOUNT — it is what
+        // `completeSession` was handed as `capped.awarded`. So the wire field is
+        // `xpAwarded` (D-283); calling it `xpEarned` here made one name mean the
+        // uncapped figure on submit and the awarded one on history.
+        xpAwarded: row.xpEarned,
         isValid: row.isValid,
         invalidReason: row.invalidReason,
       }));
@@ -1030,6 +1112,28 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
      *
      * Per chapter the answer is an EVIDENCE LABEL and never a percentage — see
      * `domain/evidence.ts`.
+     *
+     * =========================================================================
+     * THE CHAPTER TITLES ARE FETCHED IN BULK — D-284.
+     *
+     * This used to be `await deps.readChapter(...)` inside the mastery loop: ONE
+     * QUERY PER CHAPTER THE STUDENT HAS EVER PRACTISED, sequentially, on the
+     * progress screen. It got slower every week a student used the product, and
+     * the shape hid that — nothing in the loop looks like a query.
+     *
+     * The mission's version of the same pattern is bounded by the subject list
+     * and is fixed by issuing the calls together; this one is bounded by usage
+     * and is not, so it is fixed by asking a different question. The student's
+     * own grade and subjects give the whole candidate set in one `listChapters`
+     * per subject — the same bounded cost the mission already pays — and the
+     * mastery rows are titled from that map.
+     *
+     * `readChapter` REMAINS AS A FALLBACK, and it is not defensive padding: a
+     * chapter practised before the student was promoted is not in this grade's
+     * list, and dropping its title would silently blank rows on a history
+     * screen. The fallback fires for those rows only, so the common case is
+     * bounded and the uncommon one is still correct.
+     * =========================================================================
      */
     async getProgress(actor: PracticeActor): Promise<{
       chapters: ChapterProgress[];
@@ -1040,19 +1144,32 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
       const tenantId = await tenantOf(actor.userId);
       authorise(actor, 'read', actor.userId, 'progress', tenantId);
 
-      const [mastery, retention, totalXp, xpToday, sessionsCompleted] = await Promise.all([
+      const [mastery, retention, totalXp, xpToday, sessionsCompleted, context] = await Promise.all([
         deps.readMastery(actor, actor.userId),
         repository.findRetention(actor.userId),
         repository.totalXp(actor.userId),
         repository.xpSince(actor.userId, startOfDay(clock.now())),
         repository.countCompletedSessions(actor.userId),
+        deps.readStudentContext(actor, actor.userId),
       ]);
 
       const dueByChapter = new Map(retention.map((row) => [row.chapterId, row.dueAt]));
 
+      const chaptersBySubject = await Promise.all(
+        context.subjects.map((subjectCode) =>
+          deps.listChapters(actor, { grade: context.grade, subjectCode, limit: 100 }),
+        ),
+      );
+
+      const titleByChapter = new Map(
+        chaptersBySubject.flat().map((chapter) => [chapter.id, chapter]),
+      );
+
       const chapters: ChapterProgress[] = [];
       for (const row of mastery) {
-        const chapter = await deps.readChapter(actor, row.chapterId);
+        // One lookup, and a query only for a chapter outside this grade.
+        const chapter =
+          titleByChapter.get(row.chapterId) ?? (await deps.readChapter(actor, row.chapterId));
         chapters.push({
           chapterId: row.chapterId,
           chapterTitleEn: chapter?.titleEn ?? '',

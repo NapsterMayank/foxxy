@@ -25,3 +25,9 @@ Entries touching `modules/practice`:
 | **D-242** | A per-student advisory lock, taken first in the transaction, closes the daily XP cap |
 | **D-246** | Concurrency is proved with a barrier on an injected seam, not with two awaits |
 | **D-247** | Two silent truncations remain here (`limit: 200`, `limit: 100`) — needs a product decision |
+| **D-281** | The answer key is disclosed once and the record closes with it — a re-answer is a 409 |
+| **D-282** | `first_selected_index` / `answer_changed` are derived from the session, not sent by the client |
+| **D-283** | `HistoryEntry.xpEarned` -> `xpAwarded` — one name meant the capped and the uncapped figure |
+| **D-284** | Two N+1s fixed on `getProgress` and `getTodaysMission`; the counts need `content` to finish |
+| **D-285** | Every XP payout and the daily cap are pinned to literals — relative assertions moved with them |
+| **D-286** | Residue: `answer_changed` is structurally false today, and why that is the honest state |

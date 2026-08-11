@@ -83,6 +83,18 @@ import { toChannelPolicy } from '../modules/notify/index';
  * so no downstream caller can hold an unguarded port — not because they were
  * told not to, but because one is never handed out.
  */
+/**
+ * What `container.authz` says when it is asked a question it cannot answer —
+ * D-324. Exported so the test can pin the WORDING rather than merely the fact
+ * that something threw: the message is the whole value of the change.
+ */
+export const UNWIRED_LINK_READER =
+  'container.authz has no link-status reader and cannot decide a parent-child access ' +
+  'question. It is the CONTENT-ONLY guard: `createAccessGuard` takes a synchronous ' +
+  'reader, every real link status is an async database read, and no module is built ' +
+  'in the composition root — so build your own guard from your module’s injected ' +
+  'readLinkStatus edge, as identity, learner, parent and foxy all do.';
+
 export interface Container {
   readonly config: Config;
   readonly logger: Logger;
@@ -168,6 +180,34 @@ export interface Container {
    * unrelated Razorpay outage start rejecting genuine deliveries.
    */
   readonly payments: PaymentsPort;
+  /**
+   * ==========================================================================
+   * THE CONTENT-ONLY GUARD — D-324. IT CANNOT ANSWER A PARENT-CHILD QUESTION,
+   * AND IT NOW SAYS SO OUT LOUD INSTEAD OF ANSWERING "DENIED".
+   *
+   * `createAccessGuard` takes a SYNCHRONOUS `LinkStatusReader`. Every real
+   * source of a link status is a database read, which is asynchronous, and no
+   * module is constructed in this file — so a correctly-wired reader is not
+   * merely missing here, it is not expressible here. That is why every module
+   * builds its OWN guard per call, from its own injected async edge, and why
+   * this member has exactly one honest use: `{ kind: 'content' }`, the one
+   * resource kind whose rules never consult a link.
+   *
+   * It used to be built with `readLinkStatus: () => null` under a comment
+   * saying the reader would be wired "in build step 4". Build step 4 shipped.
+   * The line did not change. That is the same shape as D-257's
+   * `readPlan: () => null` — a stand-in that is a perfectly valid dependency,
+   * so nothing fails — and it was harmless only by accident: a `null` link
+   * status is an indistinguishable DENY, so the next caller to reach for
+   * `container.authz` instead of building their own guard would have got a
+   * boundary that refuses every APPROVED parent, silently, forever.
+   *
+   * The reader now THROWS a named error. A caller who asks this guard a
+   * parent-child question gets a failure that names the mistake, rather than a
+   * refusal indistinguishable from a real authorisation decision. Fail-closed
+   * either way; only one of the two can be noticed.
+   * ==========================================================================
+   */
   readonly authz: AccessGuard;
   readonly resilience: ResilienceRegistry;
   readonly databaseProbe: DatabaseProbe;
@@ -378,6 +418,39 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
     metrics,
   });
 
+  /**
+   * ==========================================================================
+   * WHICH BOOT REFUSALS APPLY TO THIS PROCESS — D-323.
+   *
+   * The five production gates below used to be ROLE-BLIND, so `worker-main.ts`
+   * — a process whose entire job is claiming digest jobs and sending email —
+   * refused to start without `VOYAGE_API_KEY`, `LLM_API_KEY` and all three
+   * `RAZORPAY_*` credentials. It never embeds, never calls a model and never
+   * touches a payment: `createWorker` is handed `modules.notify` and nothing
+   * else. A refusal that names a credential the process cannot use is not
+   * safety, it is a deployment that cannot start for a reason nobody can act
+   * on — and the usual resolution is to paste a placeholder, which makes the
+   * NEXT refusal on that variable meaningless.
+   *
+   * A gate is justified by "this process would silently take the fake and be
+   * wrong". So:
+   *
+   *   mail       BOTH. The api sends verification and password-reset links;
+   *              the worker sends the weekly digest. A console mailer in
+   *              either is a total failure with no symptom.
+   *   embed      API only — retrieval runs inside a Foxy turn.
+   *   llm        API only — same request.
+   *   payments   API only — checkout and the webhook are HTTP endpoints.
+   *   journal    BOTH, and deliberately: it is not a credential but a
+   *              statement about the SCHEMA, and a worker running against a
+   *              half-migrated database is the same hazard as an api doing it.
+   *
+   * The role is already known here (it trims the pools above), so this costs
+   * one boolean rather than a second entry point.
+   * ==========================================================================
+   */
+  const servesRequests = role === 'api';
+
   const rawCache = overrides.cache ?? createValkeyCache({ url: config.cache.url });
   const cache = createGuardedCache(rawCache, resilience.guard('cache'));
 
@@ -439,6 +512,24 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
           user: config.mail.smtpUser,
           password: config.mail.smtpPassword,
           from: config.mail.smtpFrom,
+          /**
+           * THE SOCKET'S DEADLINES, FROM THE §4 TABLE — D-332.
+           *
+           * The same `mail` row the port guard below is built from, so the
+           * socket and the guard cannot drift into disagreeing about how patient
+           * this dependency is allowed to be. Passed explicitly rather than left
+           * to the adapter's default so that retuning §4 retunes both, and so
+           * that this composition root shows the deadline exists.
+           *
+           * The guard bounds the CALLER's wait; these close the SOCKET. Without
+           * them a wedged connection holds a file descriptor and one of the five
+           * `mail` concurrency slots long after the guard gave up — and the
+           * alert evaluator awaits `deliver()` inside its cycle, so one such
+           * socket stalls every rule it has.
+           */
+          connectionTimeoutMs: config.timeouts.mail.connectMs,
+          greetingTimeoutMs: config.timeouts.mail.connectMs,
+          socketTimeoutMs: config.timeouts.mail.totalMs,
         }
       : null;
 
@@ -475,7 +566,12 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
    * exactly like an answer that was grounded properly". A warn line in a log
    * nobody reads is not a defence against a failure with no symptom.
    */
-  if (config.isProduction && overrides.embed === undefined && config.ai.voyageApiKey === null) {
+  if (
+    config.isProduction &&
+    servesRequests &&
+    overrides.embed === undefined &&
+    config.ai.voyageApiKey === null
+  ) {
     throw new Error(
       'VOYAGE_API_KEY is required in production. Without it the deterministic ' +
         'embedding fake would be used, and every retrieval query would be embedded ' +
@@ -500,7 +596,12 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
    * A warn line in a log nobody reads is not a defence against a failure with
    * no symptom.
    */
-  if (config.isProduction && overrides.llm === undefined && config.ai.llmApiKey === null) {
+  if (
+    config.isProduction &&
+    servesRequests &&
+    overrides.llm === undefined &&
+    config.ai.llmApiKey === null
+  ) {
     throw new Error(
       'LLM_API_KEY is required in production. Without it the deterministic scripted ' +
         'fake would be used, and every Foxy answer would be the same canned sentence — ' +
@@ -571,7 +672,12 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
         }
       : null;
 
-  if (config.isProduction && overrides.payments === undefined && paymentsMissing !== null) {
+  if (
+    config.isProduction &&
+    servesRequests &&
+    overrides.payments === undefined &&
+    paymentsMissing !== null
+  ) {
     throw new Error(
       `${paymentsMissing} is required in production. Without the Razorpay credentials the ` +
         'deterministic payments fake would be used, and it happily creates subscriptions and ' +
@@ -607,11 +713,17 @@ export function createContainer(config: Config, overrides: ContainerOverrides = 
     resilience.guard('payments'),
   );
 
-  // The link reader is wired to the identity repository in build step 4.
-  // Until that module exists the guard denies every parent-child read, which
-  // is the correct posture for a boundary that has no data source yet.
+  /**
+   * See `Container.authz` — D-324. Content-only, and loud about it.
+   *
+   * The reader is unreachable for every resource kind except a parent reading
+   * a student's data, so this throws exactly where the old `() => null`
+   * silently denied and nowhere else.
+   */
   const authz = createAccessGuard({
-    readLinkStatus: () => null,
+    readLinkStatus: (): never => {
+      throw new Error(UNWIRED_LINK_READER);
+    },
   });
 
   /**

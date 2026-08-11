@@ -1,4 +1,8 @@
 import nodemailer from 'nodemailer';
+// The §4 timeout table, not a number invented here. See `SMTP_TIMEOUT_DEFAULTS`.
+// Imported from the module rather than from `config/index`, which loads and
+// validates the whole environment as an import side effect.
+import { DEFAULT_TIMEOUT_POLICY } from '../config/timeouts';
 import { renderMail } from './mail-templates';
 import type { MailMessage, MailPort } from './mail.port';
 
@@ -63,7 +67,98 @@ export interface SmtpConfig {
   readonly password: string;
   /** The visible From address. May be an alias of `user`. */
   readonly from: string;
+  /**
+   * ==========================================================================
+   * THE SOCKET'S OWN DEADLINES — D-332. §4: "every outbound call has a timeout.
+   * A call without one is a defect."
+   *
+   * This transport had NONE of the three. nodemailer's own defaults for
+   * `connectionTimeout`, `greetingTimeout` and `socketTimeout` are effectively
+   * "wait for the OS", which for a silently dropped TCP connection is minutes.
+   *
+   * TWO CONSEQUENCES, AND THE SECOND ONE IS THE EXPENSIVE ONE.
+   *
+   *  1. Signup and password-reset mail inherit the hang. A request holds a
+   *     connection, a pool slot and a stack for as long as the socket wedges.
+   *
+   *  2. THE ALERT EVALUATOR AWAITS `deliver()` INSIDE `runCycle`, and the loop
+   *     awaits `runCycle`. One wedged SMTP socket therefore stalls EVERY rule —
+   *     readiness, pool saturation, backup age — so the monitoring goes dark at
+   *     exactly the moment something is wrong enough to be sending mail about.
+   *
+   * `createGuardedMail` bounds the CALLER's wait via the port guard, and that is
+   * genuinely load-bearing, but a race only stops us waiting: it cannot close
+   * the socket. The wedged connection stays open, holding a file descriptor and
+   * one of the five `mail` concurrency slots until the OS gives up. A
+   * socket-level deadline is strictly better than an outer race, and having both
+   * is better still — the guard bounds the request, these bound the resource.
+   *
+   * OPTIONAL WITH DEFAULTS rather than required, and the defaults are not
+   * invented here: they are the §4 `mail` row (`connectMs` / `totalMs`) that
+   * every other mail deadline in the system already comes from. A caller that
+   * forgets therefore still gets a deadline, which is the point — "a call
+   * without one is a defect" must not be satisfiable by omission.
+   * ==========================================================================
+   */
+  readonly connectionTimeoutMs?: number;
+  /** How long to wait for the server's SMTP banner after connecting. */
+  readonly greetingTimeoutMs?: number;
+  /** How long a socket may sit idle mid-conversation before it is destroyed. */
+  readonly socketTimeoutMs?: number;
 }
+
+/**
+ * The §4 `mail` row, applied at the socket — D-332.
+ *
+ * `connectMs` bounds the TCP connect and, separately, the wait for the banner:
+ * a server that accepts a connection and then never greets is the same outage as
+ * one that never accepts, and neither deserves more patience than the other.
+ * `totalMs` bounds socket idleness, because it is the whole call's budget and
+ * there is nothing left to spend once it is gone.
+ */
+export const SMTP_TIMEOUT_DEFAULTS = Object.freeze({
+  connectionTimeoutMs: DEFAULT_TIMEOUT_POLICY.mail.connectMs,
+  greetingTimeoutMs: DEFAULT_TIMEOUT_POLICY.mail.connectMs,
+  socketTimeoutMs: DEFAULT_TIMEOUT_POLICY.mail.totalMs,
+});
+
+/**
+ * Exactly the nodemailer options this adapter sets, named structurally so the
+ * transport can be faked — see `SmtpTransportFactory`.
+ */
+export interface SmtpTransportOptions {
+  readonly host: string;
+  readonly port: number;
+  readonly secure: boolean;
+  readonly requireTLS: boolean;
+  readonly auth: { readonly user: string; readonly pass: string };
+  readonly connectionTimeout: number;
+  readonly greetingTimeout: number;
+  readonly socketTimeout: number;
+}
+
+/** The one method this adapter uses of whatever nodemailer hands back. */
+export interface SmtpSender {
+  sendMail(message: {
+    readonly from: string;
+    readonly to: string;
+    readonly subject: string;
+    readonly text: string;
+  }): Promise<unknown>;
+}
+
+/**
+ * How a transport is constructed — D-332, and the seam that makes the deadlines
+ * assertable.
+ *
+ * Without it, "does this transport carry a socket timeout" is answerable only by
+ * opening a socket to a real SMTP server that hangs, which no test in this
+ * repository is allowed to do. With it, a test supplies its own factory, reads
+ * the options it was handed, and can drive a send that never settles.
+ */
+export type SmtpTransportFactory = (options: SmtpTransportOptions) => SmtpSender;
+
+const nodemailerFactory: SmtpTransportFactory = (options) => nodemailer.createTransport(options);
 
 /**
  * The one function that knows nodemailer exists.
@@ -77,14 +172,26 @@ export interface SmtpConfig {
  * FAILURE rather than a silent downgrade to plaintext. Sending a password-reset
  * link in the clear because the peer declined an upgrade is precisely the kind
  * of quiet degradation this file exists to stop.
+ *
+ * All three socket deadlines are set here — D-332. See `SmtpConfig` for why a
+ * transport without them stalls the alert evaluator as well as signup.
  */
-export function createNodemailerTransport(smtp: SmtpConfig): MailTransport {
-  const transporter = nodemailer.createTransport({
+export function createNodemailerTransport(
+  smtp: SmtpConfig,
+  createTransport: SmtpTransportFactory = nodemailerFactory,
+): MailTransport {
+  const transporter = createTransport({
     host: smtp.host,
     port: smtp.port,
     secure: smtp.port === 465,
     requireTLS: smtp.port !== 465,
     auth: { user: smtp.user, pass: smtp.password },
+    // D-332. `??`, not `||`: a caller that means "no patience at all" is wrong,
+    // but silently substituting ten seconds for their zero would be a second
+    // wrong on top of it.
+    connectionTimeout: smtp.connectionTimeoutMs ?? SMTP_TIMEOUT_DEFAULTS.connectionTimeoutMs,
+    greetingTimeout: smtp.greetingTimeoutMs ?? SMTP_TIMEOUT_DEFAULTS.greetingTimeoutMs,
+    socketTimeout: smtp.socketTimeoutMs ?? SMTP_TIMEOUT_DEFAULTS.socketTimeoutMs,
   });
 
   return {

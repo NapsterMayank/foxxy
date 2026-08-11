@@ -86,11 +86,36 @@ export function createShutdownController(options: ShutdownOptions): ShutdownCont
     shuttingDown = true;
     logger.warn({ reason, drainTimeoutMs }, 'shutdown started; readiness is now 503');
 
-    const drained = await withDeadline(app.close(), drainTimeoutMs);
-    if (!drained) {
+    /**
+     * ========================================================================
+     * `app.close()` REJECTING MUST NOT SKIP THE REST OF THE SEQUENCE — D-304.
+     *
+     * This await was bare. Fastify's `close()` runs every registered `onClose`
+     * hook, and any one of them — a cache client that is already gone, a plugin
+     * with a bug — rejecting made `run()` throw HERE, before `closeResources()`
+     * and before `exit(0)`. The pools then stayed held on the database until it
+     * timed them out, and the process sat there until the orchestrator's SIGKILL
+     * arrived: precisely the outcome this file's own header says the deadline
+     * exists to avoid, reached by a different door.
+     *
+     * A failed drain is treated as an UNDRAINED one rather than as a finished
+     * one — `drained` stays false — and gets its own log line, because "the
+     * drain timed out" and "the drain blew up" are different incidents and a
+     * shared message would make the second unreadable.
+     */
+    let drained = false;
+    try {
+      drained = await withDeadline(app.close(), drainTimeoutMs);
+      if (!drained) {
+        logger.error(
+          { reason, drainTimeoutMs },
+          'drain deadline exceeded; closing resources with requests still in flight',
+        );
+      }
+    } catch (error) {
       logger.error(
-        { reason, drainTimeoutMs },
-        'drain deadline exceeded; closing resources with requests still in flight',
+        { reason, err: error instanceof Error ? error.message : String(error) },
+        'the http drain failed; closing resources anyway so the pools are released',
       );
     }
 

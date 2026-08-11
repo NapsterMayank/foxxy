@@ -37,6 +37,7 @@
 import type { Clock } from '../../src/platform/clock/index';
 import type { Logger } from '../../src/platform/logger/index';
 import type {
+  BilingualText,
   ChannelPolicy,
   ChannelRecipient,
   NotificationDispatcher,
@@ -80,6 +81,44 @@ export interface AlertEvaluator {
   runCycle(signals: Signals): Promise<CycleResult>;
 }
 
+/**
+ * THE RUNBOOK PATH, INTO THE BODY, IN BOTH LANGUAGES.
+ *
+ * =============================================================================
+ * IT WAS BEING LOST BETWEEN THIS FILE AND THE INBOX.
+ *
+ * `deliver()` puts `runbook` in `ChannelMessage.data`, which is right and stays.
+ * But `email-channel.ts` maps only `kind`, `title`, `body` and `language` onto
+ * the mail template — `MailPort.data` is `Record<string, string>` and the
+ * channel deliberately does not widen it. So every field in `data` except those
+ * four is dropped on the floor, and the on-call email arrived carrying the
+ * sentence "check the runbook" and no runbook.
+ *
+ * At 3am the difference between a page with a path in it and a page without one
+ * is several minutes of somebody grepping `docs/runbooks/` on a phone. The
+ * runbook line is the single most actionable thing in the message and it was the
+ * one part that did not survive delivery.
+ *
+ * =============================================================================
+ * FIXED IN THE BODY RATHER THAN IN THE CHANNEL, ON PURPOSE.
+ *
+ * The channel-side fix is to give `mail` a real `ops-alert` template with its own
+ * fields — which is the correct end state, is a change to a file this work does
+ * not own, and is reported rather than done. Appending to the body here needs
+ * nothing from anybody: it survives EVERY channel (email, in-app, and whatever
+ * pager adapter lands later) because it is part of the message rather than part
+ * of a payload each channel decides whether to render.
+ *
+ * `data.runbook` stays as well. It is the machine-readable copy, and the in-app
+ * row keeps it.
+ */
+export function withRunbookLine(body: BilingualText, runbook: string): BilingualText {
+  return {
+    en: `${body.en}\n\nRunbook: ${runbook}`,
+    hi: `${body.hi}\n\nरनबुक: ${runbook}`,
+  };
+}
+
 export function createAlertEvaluator(options: AlertEvaluatorOptions): AlertEvaluator {
   const { dispatcher, recipient, logger, clock } = options;
   const rules = options.rules ?? ALERT_RULES;
@@ -92,7 +131,9 @@ export function createAlertEvaluator(options: AlertEvaluatorOptions): AlertEvalu
     const outcome = await dispatcher.send(recipient, {
       kind,
       title: alert.title,
-      body: alert.body,
+      // The runbook path travels IN THE BODY, because `data` does not survive
+      // the email channel. See `withRunbookLine`.
+      body: withRunbookLine(alert.body, alert.runbook),
       // IDENTIFIERS AND COUNTS ONLY. P13, and the same rule the in-app channel
       // scrubs against on the way into the database. An alert payload is a
       // tempting place to attach "the affected user" and that is precisely how

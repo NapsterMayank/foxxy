@@ -31,6 +31,7 @@ import {
 import type {
   ForgotPasswordRequest,
   LoginRequest,
+  ResendVerificationRequest,
   ResetPasswordRequest,
   SignupRequest,
 } from '@/shared/contracts/identity.contract';
@@ -236,6 +237,14 @@ export interface IdentityServiceDeps {
 
 export interface IdentityService {
   signup(input: SignupRequest, context: RequestContext): Promise<void>;
+  /**
+   * Re-mails a verification link — D-291, the recovery path D-217 assumed.
+   *
+   * Returns `void` on every branch and reveals nothing: unknown address,
+   * already-verified address and awaiting-verification address are
+   * indistinguishable to the caller.
+   */
+  resendVerification(input: ResendVerificationRequest, context: RequestContext): Promise<void>;
   verifyEmail(token: string, context: RequestContext): Promise<AuthenticatedResult>;
   login(input: LoginRequest, context: RequestContext): Promise<AuthenticatedResult>;
   /**
@@ -379,6 +388,25 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
   }
 
   /**
+   * The verification message, built in ONE place — D-291.
+   *
+   * Signup and the resend endpoint must produce the SAME link, against the same
+   * endpoint, with the same encoding. Two copies of a URL template is two things
+   * that can disagree, and the way they disagree is that one of them stops
+   * verifying accounts — which is precisely the failure the resend endpoint was
+   * added to repair.
+   */
+  function verificationMail(to: string, token: string): MailMessage {
+    return {
+      to,
+      template: 'email-verification',
+      data: {
+        verifyUrl: `${urls.apiBaseUrl}/api/v1/auth/verify?token=${encodeURIComponent(token)}`,
+      },
+    };
+  }
+
+  /**
    * Builds the access guard for ONE decision, with the link status read now.
    *
    * §7 rule 3: link status is read at query time and never cached in the
@@ -514,19 +542,116 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
       });
 
       // The token row is COMMITTED above, so a send that never happens is
-      // recoverable by a resend. That ordering is what makes deferring safe.
-      deferMail(
-        {
-          to: email,
-          template: 'email-verification',
-          data: {
-            verifyUrl: `${urls.apiBaseUrl}/api/v1/auth/verify?token=${encodeURIComponent(token)}`,
-          },
-        },
-        'signup.verification_mail_failed',
-      );
+      // recoverable by a resend. That ordering is what makes deferring safe —
+      // and as of D-291 the resend it refers to is a real endpoint.
+      deferMail(verificationMail(email, token), 'signup.verification_mail_failed');
 
       logger.info({ event: 'signup.created', role: input.role }, 'account created');
+    },
+
+    /**
+     * THE RECOVERY PATH — D-291. `POST /api/v1/auth/resend-verification`.
+     *
+     * ========================================================================
+     * WHY IT EXISTS. D-217 made signup survive a mail outage by taking the send
+     * off the request path, and justified the fire-and-forget send with a
+     * recovery path stated as already existing: "the verification and reset
+     * tokens are committed rows, so a resend re-mails the token that is already
+     * persisted." There were seven `/auth/*` routes and none of them resent
+     * anything. An auditor confirmed it against a real server: with mail down, a
+     * signup returned 201, the user row was created, no job was queued, and the
+     * account was unverifiable and its address permanently taken. The account
+     * survived the outage exactly as designed and was useless anyway.
+     *
+     * ========================================================================
+     * THE RESPONSE IS CONSTANT ACROSS THREE BRANCHES, not two, and the third is
+     * the one specific to this endpoint: unknown address, address awaiting
+     * verification, and address ALREADY VERIFIED all return the same thing. A
+     * distinct answer for "already verified" would leak both that the account
+     * exists AND what state it is in — a strictly worse oracle than the one
+     * `signup` and `forgot-password` are shaped to close.
+     *
+     * The structure is D-218's, applied to a third endpoint:
+     *
+     *  1. BOTH rate-limit counters are consumed before anything else, so a
+     *     rejected request costs a cache round trip and no database work.
+     *  2. THE TOKEN IS GENERATED BEFORE THE BRANCH, on every path, in the same
+     *     spirit as login's dummy Argon2 verification. It costs one
+     *     `randomBytes` and one SHA-256 whether or not it is ever stored.
+     *  3. THE SEND IS DEFERRED, so it contributes to no branch's latency. It was
+     *     the only term large enough to be measured from the internet.
+     *
+     * What remains on the mailing branch is ONE small transaction — sub-
+     * millisecond, far below the jitter of any network an attacker could measure
+     * across, and the same residual `requestPasswordReset` carries.
+     *
+     * ========================================================================
+     * A NOTE ON "REUSES THE PERSISTED TOKEN", because the obvious reading of that
+     * requirement is not implementable and silence about it would look like an
+     * oversight. `email_verification_tokens` stores a SHA-256 OF the token and
+     * never the token (§6.1) — that is the whole point of the column — so there
+     * is nothing to re-mail from a surviving row. A resend must therefore mint a
+     * fresh token, and the honest version of "or issues a fresh one and consumes
+     * the old" is what happens on every call: `reissueEmailVerificationToken`
+     * retires every outstanding row for the user and inserts the new one in ONE
+     * transaction, so there is never more than one live link and never zero.
+     */
+    async resendVerification(
+      input: ResendVerificationRequest,
+      context: RequestContext,
+    ): Promise<void> {
+      const email = normaliseEmail(input.email);
+      const emailKey = hashIdentifier(email);
+
+      // BOTH counters, and before any lookup. The IP counter shares the token
+      // endpoints' budget; the email counter is what stops this being a mail
+      // bomb aimed at one address by a caller with many hosts.
+      await limiter.consume(
+        rateLimitKeys.tokenEndpointByIp(context.ipHash),
+        TOKEN_ENDPOINT_RATE_LIMIT,
+      );
+      await limiter.consume(
+        rateLimitKeys.resendVerificationByEmail(emailKey),
+        TOKEN_ENDPOINT_RATE_LIMIT,
+      );
+
+      const now = clock.now();
+      // BEFORE the branch, on all three paths. See point 2 above.
+      const { token, hash } = generateToken(deps.randomBytes);
+
+      const user = await repository.findUserByEmail(email);
+      if (user === null) {
+        logger.info(
+          { event: 'resend_verification.unknown_address' },
+          'verification resend requested for no account',
+        );
+        return;
+      }
+
+      if (user.emailVerifiedAt !== null) {
+        // Nothing to resend, and nothing said about it. A verified account that
+        // receives no email is the correct outcome: the link would grant a
+        // session for an address whose owner did not ask for one.
+        logger.info(
+          { event: 'resend_verification.already_verified' },
+          'verification resend requested for an already-verified account',
+        );
+        return;
+      }
+
+      await repository.reissueEmailVerificationToken({
+        userId: user.id,
+        tokenHash: hash,
+        expiresAt: expiryFrom(now, EMAIL_VERIFICATION_TTL_MS),
+        now,
+      });
+
+      // Committed above, then deferred — the same ordering as signup, and for
+      // the same reason: a send that never happens costs one email, and the
+      // caller can ask again.
+      deferMail(verificationMail(email, token), 'resend_verification.mail_failed');
+
+      logger.info({ event: 'resend_verification.sent' }, 'verification email queued');
     },
 
     /**

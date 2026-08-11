@@ -119,13 +119,49 @@ export const FOXY_HISTORY_TURNS = 6;
  * in-memory counter stops working the moment a second instance runs and it
  * fails SILENTLY — the limit reads as enforced and is not).
  *
- * `billing` does not exist yet, so every account resolves to `free` through the
- * injected plan reader. That is stated as a default rather than hidden as one:
- * when billing lands it supplies the real reader and nothing else changes.
+ * BILLING NOW SUPPLIES THE PLAN. This paragraph used to read "`billing` does
+ * not exist yet, so every account resolves to `free` through the injected plan
+ * reader" — and it went on saying so after billing shipped, which is the prose
+ * half of D-257. `app/routes.ts`'s `createFoxyPlanReader` resolves a real
+ * entitlement per turn: `hasFeature(entitlements, 'foxy.unlimited')` maps to
+ * `plus`, everything else to `free`.
  */
 export const FOXY_PLANS = ['free', 'plus'] as const;
 export type FoxyPlan = (typeof FOXY_PLANS)[number];
 
+/**
+ * ===========================================================================
+ * THE TWO NUMBERS, AND WHY THEY ARE PINNED TO LITERALS SOMEWHERE — D-321.
+ *
+ * An audit changed `free: 20 -> 5000` and `plus: 200 -> 9000` and THE ENTIRE
+ * SUITE STAYED GREEN. Every test referenced the symbol, so every test moved
+ * with it; the only absolute claim anywhere in the codebase was
+ * `plus > free`, which survives any pair of numbers at all — including a free
+ * tier of five thousand messages a day, which is not a cap, it is an unmetered
+ * LLM budget with a comment on it.
+ *
+ * Meanwhile FIVE comments — `modules/foxy/index.ts`, `foxy.types.ts`,
+ * `app/routes.ts` twice, and `foxy-plan-reader.test.ts` — went on stating the
+ * free cap as 20. That is the D-257 shape again: prose and behaviour drifted,
+ * prose stayed authoritative-looking, and nothing mechanical related the two.
+ *
+ * So the value is asserted AS A LITERAL in
+ * `modules/foxy/__tests__/daily-message-limit.test.ts`, alongside two
+ * properties a symbol-relative assertion cannot express:
+ *
+ *   - the free cap must be SMALL ENOUGH TO BIND. A limit no student reaches is
+ *     indistinguishable from no limit, and it is the free tier's LLM spend
+ *     that is being bounded.
+ *   - `plus` must be a MEANINGFUL multiple of `free`. 5000 vs 9000 is 1.8x on
+ *     a ceiling nobody touches — structurally a paid tier, commercially
+ *     nothing. D-257 fixed "every paying customer got the free tier"; a paid
+ *     tier has to be worth buying for that fix to mean anything.
+ *
+ * Changing either number is a COMMERCIAL decision. It changes what a customer
+ * is buying and what the free tier costs to serve, so it fails a test on
+ * purpose rather than passing quietly.
+ * ===========================================================================
+ */
 export const FOXY_DAILY_MESSAGE_LIMIT: Readonly<Record<FoxyPlan, number>> = Object.freeze({
   free: 20,
   plus: 200,

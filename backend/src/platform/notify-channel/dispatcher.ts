@@ -205,10 +205,31 @@ export function createNotificationDispatcher(
       const delivered = results.some((result) => result.delivered);
 
       if (!delivered) {
-        // EVERY channel failed. Distinct from a partial failure and logged at
-        // `error`, because it means the person was not told something the
-        // system decided they needed to know — and nobody will notice from the
-        // outside.
+        /**
+         * EVERY channel failed — D-146, and this counter is the half that was
+         * missing for its whole life.
+         *
+         * The `error` log below has always existed. A log line is not a signal:
+         * nothing aggregates it, no rule can watch it, and "nobody will notice
+         * from the outside" was literally true of the detection as well as of
+         * the failure. `SIGNALS.NOTIFY_FAILED` could not stand in for it either
+         * — that counter is PER CHANNEL, so one notification failing on both of
+         * its channels increments it exactly as much as two notifications each
+         * failing on one channel while their other channel landed. One of those
+         * is a person who was never told; the other is a degraded provider and a
+         * working product. An alert cannot tell them apart from a per-channel
+         * count, which is why this needed its own name rather than a threshold
+         * on the old one.
+         *
+         * KIND ONLY. Not the recipient, not the channel list joined into a
+         * string — the first is PII and the second is unbounded cardinality.
+         * The log line beside it carries the channels for the operator.
+         */
+        metrics.counter(PLATFORM_METRICS.NOTIFY_UNDELIVERABLE, 1, { kind: message.kind });
+
+        // Distinct from a partial failure and logged at `error`, because it
+        // means the person was not told something the system decided they
+        // needed to know.
         logger.error(
           {
             event: 'notify.undeliverable',

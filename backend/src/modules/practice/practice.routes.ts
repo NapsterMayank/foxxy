@@ -72,9 +72,15 @@ export function registerPracticeRoutes(app: FastifyInstance, deps: PracticeRoute
    * §8.6 — one answer.
    *
    * 200 rather than 201: the answer is recorded onto the session that already
-   * exists, and a re-answer of the same question replaces the previous one
-   * rather than creating a second. A 201 would promise a resource that has no
-   * URL.
+   * exists rather than creating a resource, and a 201 would promise one that has
+   * no URL.
+   *
+   * A SECOND ANSWER TO THE SAME QUESTION IS A 409 from the service — D-281. It
+   * used to replace the previous one, which combined with the answer key this
+   * response discloses was a way to score 100% on a session answered entirely
+   * wrong. The status is the same one a duplicate submit gets, for the same
+   * reason: a 200 that quietly kept the first answer would let a client believe
+   * the second one landed.
    */
   app.post(`${API_PREFIX}/practice/sessions/:id/answers`, authenticated, async (request, reply) => {
     const params = parseInput(practiceSchemas.sessionIdParam, request.params);

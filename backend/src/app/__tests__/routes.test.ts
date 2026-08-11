@@ -82,7 +82,26 @@ describe('buildModules', () => {
     ]);
   });
 
-  it('hands each module the pool §3.1 assigns it', () => {
+  it('resolves each module NAME to the pool §3.1 assigns it', () => {
+    /**
+     * RENAMED, AND THE OLD NAME WAS THE DEFECT — D-322.
+     *
+     * This was called "hands each module the pool §3.1 assigns it". It does not
+     * hand anything to anything: it never calls `buildModules`, and every
+     * assertion below reads `built.poolFor(<name>).name`, which is the
+     * `MODULE_POOLS` table evaluated on the container. The test directly below
+     * re-asserts that same table. So the table was checked twice and the
+     * WIRING — which module actually received which handle — was checked
+     * nowhere, while a test bearing the wiring's name sat green.
+     *
+     * That is not hypothetical: an audit repointed `foxy` at the `identity`
+     * pool inside `buildModules` and all 164 app tests passed, this one
+     * included. The wiring assertion now lives in `module-pool-wiring.test.ts`,
+     * which drives each module until it touches a database and reads back which
+     * handle it reached for. This block keeps its value — `poolFor` is the
+     * lookup both of them depend on — under a name that claims only what it
+     * does.
+     */
     // THE BULKHEAD, asserted rather than trusted. `container.db` used to exist
     // and aliased the `auth` pool; the second module to be written would have
     // taken it, and every learner query would then have competed with login
@@ -153,8 +172,9 @@ describe('buildModules', () => {
     // retrieval holds `content.getChunksByIds` the same way.
     expect(modules.retrieval.service).toBeDefined();
     // foxy holds SIX injected edges — `retrieval.search`, learner's profile and
-    // subjects, learner's preferred language, identity's tenant reader, and a
-    // plan reader standing in for `billing`, which does not exist yet. Not one
+    // subjects, learner's preferred language, identity's tenant reader, and
+    // billing's plan reader (`createFoxyPlanReader`, which resolves a REAL
+    // entitlement; the stand-in this comment used to describe is D-257). Not one
     // of them is an import, which is what keeps this file the complete graph.
     expect(modules.foxy.service).toBeDefined();
     // billing holds two injected edges — identity's tenant reader and the

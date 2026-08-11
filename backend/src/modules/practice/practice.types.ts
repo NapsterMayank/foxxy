@@ -162,7 +162,17 @@ export interface RecordedAnswer {
   readonly questionId: string;
   /** CANONICAL (D-058). Already translated out of the presentation order. */
   readonly selectedIndex: number;
-  /** CANONICAL. Null when the interface did not record a first choice. */
+  /**
+   * CANONICAL. DERIVED BY THE SERVER from the session's own record — D-282,
+   * `domain/answer-change.ts` — never accepted from the request, which no longer
+   * carries the field.
+   *
+   * Still nullable in the TYPE and never null in a value written since D-282:
+   * this shape is read back out of a jsonb column, so a session that was already
+   * in flight when that landed can hold a row whose first choice was never
+   * recorded. `deriveAnswerChange` treats that as "seed from the prior
+   * selection" rather than pretending it is known.
+   */
   readonly firstSelectedIndex: number | null;
   readonly isCorrect: boolean;
   readonly timeSpentMs: number;

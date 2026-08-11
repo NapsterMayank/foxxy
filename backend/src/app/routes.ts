@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { Actor, LinkStatus } from '../platform/authz/index';
+import { NotFoundError } from '../platform/errors/index';
 import type { Payer } from '../platform/payments/index';
 import { createRateLimiter } from '../platform/rate-limit/index';
 import type { FoxyPlan } from '../shared/constants/foxy';
@@ -243,6 +244,59 @@ export function createFoxyPlanReader(
  * cannot afford an intermittent bug. `APP_URL` and `API_URL` are required
  * variables, so a deployment that forgets them fails at boot instead.
  */
+/**
+ * ============================================================================
+ * ONLY `NotFoundError` BECOMES `null` — D-325, MADE TESTABLE. D-334.
+ *
+ * This was a BARE `catch` inside `buildModules`, and a bare catch here is a
+ * translator that cannot tell the two kinds of "no chapter came back" apart. A
+ * withdrawn chapter is a 404 inside `content`, and practice wants that as a
+ * VALUE — it has its own wording for it, and a session whose chapter was
+ * withdrawn mid-flight must not surface content's.
+ *
+ * But a pool exhaustion, a statement timeout, a breaker rejection or a
+ * `ForbiddenError` is not "there is no such chapter". Swallowing those turned a
+ * dependency failure into a 404: nothing propagated, no breaker saw a failure it
+ * should have counted, no metric moved, and the student was told the chapter
+ * does not exist — the one answer guaranteed to make them stop looking.
+ * `platform/db` under load would have presented as a curriculum that had
+ * quietly emptied.
+ *
+ * ----------------------------------------------------------------------------
+ * WHY IT IS A NAMED EXPORT AND NOT AN INLINE CLOSURE, WHICH IS THE WHOLE POINT
+ * OF THIS CHANGE.
+ *
+ * The narrowing was correct and UNPROVEN. As a local closure inside
+ * `buildModules` it had no seam: reaching it required a container, a real
+ * content module, a database, and then a way to make that database fail in two
+ * distinguishable ways — so in practice nothing tested it, and the difference
+ * between `catch {}` and `if (error instanceof NotFoundError)` was invisible to
+ * the suite. That is exactly how the bare catch survived in the first place.
+ *
+ * Lifted out and exported, the two branches are two three-line tests with no
+ * infrastructure at all — the same move D-257 made for `createFoxyPlanReader`,
+ * for the same reason, after the same class of silent defect.
+ *
+ * Generic over the actor and the chapter so it stays a pure error-translation
+ * rule: it cannot start knowing what a chapter is, and a test can drive it with
+ * a two-field fake.
+ * ============================================================================
+ */
+export function createPracticeChapterReader<TActor, TChapter>(
+  readChapter: (actor: TActor, chapterId: string) => Promise<TChapter>,
+): (actor: TActor, chapterId: string) => Promise<TChapter | null> {
+  return async (actor: TActor, chapterId: string): Promise<TChapter | null> => {
+    try {
+      return await readChapter(actor, chapterId);
+    } catch (error) {
+      if (error instanceof NotFoundError) return null;
+      // EVERYTHING else propagates. See the header: a swallowed dependency
+      // failure reaches the student as "no such chapter".
+      throw error;
+    }
+  };
+}
+
 export function buildModules(container: Container, options: BuildModulesOptions = {}): Modules {
   const { config } = container;
   const forWorker = options.forWorker === true;
@@ -420,17 +474,16 @@ export function buildModules(container: Container, options: BuildModulesOptions 
     requireSession: identity.requireSession,
 
     readQuestions: (actor, query) => content.service.getQuestionsForChapter(actor, query),
-    readChapter: async (actor, chapterId) => {
-      try {
-        return await content.service.getChapter(actor, chapterId);
-      } catch {
-        // A withdrawn chapter is a 404 inside `content`; practice wants "there
-        // is no such chapter" as a VALUE, because it has its own message for it
-        // and because a session whose chapter was withdrawn mid-flight must not
-        // surface content's wording.
-        return null;
-      }
-    },
+    /**
+     * D-325's narrowing, now a named export so it can be tested — D-334. See
+     * `createPracticeChapterReader` above for why the inline version was
+     * correct and unprovable.
+     */
+    // `Actor` rather than `PracticeActor`, which is an alias of it — the
+    // annotation is what lets the generic infer, and `Actor` is already imported.
+    readChapter: createPracticeChapterReader((actor: Actor, chapterId: string) =>
+      content.service.getChapter(actor, chapterId),
+    ),
     listChapters: (actor, filter) =>
       content.service.listChapters(actor, {
         grade: filter.grade,
@@ -602,8 +655,13 @@ export function buildModules(container: Container, options: BuildModulesOptions 
    * Six injected edges, to four modules, all visible here and none of them an
    * import: the retrieval itself from `retrieval`, the grade/subjects and the
    * preferred language from `learner`, the account tenant from `identity`, and
-   * the subscription plan from `billing` — which does not exist, so the reader
-   * below reports "no subscription" and the service reads that as `free`.
+   * the subscription plan from `billing` through `createFoxyPlanReader`, which
+   * resolves a REAL entitlement on every turn.
+   *
+   * (This sentence used to end "— which does not exist, so the reader below
+   * reports no subscription". Billing shipped and the sentence outlived it.
+   * That is the same drift as D-257 itself, and as the five comments that went
+   * on describing a 20-message free cap — see D-321.)
    *
    * THREE LINES BELOW ARE LOAD-BEARING.
    *

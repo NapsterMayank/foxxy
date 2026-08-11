@@ -124,6 +124,14 @@ export interface WorkerLiveness {
   readonly stale: boolean;
 }
 
+/**
+ * The driver may hand back a `Date` or an ISO string for a `timestamptz`.
+ * Normalised at the row boundary — see `readWorkerLiveness`.
+ */
+function toDate(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value);
+}
+
 export async function readWorkerLiveness(
   db: DbHandle,
   now: Date,
@@ -131,7 +139,31 @@ export async function readWorkerLiveness(
 ): Promise<readonly WorkerLiveness[]> {
   const result = await db.db.execute<{
     worker_id: string;
-    last_beat_at: Date;
+    /**
+     * ========================================================================
+     * `Date | string`, NOT `Date` — D-305, and it is D-233/D-267 again.
+     *
+     * This was declared `Date` and then had `.getTime()` called on it eleven
+     * lines below. `db.execute` runs raw SQL through node-postgres, and what
+     * comes back for a `timestamptz` is WIRE TEXT unless a type parser says
+     * otherwise — so this function threw `row.last_beat_at.getTime is not a
+     * function` on its very first run against a real database.
+     *
+     * `postgres-queue.ts`, in this same directory, on this same driver, carries
+     * a long comment explaining exactly this and typing all three of its
+     * timestamps as the union. That entry predicted the failure precisely: "the
+     * first caller to write `job.runAt.getTime()` gets a `TypeError` in a
+     * worker, at runtime, with a compiler that had already signed off on it."
+     * This file was simply not repaired at the same time, and the only reason
+     * nobody hit it is that `readWorkerLiveness` had no callers — which is not
+     * a reason it was safe, it is a reason it was untested.
+     *
+     * Typed as the union the driver actually returns and normalised once, so
+     * the honesty stops at the boundary and `WorkerLiveness.lastBeatAt` is the
+     * real `Date` it has always claimed to be.
+     * ========================================================================
+     */
+    last_beat_at: Date | string;
     status: string;
     jobs_processed: string;
   }>(sql`
@@ -141,11 +173,15 @@ export async function readWorkerLiveness(
     order by last_beat_at desc
   `);
 
-  return result.rows.map((row) => ({
-    workerId: row.worker_id,
-    lastBeatAt: row.last_beat_at,
-    status: row.status,
-    jobsProcessed: Number(row.jobs_processed),
-    stale: now.getTime() - row.last_beat_at.getTime() > staleAfterMs,
-  }));
+  return result.rows.map((row) => {
+    // D-305 — normalised, not asserted. See the field's comment above.
+    const lastBeatAt = toDate(row.last_beat_at);
+    return {
+      workerId: row.worker_id,
+      lastBeatAt,
+      status: row.status,
+      jobsProcessed: Number(row.jobs_processed),
+      stale: now.getTime() - lastBeatAt.getTime() > staleAfterMs,
+    };
+  });
 }

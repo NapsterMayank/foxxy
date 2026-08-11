@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PLATFORM_ROLES } from '../constants/roles';
 
 /**
  * The identity wire contract — every request and response shape for the
@@ -15,6 +16,33 @@ import { z } from 'zod';
 /** Roles are fixed at signup. A person who is both holds two accounts. */
 export const roleSchema = z.enum(['student', 'parent']);
 export type Role = z.infer<typeof roleSchema>;
+
+/**
+ * EVERY role the `users.role` COLUMN accepts — ten values, not two — D-293.
+ *
+ * ===========================================================================
+ * THIS IS NOT `roleSchema` AND MUST NEVER BECOME IT.
+ *
+ * `roleSchema` above is what a SELF-SERVICE SIGNUP accepts, and it is exactly
+ * `student` and `parent`. Pointing the signup request at the schema below would
+ * compile, insert, and hand the internet a `super_admin` dropdown — the trap
+ * `shared/constants/roles.ts` spells out at length and that a test in
+ * `tests/integration/identity-audit.test.ts` exists to catch.
+ *
+ * This one describes what comes OUT of the database. The CHECK constraint on
+ * `users.role` is built from `PLATFORM_ROLES` (migration 0005), so a row may
+ * legitimately carry any of the ten. Every type that DESCRIBES A ROW must
+ * therefore be this wide, or the compiler is being told something the database
+ * does not guarantee — see `identity.repository.ts` and the same lesson learned
+ * once already in `platform/authz/can-access.ts`, where a `teacher` row
+ * arriving as a value the compiler believed impossible would have been treated
+ * as a PARENT by an "if student … otherwise parent" branch.
+ *
+ * Built FROM the constant rather than retyped, so widening the column widens
+ * this in the same commit and cannot widen signup at all.
+ */
+export const platformRoleSchema = z.enum(PLATFORM_ROLES);
+export type PlatformRoleValue = z.infer<typeof platformRoleSchema>;
 
 export const linkStatusSchema = z.enum(['pending', 'approved', 'revoked']);
 export type LinkStatusValue = z.infer<typeof linkStatusSchema>;
@@ -95,11 +123,23 @@ export const loginRequestSchema = z.object({
 });
 export type LoginRequest = z.infer<typeof loginRequestSchema>;
 
-/** The authenticated account's own profile. No token, ever. */
+/**
+ * The authenticated account's own profile. No token, ever.
+ *
+ * `role` is `platformRoleSchema`, NOT `roleSchema` — D-293. This object
+ * describes a row that already exists rather than an input being accepted, and
+ * the column holds ten values. Declaring it as the two SIGNUP roles was a claim
+ * about the database that the database does not make: the day an operator grants
+ * a `teacher`, that account logs in and this field carries `'teacher'` whatever
+ * the type says. Widening it changes no byte on the wire today (nothing grants a
+ * non-signup role yet) and stops the type from lying the moment something does.
+ *
+ * Signup is unaffected: `signupRequestSchema` above still uses `roleSchema`.
+ */
 export const userProfileSchema = z.object({
   id: z.string().uuid(),
   email: z.string(),
-  role: roleSchema,
+  role: platformRoleSchema,
   emailVerifiedAt: z.string().datetime().nullable(),
   createdAt: z.string().datetime(),
 });
@@ -113,6 +153,26 @@ export type OkResponse = z.infer<typeof okResponseSchema>;
 
 export const forgotPasswordRequestSchema = z.object({ email: emailSchema });
 export type ForgotPasswordRequest = z.infer<typeof forgotPasswordRequestSchema>;
+
+/**
+ * THE RECOVERY PATH D-217 ASSUMED AND NOBODY BUILT — D-291.
+ *
+ * D-217 took mail off the signup request path so that a provider outage could
+ * not 500 a signup whose user row was already committed. Its reasoning rested,
+ * in as many words, on a path that did not exist: "the RECOVERY PATH ALREADY
+ * EXISTS … a resend re-mails the token that is already persisted." There were
+ * seven `/auth/*` routes and none of them resent anything, so a signup during an
+ * outage produced an account whose address was taken, whose verification mail
+ * was gone, and which could neither be verified nor signed up for again.
+ *
+ * The request carries an email and nothing else, and the RESPONSE IS CONSTANT —
+ * identical for an unknown address, an already-verified one and one awaiting
+ * verification. Anything else turns this endpoint into the account-enumeration
+ * oracle that `forgot-password` and `signup` are shaped to avoid, and this one
+ * would leak a second bit besides existence: whether the address is verified.
+ */
+export const resendVerificationRequestSchema = z.object({ email: emailSchema });
+export type ResendVerificationRequest = z.infer<typeof resendVerificationRequestSchema>;
 
 export const resetPasswordRequestSchema = z.object({
   token: opaqueTokenSchema,

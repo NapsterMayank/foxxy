@@ -320,4 +320,85 @@ describe('THE WIRE CARRIES NO ANSWER', () => {
     expect(result.explanation.length).toBeGreaterThan(0);
     expect(typeof result.isCorrect).toBe('boolean');
   });
+
+  /**
+   * D-281 — the disclosure above is only safe because the record closes with it.
+   *
+   * This is the auditor's exploit at the layer it was executed at: read the
+   * revealed position out of the JSON, POST it back to the same endpoint.
+   */
+  it('answers 409 to a re-answer carrying the position it just revealed', async () => {
+    const { account, chapterId } = await seed();
+    const started = await post(
+      '/api/v1/practice/sessions',
+      { chapterId, questionCount: 4 },
+      account.cookie,
+    );
+    const session = practiceSessionResponseSchema.parse(started.json()).session;
+    const question = session.questions[0]!;
+
+    harness.clock.advanceMs(ANSWER_TIME_MS);
+    const first = await post(
+      `/api/v1/practice/sessions/${session.id}/answers`,
+      { questionId: question.id, selectedIndex: 0, timeSpentMs: ANSWER_TIME_MS },
+      account.cookie,
+    );
+    const revealed = answerResultResponseSchema.parse(first.json()).result;
+
+    harness.clock.advanceMs(ANSWER_TIME_MS);
+    const second = await post(
+      `/api/v1/practice/sessions/${session.id}/answers`,
+      {
+        questionId: question.id,
+        selectedIndex: revealed.correctPresentationIndex,
+        timeSpentMs: ANSWER_TIME_MS,
+      },
+      account.cookie,
+    );
+
+    expect(second.statusCode).toBe(409);
+    expect(errorResponseSchema.safeParse(second.json()).success).toBe(true);
+    // The refusal is not an oracle: it says nothing about the answer.
+    expect(second.body).not.toContain('correctPresentationIndex');
+    expect(second.body).not.toContain('explanation');
+    expect(second.body).not.toContain('isCorrect');
+  });
+
+  /**
+   * D-282 — a client that still sends `firstSelectedIndex` cannot influence the
+   * column. Zod strips the unknown key, so the request SUCCEEDS (an old client
+   * is not broken) and the value is ignored.
+   */
+  it('ignores a client-supplied firstSelectedIndex instead of trusting or rejecting it', async () => {
+    const { account, chapterId } = await seed();
+    const started = await post(
+      '/api/v1/practice/sessions',
+      { chapterId, questionCount: 4 },
+      account.cookie,
+    );
+    const session = practiceSessionResponseSchema.parse(started.json()).session;
+    const question = session.questions[0]!;
+
+    harness.clock.advanceMs(ANSWER_TIME_MS);
+    const answered = await post(
+      `/api/v1/practice/sessions/${session.id}/answers`,
+      {
+        questionId: question.id,
+        selectedIndex: 1,
+        // A lie about the student's own past, and the only source this column
+        // used to have.
+        firstSelectedIndex: 3,
+        timeSpentMs: ANSWER_TIME_MS,
+      },
+      account.cookie,
+    );
+    expect(answered.statusCode).toBe(200);
+
+    const { rows } = await harness.postgres.client.query<{
+      answers: Record<string, { selectedIndex: number; firstSelectedIndex: number }>;
+    }>(`select answers from practice_sessions where id = $1`, [session.id]);
+
+    const recorded = rows[0]!.answers[question.id]!;
+    expect(recorded.firstSelectedIndex).toBe(recorded.selectedIndex);
+  });
 });

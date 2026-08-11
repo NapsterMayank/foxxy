@@ -1432,3 +1432,131 @@ describe('getActiveLinkCode', () => {
     ).rejects.toMatchObject({ code: ERROR_CODES.FORBIDDEN });
   });
 });
+
+// ---------------------------------------------------------------------------
+// THE RATE-LIMIT COUNTS, DRIVEN BY LITERALS — D-292.
+//
+// Every rate-limit test above this line loops `attempt < SOME_RATE_LIMIT.limit`
+// and then asserts the next attempt is refused. That asserts the limiter is
+// internally consistent and NOTHING about the number: an auditor changed SIGNUP
+// 3 -> 300, LOGOUT 30 -> 3000 and TOKEN_ENDPOINT 10 -> 1000, and all 2,530 tests
+// passed, because the loops simply ran 300 times and still watched the next one
+// get refused.
+//
+// The tests below count in HARDCODED LITERALS. They read like the policy —
+// "three signups an hour, the fourth is refused" — and they go red the moment
+// the policy changes without the test changing with it. That is the property the
+// existing loops cannot have, and it is why `SIGNUP_RATE_LIMIT` and friends are
+// deliberately NOT referenced anywhere in this block.
+//
+// `identity.rate-limit-policy.test.ts` pins the same numbers as a table. Two
+// independent kinds of test, so an inflation has to defeat both.
+// ---------------------------------------------------------------------------
+
+describe('THE RATE-LIMIT COUNTS, NAMED — D-292', () => {
+  it('SIGNUP: allows THREE from one IP in an hour and REJECTS THE FOURTH', async () => {
+    const context: RequestContext = { ipHash: 'signup-literal', userAgent: null };
+
+    // Three. Not `SIGNUP_RATE_LIMIT.limit` — the whole point is that this test
+    // knows the number and the implementation does not get to tell it.
+    await service.signup(
+      { email: 'lit-1@example.test', password: GOOD_PASSWORD, role: 'student' },
+      context,
+    );
+    await service.signup(
+      { email: 'lit-2@example.test', password: GOOD_PASSWORD, role: 'student' },
+      context,
+    );
+    await service.signup(
+      { email: 'lit-3@example.test', password: GOOD_PASSWORD, role: 'student' },
+      context,
+    );
+
+    // At 300/hour this resolves, three accounts are farmed instead of stopped,
+    // and three more verification emails leave the building.
+    await expect(
+      service.signup(
+        { email: 'lit-4@example.test', password: GOOD_PASSWORD, role: 'student' },
+        context,
+      ),
+    ).rejects.toMatchObject({ code: ERROR_CODES.RATE_LIMIT });
+
+    expect(await countRows('users')).toBe(3);
+  });
+
+  it('LOGOUT: allows THIRTY from one IP in an hour and REJECTS THE THIRTY-FIRST', async () => {
+    // D-220 — logout is unauthenticated by design and reaches the `auth` pool,
+    // the one §3.1's bulkhead keeps free so that login always has a connection.
+    // 30 is a flood bound; 3000 is not a bound.
+    const context: RequestContext = { ipHash: 'logout-literal', userAgent: null };
+
+    for (let attempt = 1; attempt <= 30; attempt += 1) {
+      await expect(service.logout(undefined, context)).resolves.toBeUndefined();
+    }
+
+    await expect(service.logout(undefined, context)).rejects.toMatchObject({
+      code: ERROR_CODES.RATE_LIMIT,
+    });
+  });
+
+  it('TOKEN ENDPOINTS: allow TEN from one IP in an hour and REJECT THE ELEVENTH', async () => {
+    // `TOKEN_ENDPOINT_RATE_LIMIT` had NO test at all. It guards every endpoint
+    // that redeems or re-mails a credential: verify, reset-password, and the
+    // resend added by D-291.
+    const context: RequestContext = { ipHash: 'token-literal', userAgent: null };
+
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      await expect(service.verifyEmail('not-a-real-token', context)).rejects.toMatchObject({
+        // The token is refused, not the request — this attempt was ADMITTED by
+        // the limiter and spent one of the ten.
+        code: ERROR_CODES.VALIDATION,
+      });
+    }
+
+    await expect(service.verifyEmail('not-a-real-token', context)).rejects.toMatchObject({
+      code: ERROR_CODES.RATE_LIMIT,
+    });
+  });
+
+  it('TOKEN ENDPOINTS: verify, reset and resend all spend the SAME ten', async () => {
+    /**
+     * One budget across the three, which is what makes the number meaningful:
+     * three separate ten-per-hour counters would be thirty attempts an hour at
+     * redeeming or re-mailing a credential from one host.
+     */
+    const context: RequestContext = { ipHash: 'token-shared-literal', userAgent: null };
+
+    await service.verifyEmail('not-a-real-token', context).catch(() => undefined);
+    await service
+      .resetPassword({ token: 'not-a-real-token', password: GOOD_PASSWORD }, context)
+      .catch(() => undefined);
+    await service.resendVerification({ email: 'nobody@example.test' }, context);
+
+    // Seven of the ten are left; the eighth past them is the eleventh overall.
+    for (let attempt = 1; attempt <= 7; attempt += 1) {
+      await service.verifyEmail('not-a-real-token', context).catch(() => undefined);
+    }
+
+    await expect(service.verifyEmail('not-a-real-token', context)).rejects.toMatchObject({
+      code: ERROR_CODES.RATE_LIMIT,
+    });
+  });
+
+  it('RESEND-VERIFICATION: allows TEN for one address in an hour and REJECTS THE ELEVENTH', async () => {
+    // The EMAIL-keyed counter (D-291), which is the mail-bomb bound: without it
+    // an attacker with eleven hosts mails one victim eleven times.
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      await service.resendVerification(
+        { email: 'victim@example.test' },
+        { ipHash: `resend-rotating-${attempt}`, userAgent: null },
+      );
+    }
+
+    await expect(
+      service.resendVerification(
+        { email: 'victim@example.test' },
+        { ipHash: 'resend-rotating-fresh', userAgent: null },
+      ),
+    ).rejects.toMatchObject({ code: ERROR_CODES.RATE_LIMIT });
+  });
+});

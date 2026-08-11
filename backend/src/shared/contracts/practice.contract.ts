@@ -68,23 +68,32 @@ export type StartSessionRequest = z.infer<typeof startSessionRequestSchema>;
 /**
  * One answer.
  *
- * `selectedIndex` and `firstSelectedIndex` are PRESENTATION positions — where
- * the option appeared on the student's screen. The service translates both
- * through the session's shuffle map before anything is stored.
+ * `selectedIndex` is a PRESENTATION position — where the option appeared on the
+ * student's screen. The service translates it through the session's shuffle map
+ * before anything is stored.
  *
- * `answerChanged` is NOT on this request, deliberately. It is derivable from
- * the two indices, a CHECK constraint enforces that they agree, and a client
- * that could send it independently is a client that can make them disagree.
+ * ===========================================================================
+ * NEITHER `answerChanged` NOR `firstSelectedIndex` IS ON THIS REQUEST — D-282.
+ *
+ * `answerChanged` never was: it is derivable from the two indices, a CHECK
+ * constraint enforces that they agree, and a client that could send it
+ * independently is a client that can make them disagree.
+ *
+ * `firstSelectedIndex` WAS, and it was the same mistake one field over. It is
+ * the client's testimony about its own past, unverifiable, and an audit of an
+ * honest end-to-end journey found it absent on five of six responses — so the
+ * one column that records a change of mind, and that cannot be reconstructed
+ * later, was usually empty. The server holds every answer the session recorded;
+ * it derives both fields from that (`domain/answer-change.ts`) and no longer
+ * asks.
+ *
+ * An old client that still sends the field is unaffected: zod strips unknown
+ * keys, so the value is ignored rather than rejected.
+ * ===========================================================================
  */
 export const submitAnswerRequestSchema = z.object({
   questionId: z.string().uuid(),
   selectedIndex: z.number().int().min(0).max(OPTIONS_PER_QUESTION - 1),
-  firstSelectedIndex: z
-    .number()
-    .int()
-    .min(0)
-    .max(OPTIONS_PER_QUESTION - 1)
-    .optional(),
   /**
    * Milliseconds on this question. CLIENT-SUPPLIED, and the anti-cheat rules
    * read it, which is worth being honest about: a client can lie. It is still
@@ -157,7 +166,26 @@ export type PracticeSession = z.infer<typeof practiceSessionSchema>;
 export const practiceSessionResponseSchema = z.object({ session: practiceSessionSchema });
 export type PracticeSessionResponse = z.infer<typeof practiceSessionResponseSchema>;
 
-/** What comes back from one answer. The answer is disclosed here and not before. */
+/**
+ * What comes back from one answer. The answer is disclosed here and not before.
+ *
+ * ===========================================================================
+ * DISCLOSURE CLOSES THE RECORD — D-281.
+ *
+ * `isCorrect`, `correctPresentationIndex` and `explanation` below are the answer
+ * key for one question, handed to the client the moment it commits. That is
+ * deliberate — immediate feedback is the pedagogy of the guided-practice step —
+ * and it is only defensible because THE ANSWER IT REVEALS CAN NO LONGER BE
+ * CHANGED. A second answer to the same question is refused with 409.
+ *
+ * The two used to coexist: the key was disclosed here and a re-answer replaced
+ * the previous one wholesale. Six questions answered wrong, six responses read
+ * for the revealed position, six re-answers submitted with it — 100%, six
+ * correct, full XP, and six database rows that look like a flawless first
+ * attempt. Mastery, the parent digest and the retention schedule all read those
+ * rows.
+ * ===========================================================================
+ */
 export const answerResultSchema = z.object({
   questionId: z.string().uuid(),
   isCorrect: z.boolean(),
@@ -187,9 +215,22 @@ export const submissionResultSchema = z.object({
   scorePercent: z.number().int(),
   correctCount: z.number().int(),
   questionCount: z.number().int(),
-  /** What was actually added to the ledger, after the daily cap. */
+  /**
+   * What was actually added to the ledger, after the daily cap.
+   *
+   * THE SAME NAME MEANS THE SAME NUMBER ON `HistoryEntry` — D-283. It did not:
+   * this shape's `xpEarned` was the UNCAPPED figure and history's `xpEarned` was
+   * the awarded one, so a capped session reported 110 here and 0 there under one
+   * name in one file. History's field is now `xpAwarded` and matches this.
+   */
   xpAwarded: z.number().int(),
-  /** What the session was worth before the cap. Equal to `xpAwarded` usually. */
+  /**
+   * What the session was worth BEFORE the cap. Equal to `xpAwarded` usually.
+   *
+   * Kept separate so the interface can say "you earned 110, 20 of it withheld
+   * because today's cap is full" rather than silently showing a smaller number
+   * than the arithmetic on screen produces.
+   */
   xpEarned: z.number().int(),
   dailyCapReached: z.boolean(),
   isValid: z.boolean(),
@@ -213,7 +254,20 @@ export const historyEntrySchema = z.object({
   startedAt: z.string(),
   submittedAt: z.string().nullable(),
   scorePercent: z.number().int().nullable(),
-  xpEarned: z.number().int().nullable(),
+  /**
+   * What the ledger was actually credited for this session — D-283.
+   *
+   * NAMED `xpAwarded`, not `xpEarned`, and the rename is the whole point. This
+   * reads `practice_sessions.xp_earned`, which stores the POST-CAP amount, while
+   * `SubmissionResult.xpEarned` is the PRE-CAP one. Two different numbers under
+   * one name in one contract file: a capped session returned 110 from submit and
+   * 0 from history, and a client rendering its own history showed 0 for a
+   * session the student had just been congratulated on. The column keeps its
+   * name; the wire no longer lies about which number it carries.
+   *
+   * Null until the session is submitted.
+   */
+  xpAwarded: z.number().int().nullable(),
   isValid: z.boolean().nullable(),
   invalidReason: z.string().nullable(),
 });

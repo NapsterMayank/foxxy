@@ -167,6 +167,41 @@ export interface JobQueue {
   /** Records a failure and schedules the retry, or gives up. Same fence. */
   fail(job: ClaimedJob, error: string, now: Date): Promise<FailureOutcome>;
   /**
+   * UNDOES a claim whose job was never started — D-301.
+   *
+   * ==========================================================================
+   * THIS IS NOT `fail`, AND THE DIFFERENCE IS THE WHOLE POINT.
+   *
+   * `claim` is a network round trip. A SIGTERM that arrives DURING it is the
+   * common case on a deploy, not an exotic one — the runner checks `stopping`
+   * before the call, and the flag can flip before the result comes back. The
+   * runner then holds a lease on a job it has been told not to run.
+   *
+   * The three obvious things to do with that job are all wrong:
+   *
+   *   - RUN IT. That is precisely what "claim no new ones" (§12 step 3) forbids:
+   *     it will be killed by the drain deadline and reclaimed, so it runs twice.
+   *   - DROP IT. The row stays `running` with a lease nobody holds, invisible
+   *     until the 120-second reaper notices. That is a two-minute delay on work
+   *     that was never started.
+   *   - `fail` IT. It did not fail. That writes a `last_error` describing an
+   *     error that never happened, and pushes `run_at` out by the backoff — a
+   *     30-second delay, minimum, on every job unlucky enough to be claimed
+   *     during a deploy.
+   *
+   * So: straight back to `pending`, `run_at` unchanged, and `attempts`
+   * DECREMENTED — because the claim is being undone rather than completed and
+   * the handler was never invoked. Not decrementing would let a rolling deploy
+   * across five restarts walk a job that has never run once to `dead`.
+   *
+   * Fenced by the lease like every other completion, for the same reason: the
+   * reaper may already have taken the row.
+   *
+   * @returns false when the lease was lost — someone else owns the job now, and
+   *          the release neither landed nor needed to.
+   */
+  release(job: ClaimedJob, now: Date): Promise<boolean>;
+  /**
    * Returns jobs stuck in `running` past the lock timeout to the queue.
    *
    * THIS IS THE AT-LEAST-ONCE EDGE, made concrete. A worker killed mid-job

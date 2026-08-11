@@ -4925,3 +4925,1405 @@ Every item below was reachable and was deliberately left, with the reason:
    `maxRetries` and the guard's budget are two retry mechanisms on the same port and
    have not been reconciled; `http` is left un-declared so they cannot multiply. That
    reconciliation is a separate change.
+
+## Identity third-audit remediation — 11 August 2026 (D-291 to D-297)
+
+*Three confirmed defects in `src/modules/identity/`, plus what fixing them forced into
+the open. Every fix below was mutation-proven: the defect was re-applied and a NAMED
+test was shown to go red, with the result recorded on the entry. Two of the three
+defects share a shape worth naming up front — **a comment that describes a mechanism
+nobody built**. D-214 named it, D-217 was an instance of it, and D-291 is D-217's own
+comment turning out to be the next instance.*
+
+### D-291 · Signup "completed" into an unusable account, because the recovery path D-217 promised did not exist
+**Status:** Active
+
+D-217 took the verification email off the signup request path so that a provider
+outage could not 500 a signup whose user row was already committed. That was correct
+and it stays. Its justification, quoted verbatim from `identity.service.ts`, was not:
+
+> the RECOVERY PATH ALREADY EXISTS AND DOES NOT DEPEND ON IT — the verification and
+> reset tokens are committed rows, so **a resend re-mails the token that is already
+> persisted**. Losing a send costs one email, never an account.
+
+**There was no resend.** The module had seven `/auth/*` routes — `signup`, `verify`,
+`login`, `logout`, `logout-all`, `forgot-password`, `reset-password` — and not one of
+them re-mailed anything. An auditor confirmed it against a real server with mail down:
+
+```
+MAIL-DOWN signup:  201 {"status":"ok","message":"Check your email…"}
+MAIL-DOWN user row created: { n: 1 }
+MAIL-DOWN queued jobs: []
+```
+
+So the account survived the outage exactly as designed and was **useless**: the
+address was taken, so the user could not sign up again; the verification link was
+gone, so they could not verify the account they had; and there was nothing to ask.
+"Losing a send costs one email, never an account" was true only if the sentence before
+it was, and it was not. This is the D-214 pattern with a twist that is worth stating
+plainly: **the comment was not describing missing code in the same file, it was
+describing a missing ENDPOINT**, which is why reading `identity.service.ts` closely
+would never have found it. Only counting the routes does.
+
+`POST /api/v1/auth/resend-verification` now exists, shaped deliberately like
+`forgot-password` rather than invented fresh:
+
+- **Enumeration-safe across THREE branches, not two.** Unknown address,
+  awaiting-verification address and **already-verified** address all return a
+  byte-identical `200 {"status":"ok"}`. The third branch is the one specific to this
+  endpoint, and a distinct answer for it would leak a second bit beyond existence —
+  whether the account is verified.
+- **Timing-symmetric**, by D-218's construction rather than by hope: both rate-limit
+  counters are consumed before any lookup, the token is generated **before** the
+  existence branch on all three paths (one `randomBytes` and one SHA-256 either way,
+  the same trick as login's dummy Argon2 verification), and the send is deferred, so
+  it contributes to no branch's latency. What remains on the mailing branch is one
+  small transaction — the same residual `requestPasswordReset` already carries.
+- **Rate limited** on `TOKEN_ENDPOINT_RATE_LIMIT`, by IP and by address (D-295).
+- **A verified account is sent nothing and mints no token.** A resend that mailed a
+  live verification link to an address whose owner did not ask for one is a session
+  waiting to be handed to whoever reads that mailbox next.
+
+**Mutation proof:** deleting the route registration from `identity.routes.ts` turns
+**7** named tests red in `identity.routes.test.ts`, headed by `EXISTS. Before this it
+was a 404, and D-217 depended on it` and `completes the journey: signup, resend,
+verify, log in`. Two of those seven only went red after being strengthened during this
+wave — see D-296.
+
+Separately, replacing `deferMail(...)` with `await mail.send(...)` at the resend call
+site — the D-218 defect re-applied to the new endpoint — turns `RESEND ANSWERS AN
+UNVERIFIED AND AN UNKNOWN ADDRESS IN THE SAME TIME` and `SURVIVES THE OUTAGE ITSELF: a
+failing resend still persists its token` red.
+
+### D-292 · Three rate limits could be inflated a hundredfold with every test green
+**Status:** Active
+
+An auditor changed `SIGNUP` 3 → 300, `LOGOUT` 30 → 3000 and `TOKEN_ENDPOINT` 10 → 1000
+per hour, and **all 2,530 tests passed.**
+
+The cause is a shape, not an omission, and it is worth writing down because it reads
+as thorough testing right up until something is mutated:
+
+```ts
+for (let attempt = 0; attempt < SIGNUP_RATE_LIMIT.limit; attempt += 1) { await signup(); }
+await expect(signup()).rejects.toMatchObject({ code: RATE_LIMIT });
+```
+
+That loop asserts the limiter is **internally consistent** — whatever number the
+constant holds, the next request past it is refused. It cannot observe the number.
+Raise the constant to 300 and the loop obligingly runs 300 times and still watches the
+301st get refused. Signup at 300/hour per IP is account farming **and** a mail bomb,
+since every signup sends a verification email. `TOKEN_ENDPOINT_RATE_LIMIT` — which
+guards `verify`, `reset-password` and now the resend, i.e. every endpoint that redeems
+or re-mails a credential — **had no test at all**.
+
+The contrast the audit drew is the fix, and it was already in the repository:
+`LOGIN`, `LINK_CODE`, `LINK_SUBMIT`, `FORGOT_PASSWORD` and `AUTHENTICATED` all went
+**red** under the same mutation, because somewhere a test **names the literal** —
+"allows five in an hour and REJECTS the sixth". That style is now extended to the
+whole table, in two independent kinds of test so that an inflation has to defeat both:
+
+1. `identity.rate-limit-policy.test.ts` — the §6.9 table transcribed as literals. It
+   pins the POLICY and deliberately does not exercise the limiter, because a test that
+   did both could be satisfied by changing either.
+2. `THE RATE-LIMIT COUNTS, NAMED` in `identity.service.test.ts` — the BEHAVIOUR,
+   counted in hardcoded literals ("three signups an hour, the fourth is refused").
+   `SIGNUP_RATE_LIMIT` and its siblings are not referenced anywhere in that block, on
+   purpose: the test knows the number and the implementation does not get to tell it.
+
+The existing loop-shaped tests are left exactly as they are. They assert a real and
+different property — that the limiter is consistent with whatever it is configured
+with — and deleting them would trade one blind spot for another.
+
+**Mutation proof:** re-applying all three inflations turns **13** named tests red,
+including `SIGNUP is not account farming: 3 an hour per IP, not 300`, `LOGOUT stays a
+flood bound on the auth pool: 30 an hour, not 3000`, `TOKEN_ENDPOINT stays a
+credential-redemption bound: 10 an hour, not 1000`, and the five behavioural counts.
+
+### D-293 · A false database guarantee on a role narrowing, at the two places that build the Actor
+**Status:** Active
+
+`identity.repository.ts` carried this:
+
+```ts
+// The column carries a CHECK constraint limiting it to these two values,
+// so the database is the guarantee behind this narrowing.
+role: row.role as Role,
+```
+
+`Role` is `z.enum(['student', 'parent'])` — **two** values. The CHECK is built from
+`PLATFORM_ROLES` — **ten** (`0000_baseline.sql:129`, `shared/constants/roles.ts:39-53`)
+— because the column was deliberately widened ahead of time so that adding a teacher in
+Phase 1 is an INSERT rather than an ACCESS EXCLUSIVE lock and a full validation scan on
+a live table. **The cited guarantee was the exact opposite of the truth**, and a comment
+that asserts a database invariant is the most expensive kind of wrong: the next reader
+stops checking.
+
+The same cast appeared at `findSessionByTokenHash`, which is the sharper site — that
+is the lookup on every authenticated request, and its result becomes the request
+`Actor` that every authorisation decision is made against.
+
+`platform/authz/can-access.ts` documents this failure mode **by name** and fixed its
+own type for it: *"a `teacher` row would arrive as a value the compiler believes is
+impossible … a privilege escalation delivered by a type that was merely out of date."*
+The repository sits **upstream** of that file and was not fixed with it.
+
+Not exploitable today — nothing grants a non-signup role, and `can-access.ts:300`
+denies unknown roles explicitly. The defect is that **it goes silent the day one is
+granted**, which is a day nobody will connect to this cast.
+
+Both records are now typed `PlatformRole`, which is what the CHECK actually enforces,
+imported from the same constant the migration is generated from so the two cannot
+drift. The false comment is deleted and replaced with what the database does
+guarantee. `UserRecord.role` and `SessionWithUser.role` follow.
+
+Two guards were added rather than one, because the runtime half alone is not enough —
+`'teacher'` is still `'teacher'` at runtime however it is typed, which is exactly why
+this was invisible:
+
+- **Runtime**, `identity.role-narrowing.test.ts`: a `teacher` is granted the way Phase
+  1 will grant one, straight into the column, and asserted to arrive as itself through
+  both `findUserByEmail` and `validateSession`. Every widened role is driven, not just
+  the one the file happens to name.
+- **Compile-time**, in the same file: `Exclude<UserRecord['role'], Role>` must be
+  INHABITED. Narrow the record back to `Role` and it collapses to `never`, and the
+  assignment stops compiling.
+
+`identity.types.ts` also now asserts, at compile time, that `PlatformRole` is
+assignable to `platform/authz`'s hand-written `ActorRole`. Those are two hand-kept
+copies of one vocabulary — `can-access.ts` imports nothing but its error type, by rule
+— and two copies of a list is what D-293 is about in the first place.
+
+**Mutation proof:** restoring `role: row.role as Role` and `readonly role: Role`
+leaves every runtime test green — as it must, which is the entire lesson — and turns
+`npm run type-check` red at `identity.role-narrowing.test.ts(169,11): Type '"teacher"'
+is not assignable to type 'never'` inside the named test `types a user record wide
+enough to HOLD a non-signup role`.
+
+### D-294 · "Reuse the persisted token if it is still valid" is not implementable, and the honest version is a replacement
+**Status:** Active
+
+The brief for D-291 asked the resend to "reuse the persisted token if it is still
+valid, or issue a fresh one and consume the old". The first half cannot be done and
+the reason is the design working correctly: `email_verification_tokens` stores a
+**SHA-256 of the token and never the token** (§6.1), so a surviving row contains
+nothing that can be put in an email. Recording it rather than quietly implementing
+half of it, because "why didn't you reuse the token" is a reasonable question and the
+answer is a property of the schema, not an oversight.
+
+Every resend therefore mints a fresh token, and
+`reissueEmailVerificationToken` retires every outstanding unconsumed row for that user
+and inserts the new one in **one transaction**. Two consequences, both wanted:
+
+- **One live link at a time.** A resend that merely added a row would leave every
+  previously mailed link live, so a token in a forwarded message or a mail archive
+  would still verify the account long after the user asked for a new one.
+- **Never zero live links.** Splitting the two statements would let a crash leave the
+  user with no token and no way to get one — which is precisely the unverifiable
+  account this endpoint exists to rescue.
+
+Retiring is `consumed_at = now`, never `DELETE`: the row is the record that a token
+was issued.
+
+**Mutation proof:** `RETIRES THE TOKEN IT REPLACES, so an old mailed link stops
+working` asserts the old token is refused and the new one verifies.
+
+### D-295 · The resend is limited by ADDRESS as well as by IP
+**Status:** Active
+
+`TOKEN_ENDPOINT_RATE_LIMIT` is keyed by IP, which is right for `verify` and
+`reset-password`: those redeem a credential the caller already holds, so the bound is
+on guessing. A resend is different — **it sends an email to somebody else's address**
+— and an IP-only bound means an attacker with eleven hosts mails one victim eleven
+times.
+
+So the endpoint consumes two counters: `tokenEndpointByIp`, shared with the other two
+token endpoints, and a new `resendVerificationByEmail` in its own namespace. This is
+the same reasoning as `forgotByEmail`, and the separate namespace is the same rule as
+everywhere else in this module — a shared counter would let one person's resends spend
+another's budget.
+
+The IP counter being SHARED across the three is deliberate and is asserted: three
+separate ten-per-hour counters would be thirty attempts an hour at redeeming or
+re-mailing a credential from one host.
+
+**Mutation proof:** `TOKEN ENDPOINTS: verify, reset and resend all spend the SAME ten`
+and `RESEND-VERIFICATION: allows TEN for one address in an hour and REJECTS THE
+ELEVENTH` (the latter rotates the IP on every attempt, so only the address counter can
+refuse it).
+
+### D-296 · Two of the new tests passed under their own mutation until they were strengthened
+**Status:** Active — recorded as method, not as a defect
+
+Worth a numbered entry because it is the same failure the whole wave is about, caught
+inside the wave's own work. On the first mutation run for D-291 — the route deleted —
+five of the seven new route tests went red and **two passed**:
+
+- `ANSWERS IDENTICALLY for unknown, unverified and already-verified` was perfectly
+  happy with three identical **404s**. Byte-identical is not the property; byte-identical
+  **and 200** is.
+- `completes the journey: signup, resend, verify, log in` verified using the token from
+  the SIGNUP email, which still worked, so the resend returning 404 changed nothing. It
+  now asserts the resend returned 200, that a **second** email exists, and continues on
+  that token — which is the only token the user in this scenario ever receives.
+
+Both are the D-292 shape in miniature: an assertion that is true of the fixed system
+and also true of the broken one. **This is why re-applying the defect is a required
+step and not a formality** — without it, two tests named after the fix would have been
+committed unable to see its absence.
+
+### D-297 · What this wave did NOT do
+**Status:** Open — residue and handoffs
+
+1. **`UserProfile.role` widened on the wire.** `userProfileSchema.role` is now
+   `platformRoleSchema` rather than `roleSchema`, because it describes a ROW that
+   exists and not an INPUT being accepted (D-293). No byte changes today — nothing
+   grants a non-signup role — but the login response's TYPE is wider, and the frontend
+   imports these inferred types. **Reported to the frontend owner**; a `switch` on
+   `user.role` that the compiler previously proved exhaustive over two cases will now
+   want a default.
+2. **`roleSchema` is still a hand-written `z.enum(['student', 'parent'])`**, while
+   `shared/constants/roles.ts` states in prose that it "is built from `SIGNUP_ROLES`".
+   It is not. The two lists agree today and a test pins that they do, so this is a
+   documentation defect rather than a live one, and it was left alone deliberately:
+   changing it touches the one constant whose separation from `PLATFORM_ROLES` is the
+   only thing keeping `super_admin` off a public dropdown, and that deserves its own
+   change and its own review rather than a drive-by tidy inside a role-typing fix.
+3. **The resend has no client.** The endpoint exists and is tested; nothing calls it.
+   `EmailNotVerifiedError` already carries `reason: 'EMAIL_NOT_VERIFIED'` specifically
+   so the frontend can offer to resend — that offer is now implementable and is a
+   frontend change.
+4. **The send is still fire-and-forget.** D-217's deferral is unchanged, and it is
+   still weaker than a queue: the process may exit before a send completes. What
+   changed is that its stated recovery path is now real, which is the condition under
+   which that trade was acceptable in the first place. `platform/jobs` remains the
+   right home the day a resend endpoint is not enough.
+5. **`AUTHENTICATED_RATE_LIMIT` is not pinned in the identity policy table.** It is
+   enforced in `app/plugins`, its literal is already named by
+   `src/app/__tests__/authenticated-rate-limit.test.ts` ("REJECTS the 101st request"),
+   and it went red under the audit's mutation. Pinning it a second time from a module
+   that does not own it would be a second source of truth.
+
+---
+
+### D-281 · The answer key is disclosed once, and the record closes with it
+**Status:** Active — `modules/practice`
+
+`POST /practice/sessions/:id/answers` returned `correctPresentationIndex`,
+`explanation` and `isCorrect` immediately, and a re-answer to the same question
+**replaced** the previous one wholesale — `saveAnswers(session.id, { ...answers,
+[id]: answer })`. Nothing carried the discarded selection forward.
+
+An auditor executed the consequence end to end: six questions answered wrong,
+each response read for the revealed position, all six re-answered with it.
+
+```
+REVEALED CORRECT POSITIONS [1,2,2,0,3,0]
+RE-ANSWER SUBMIT 200  scorePercent: 100, correctCount: 6, xpAwarded: 110, isValid: true
+RE-ANSWER ROWS (all six)
+  first_selected_index: null,  answer_changed: null,  is_correct: true
+```
+
+Twelve taps recorded as six correct first-time answers. **Every anti-cheat rule
+passed, correctly** — six responses to six questions across ample elapsed time
+with four distinct presentation indices. None of the three is about this.
+
+This outranks the rest of the audit because `practice_responses` is the
+substrate: mastery, the parent digest, the spaced-retention schedule and the
+Phase 1 teacher screen are all computed from it, all of them were fabricable in
+two taps, and the resulting row looks like a flawless attempt.
+
+**THE CHOICE: THE REVEAL STAYS AND THE RECORD CLOSES.** A second answer to a
+question that already has one is a `ConflictError` — 409.
+
+The alternative — withhold the key until submission and leave answers mutable —
+was rejected twice over. **The product argument:** feedback at the end of a
+six-question set is a different activity from guided practice. The hint ladder,
+the misconception explainer and `decideNext`'s confirm / remediate /
+flag-for-recovery branches all exist to act on the answer the student has just
+given; deferring the reveal defers all of them and turns step 5 of the session
+into a report. **The technical argument, which is the decisive one:** withholding
+`correctPresentationIndex` and `explanation` alone would not have closed the
+hole. With four options and a mutable answer, `isCorrect` is a three-guess
+search — and `isCorrect` cannot be withheld without withholding the whole of
+step 5. Immediate feedback and a changeable answer are the pair that cannot
+coexist; the fix removes the second.
+
+The guard runs **before the answer key is consulted**, so the refusal is not
+itself an oracle: a re-answer that would have been right and one that would have
+been wrong are refused identically. Pinned by `refuses the re-answer WITHOUT
+disclosing whether it was right`.
+
+Honest clients are unaffected — a client that answers each question once sees no
+change. Only the second answer is new behaviour.
+
+### D-282 · `first_selected_index` and `answer_changed` are the server's own
+**Status:** Active — `modules/practice`
+
+`firstSelectedIndex` was an OPTIONAL FIELD ON THE REQUEST, translated through the
+shuffle map and stored. `answer_changed` was derived from it. The same audit
+found both **null on five of six responses in an honest journey**, because the
+only source was a field the client had no reason to send.
+
+These are the two columns `schema/practice.ts` singles out as unrecoverable: "a
+student who practised in September and changed four answers leaves no trace of
+either unless the columns existed in September". `parent`'s misconception query
+reads `first_selected_index` specifically — a child who picked the misconception
+distractor and then corrected themselves demonstrated the misconception, and the
+final answer hides it. A column that is unrecoverable, load-bearing and usually
+empty is worse than absent: the report it feeds under-counts silently.
+
+The field is **removed from the contract**, and the derivation moved to
+`domain/answer-change.ts` — pure, taking the session's own prior answer. The
+contract already refused `answerChanged` for exactly this reason ("a client that
+could send it independently is a client that can make them disagree"); this is
+the same argument one field over, and the two are now consistent.
+
+`firstSelectedIndex` is now **never null**: with no prior answer the first choice
+IS this one, which is a statement about the student. The old `null` was a
+statement about the client.
+
+The carry-forward branch — `prior.firstSelectedIndex ?? prior.selectedIndex`,
+never `prior.selectedIndex` alone — is unreachable through HTTP while D-281
+stands, and is implemented and tested anyway. It is the half of the fix that
+survives if immutability is ever relaxed: the exploit would then be RECORDED as a
+change with the original index preserved rather than erased. Neither half is
+sufficient alone, which is why both are here.
+
+Zod strips unknown keys, so an old client that still sends the field succeeds and
+is ignored rather than rejected.
+
+### D-283 · `xpEarned` meant two different numbers in one contract file
+**Status:** Active — `shared/contracts/practice.contract.ts`
+
+`SubmissionResult.xpEarned` was the **uncapped** figure and `HistoryEntry.xpEarned`
+was the **awarded** one. On a capped session that is 110 from `POST /submit` and 0
+from `GET /history`, under one name, in one file the frontend imports — so a
+client rendering its own history showed **0 XP for a session the student had just
+been congratulated on**, with nothing anywhere to indicate a defect.
+
+`HistoryEntry.xpEarned` is renamed **`xpAwarded`**, which is what
+`practice_sessions.xp_earned` actually stores (`completeSession` is handed
+`capped.awarded`). `SubmissionResult` keeps both fields — they answer different
+questions and the interface needs both to say "you earned 110, 20 withheld
+because today's cap is full" — and the two `xpAwarded` now agree by name and by
+value. The column keeps its name; only the wire stops lying about which number it
+carries.
+
+### D-284 · Two N+1s on the two screens the client opens most
+**Status:** Active (partially) — `modules/practice`
+
+`getProgress` called `readChapter` once per mastery row: **one query per chapter
+the student has ever practised**, sequentially, on the progress screen — a cost
+that grows every week the product is used. Nothing in the loop looks like a
+query, which is why it survived review.
+
+Fixed by asking a different question: the student's own grade and subjects give
+the whole candidate set in one `listChapters` per subject, and the mastery rows
+are titled from that map. `readChapter` remains as a per-row FALLBACK for a
+chapter practised before the student was promoted — those are not in this grade's
+list, and blanking their titles would be a silent data loss traded for a
+performance win. Bounded in the common case, still correct in the uncommon one.
+
+`getTodaysMission` awaited `listChapters` once per subject inside the loop.
+That count is bounded by the subject list and does not grow with use, so the fix
+here is only that the calls no longer wait for each other (`Promise.all`).
+
+**LEFT UNDONE, AND IT NEEDS ANOTHER MODULE.** `content.listChapters` takes ONE
+subject, so the query COUNT on both paths is a `content` API shape and cannot be
+reduced from `practice`. A `listChapters({ subjectCodes: string[] })` overload
+would make both paths a single query. That is a `modules/content` change plus a
+binding in `app/routes.ts`, neither of which this change owns.
+
+Pinned by `issues NO per-chapter read for chapters in the student's own grade`
+(a counting seam) and `has BOTH subject reads in flight at once` (a barrier on
+the injected seam — the D-246 pattern, not a stopwatch).
+
+### D-285 · The XP payouts are pinned to literals; every assertion was relative
+**Status:** Active — `modules/practice/__tests__/xp-rules.test.ts`
+
+Every XP assertion was expressed in terms of the constant it tested:
+
+```ts
+expect(calculateXp(5, 80)).toBe(5 * XP_RULES.perCorrect + XP_RULES.highScoreBonus);
+```
+
+Both sides move together. An auditor changed `perCorrect` 10 -> 9,
+`highScoreBonus` 20 -> 19 and `perfectBonus` 30 -> 29 and **all 2,530 tests
+passed** — the entire economy devalued by ten percent against a green suite.
+
+This is the exact failure `xp-rules.ts`'s own header names: "a screen that
+promises 10 XP and a ledger that awards 8 ... There is no error, no log line and
+no test that fails."
+
+The THRESHOLDS were already safe, by accident: 79, 80, 99 and 100 appear as
+literals in the boundary tests, so `highScoreThreshold` 80 -> 70 goes red. Only
+the PAYOUTS were unpinned, and `dailyCap` was caught only incidentally by
+hardcoded fixture values in another file — which is the same defect one step
+removed, because that file is free to change its fixtures.
+
+Fixed the way `anti-cheat.test.ts` already does it (D-190): literals, in the
+module that owns them, beside the relative tests rather than instead of them.
+The relative tests say the economy has a bar at 80 and two stacking rewards; the
+literal pins say what the numbers ARE. Three end-to-end figures are pinned too
+(110 for a perfect six, 70 for five-of-six, 200 for a day) so that a change to
+the FORMULA also costs a deliberate edit.
+
+### D-286 · What this wave did NOT do, listed so it is not mistaken for done
+**Status:** Open — residue
+
+1. **`answer_changed` is structurally `false` today.** D-281 makes an answered
+   question immutable, so no answer can change, so the column records a real
+   observation that is always the same one. `parent`'s effort signal
+   `count(*) filter (where answer_changed = true and is_correct = true)` —
+   "recoveries" — is therefore now always 0 rather than occasionally non-zero
+   from unverifiable client testimony. **That is a reduction in reported signal
+   and an increase in its truthfulness**, and it is stated here because a reader
+   of the parent digest will otherwise see a metric flatten and look for a
+   regression.
+
+   The way to get the signal back HONESTLY is a two-phase answer: a selection
+   that records without revealing, and a separate reveal that closes the record.
+   The student's change of mind then happens server-side, before any information
+   has left, and `deriveAnswerChange`'s carry-forward branch (already written and
+   tested) becomes live with no further change. It is a contract addition and a
+   client protocol change, so it is not in this wave.
+
+2. **The N+1 query COUNTS are reduced, not eliminated** — see D-284. Both need
+   `content.listChapters` to accept a subject list.
+
+3. **`timeSpentMs` is still client-supplied.** The `realElapsedMs` clamp (D-189)
+   is the backstop and it holds; nothing here changed it.
+
+4. **The frontend has no practice client yet**, which is why D-282's request
+   narrowing and D-283's rename could ship as contract changes rather than as
+   deprecations. The first client to be written against `practice.contract.ts`
+   gets the corrected shapes; there is nothing to migrate.
+
+---
+
+## Alerting-observability wave — 11 August 2026
+
+### D-311 · A signal name is only HALF of "can this rule fire"
+**Status:** Active — **important**
+
+`assertRulesAreSatisfiable` checked that every rule's SIGNAL NAME was in the
+producible set, and its own test file called it "the most important test in this
+file … the guard against enforcement that looks installed and enforces nothing".
+It never checked the THRESHOLD.
+
+An auditor inflated every shipped threshold to an unreachable value — `1 →
+1000000`, `0.9 → 99.0`, `36 → 360000` — and downgraded ten of the eleven `page`
+rules to `ticket`. **23 of 23 tests passed.** Every signal name was still
+correct, and the entire alert set was disabled.
+
+**Decision:** `SIGNAL_RANGES` in `scripts/ops/alert-rules.ts` declares, per
+signal, the range in which a threshold can actually be reached, and the assert
+rejects anything outside it. `gte` is bounded above, `lte` below — checking both
+directions for both comparisons would reject a legitimately insensitive rule.
+
+A signal with **no** entry is an error rather than a pass. "Cannot be checked"
+must never quietly become "is fine"; that is the same inversion `evaluate()`
+already refuses one layer down when it declines to read an absent signal as zero.
+Adding a signal therefore forces adding its range.
+
+**Consequence:** a rule watching `readiness.failing >= 1000000` now fails the
+evaluator at start-up, which is where the D-123 pattern says a mis-configuration
+belongs — a monitoring component that refuses to boot is legible; one that boots
+and watches nothing is not.
+
+### D-312 · The per-rule pin is transcribed by hand, and that is the point
+**Status:** Active
+
+Every test over the shipped rule set was COUNT-shaped. `expect(ALERT_RULES.some(r
+=> r.severity === 'page')).toBe(true)` — **a `some`** — is satisfied by one
+surviving page rule while ten are downgraded. `cooldownSeconds > 0` is satisfied
+by `21_600_000`. Nothing pinned any shipped rule's threshold, severity or
+comparison.
+
+**Decision:** a table test in the shape of
+`src/platform/config/__tests__/timeouts.test.ts:23-33`, pinning all twelve rules'
+`signal / comparison / threshold / severity / cooldownSeconds` to literals, plus
+an exhaustiveness check (the table must name every rule) and an exact page/ticket
+partition by id.
+
+The numbers are **transcribed, not derived from `ALERT_RULES`**. A table built
+out of the thing it checks checks nothing — that is precisely the shape that let
+eleven inflated thresholds through. Changing a threshold now means changing it in
+two places, in a diff a reviewer sees, which is the same contract the §4 timeout
+table has.
+
+### D-313 · A cooldown can disable a rule as completely as a threshold can
+**Status:** Active
+
+`cooldownSeconds: 21_600_000` is 250 days and satisfies `> 0`. A rule that
+delivers once and then goes quiet for eight months has, in every sense an
+operator cares about, fired once — during the deployment nobody was watching.
+
+**Decision:** `COOLDOWN_BOUNDS` = 60s..86_400s, enforced by the same start-up
+assert. The floor is one evaluation interval (a shorter cooldown is not a
+cooldown); the ceiling is one day, `backup_stale`'s six hours being the longest
+legitimate value in the set.
+
+### D-314 · `platform.port.call_failed` — the fast-failure counter, and why it is DISJOINT
+**Status:** Active — **important**
+
+`dependency.errors` was `platform.port.timeout` + `platform.breaker.rejected` +
+`platform.concurrency.rejected`. All three are emitted by the GUARD when the
+guard refuses or abandons a call. A call the DEPENDENCY refuses — connection
+refused, DNS failure, TLS reset, a provider 500 an adapter throws on — increments
+none of them: it returns in milliseconds, far inside its timeout, and the breaker
+files the failure privately and emits nothing until it transitions at five.
+
+Measured against the real production wiring with a failing port:
+
+```
+EMBED-DOWN turn:      502 DEPENDENCY_FAILURE
+EMBED-DOWN metrics_events: []
+PAY-DOWN checkout:    502 DEPENDENCY_FAILURE
+PAY-DOWN metrics_events: []
+```
+
+**Empty.** A payments outage that failed four checkouts and recovered was
+completely invisible, and that is the single most common shape an outage takes:
+things fail FAST, not slow.
+
+**Decision:** a fourth counter, `PLATFORM_METRICS.PORT_CALL_FAILED`, emitted
+through `src/platform/metrics/port-failure-bridge.ts` — a bridge for the same
+reason `createBreakerMetricsBridge` is one: `platform/resilience` wraps any port
+and must not know what a metric is called.
+
+It is **disjoint by construction**. `classifyPortFailure` recognises a timeout, a
+breaker rejection and a concurrency rejection STRUCTURALLY (`details.timeoutMs` /
+`details.breaker` / `details.max` — the same discrimination `isWorthRetrying`
+uses, never message text) and declines to emit for them, so the collector can SUM
+all four. A double-counted error rate is worse than a missing one: it is a number
+people quietly stop believing, and then stop looking at.
+
+Anything else counts, **including a plain `Error`** from an adapter that never
+wrapped its failure. Requiring the wrapper would make the counter depend on every
+adapter author having remembered, and the adapter that forgot is the one whose
+outage goes unseen.
+
+Added to `IMMEDIATE_FLUSH_METRICS` (D-232): a total provider outage is the shape
+that EMPTIES the buffer rather than filling it, so the 100-row count trigger
+cannot be relied on for it.
+
+### D-315 · What `platform/resilience` still has to do for D-314
+**Status:** Open — **cross-owner dependency**
+
+The bridge, the metric name, the immediate-flush entry and the collector summand
+all exist and are tested. **The emission is not wired**, because
+`src/platform/resilience/port-guard.ts` and `registry.ts` are not owned by this
+change. Until they are, `platform.port.call_failed` is always zero and
+`dependency.errors` still counts only the three guard-raised failures.
+
+Required, exactly:
+
+1. `PortGuardOptions` gains `onFailure?: (name: string, error: unknown) => void`,
+   alongside the existing `onTimeout` / `onRetry` callbacks and shaped the same
+   way (a callback, not a `MetricsPort`).
+2. `createPortGuard.run` invokes it for **every** rejection leaving the guard —
+   including timeouts and both rejections. The filtering belongs in the bridge,
+   not the call site, so the guard stays ignorant of what is already counted.
+   Cleanest seam is a `.catch` that re-throws around the returned promise.
+3. `createResilienceRegistry` wires it as the sixth emission:
+   `onFailure: createPortFailureBridge(metrics)` — a single line, since the
+   bridge's signature is already `(port, error) => void`.
+4. `ResilienceRegistryOptions.metrics`' header says it wires "FIVE emissions"
+   (D-278 exists solely because that count went stale once). It becomes six.
+
+Recorded rather than done, and recorded with the exact signature, because the
+alternative is a bridge with a test and no caller — which is
+`createNoopBreakerMetrics` all over again.
+
+### D-316 · The heartbeat alert is evaluated PER WORKER, oldest live one, tombstones excluded
+**Status:** Active — **important**
+
+`collectWorkerHeartbeatAge` was:
+
+```sql
+select extract(epoch from (now() - max(last_beat_at))) as age_seconds
+from worker_heartbeats
+```
+
+No status filter, and `max()` across all replicas. Reproduced twice against a
+real database:
+
+1. Two rows, one 3600s stale (`status='running'`) and one fresh → evaluator age
+   **0.01s**, no page. `max()` takes the NEWEST beat, so one healthy replica
+   hides any number of corpses.
+2. A single **cleanly stopped** worker with nothing else running → age ~0s, and
+   `count(*) where status <> 'stopped'` = **0**. Every job in the product is
+   stopped and the page stays quiet for its whole 300s threshold, because a
+   `stopped` row keeps its timestamp forever. The alert was reading a tombstone
+   as a pulse.
+
+`heartbeat.ts:34-37` designed per-process rows explicitly so "a dead replica [is]
+visible as a stale row". The evaluator aggregated them back into exactly the
+single shared row that design was avoiding.
+
+**Decision:** `where status <> 'stopped'`, then `min(last_beat_at)` — the OLDEST
+live worker — because the question the page answers is "is ANY worker dead", not
+"is the fleet dead". Zero live rows returns `Number.MAX_SAFE_INTEGER` rather than
+being unmeasurable, on the same reasoning as a missing backup: a worker never
+deployed, a worker that died, and a worker stopped and never replaced are one
+outage from a user's point of view, and treating the first as unmeasurable means
+the alert never fires on the deployment where the worker was simply forgotten.
+
+`readWorkerLiveness` in `platform/jobs` already does exactly this, per row and
+status-filtered. It is **not** reused because it currently throws (owned
+elsewhere, fixed in parallel). Reusing it is the right end state and is left as a
+follow-up rather than done blind against a function known to be broken.
+
+### D-317 · `platform.notify.undeliverable` — D-146 closed
+**Status:** Active (supersedes the gap recorded in D-146)
+
+`dispatcher.ts` detected "every channel failed" from the beginning and logged it
+at `error` as `notify.undeliverable`. **A log line is not a signal**: nothing
+aggregates it and no rule can watch it, so `alert-rules.ts` carried a comment
+saying the metric an operator actually wants "does not exist" and filed it as
+D-146 rather than writing a rule against nothing.
+
+`platform.notify.failed` could not be given a threshold instead, and the reason
+is the whole point: it counts DELIVERIES, **per channel**. One notification
+failing on both of its channels and two notifications each failing on one while
+their other channel lands both produce `notify.failed = 2`. The first is a person
+who was never told something the system decided they needed to know; the second
+is a degraded provider and a working product.
+
+**Decision:** `PLATFORM_METRICS.NOTIFY_UNDELIVERABLE`, emitted once per
+notification in the `!delivered` branch, tagged with the **kind only** — never
+the recipient (PII) and never the channel list joined into a string (unbounded
+cardinality). Collected as `SIGNALS.NOTIFY_UNDELIVERABLE` and watched by a new
+`notify_undeliverable` rule at threshold **1**, severity `ticket`.
+
+Threshold 1 because there is no healthy baseline to sit above — a threshold of 5
+would only be choosing how many people to silently not inform. `ticket` rather
+than `page` because the product is up and the fix is never at 3am: a deleted
+user's foreign key, a missing tenant, or credentials to rotate in the morning.
+
+### D-318 · The rate-limit fallback is emitted under more than one name, and one was uncollected
+**Status:** Active
+
+`platform/rate-limit` takes its metric name from the constructor, so each limiter
+namespaces its own. The collector's `METRIC` map held
+`identity.rate_limit.in_process_fallback` only. Under a cache outage an audit
+observed **six activations** of `app.authenticated_rate_limit.in_process_fallback`
+— built in `src/app/server.ts:150`, already in the D-232 immediate-flush set —
+and **zero pages**, because nothing was looking at that name.
+
+D-034's whole point is that a silent security downgrade is found out. Collecting
+one of the two limiters that can degrade is finding out half the time.
+
+**Decision:** `rate_limit.fallback` sums the identity limiter and the app-level
+authenticated throttle. The rule body is amended to say so, because the number in
+a page has to mean what the sentence beside it says.
+
+`billing.webhook_rate_limit.in_process_fallback` is **deliberately excluded** and
+pinned by a test asserting it contributes zero. It is a webhook throttle, not an
+authentication control; folding it into a page whose body reads "authentication
+rate limits are per-instance and weaker" would make the alert text false on every
+billing occurrence. If it warrants an alert it warrants its own rule.
+
+### D-319 · The alerter's own mail goes through the guard — a wedged SMTP server stalled every rule
+**Status:** Active — **important**; nodemailer socket timeouts remain **Open**
+
+`alert-evaluator-main.ts` built `createSmtpMail` **raw**, not through
+`createGuardedMail`, and `createNodemailerTransport` sets no `connectionTimeout`,
+`greetingTimeout` or `socketTimeout`. So a TCP connection that opens and then says
+nothing had no deadline anywhere in the stack.
+
+`deliver()` is awaited inside `runCycle`, which is awaited by `runOnce`, which is
+awaited by the loop. **One hung socket on one page-severity alert suspended the
+entire evaluator** — readiness, pool saturation, backups, worker heartbeat, every
+rule — for as long as the peer held the connection. The monitoring system's own
+dependency taking the monitoring system down is the inversion §5 exists to
+prevent, and it fails silently: the process is alive, the container is healthy,
+and no alert has been produced for an hour.
+
+**Decision:** the ops path builds its own single-purpose `ResilienceRegistry`
+from the same `config.timeouts` / `config.concurrency` / `config.breaker` the API
+uses, and wraps the SMTP adapter in `createGuardedMail(raw, guard('mail'))`. A
+wedge now costs one cycle of latency (the `mail` rule's 10s), and after five
+costs nothing at all once the breaker opens. `createGuardedMail` deliberately
+does not declare mail idempotent (D-237), so this adds a deadline without adding
+a duplicate page.
+
+**Still open, and owned by `platform/mail`:** `createNodemailerTransport` should
+set `connectionTimeout`, `greetingTimeout` and `socketTimeout`. A socket-level
+deadline is strictly better than an outer race, because the race leaves the
+wedged socket open — the guard bounds the CALLER's wait, not the connection.
+
+### D-320 · The runbook path travels in the BODY, because `data` does not survive the email channel
+**Status:** Active; the channel-side fix remains **Open**
+
+`alert-evaluator.ts:102-110` puts `runbook`, `ruleId`, `value` and `threshold` in
+`ChannelMessage.data`. `email-channel.ts:77-84` maps only `kind`, `title`, `body`
+and `language` onto the one mail template — `MailPort.data` is
+`Record<string, string>` and the channel deliberately refuses to widen it, which
+is correct and is documented in its own header.
+
+The consequence went unnoticed: **every other field in `data` is dropped between
+the evaluator and the inbox.** The on-call email arrived carrying a body that
+refers to the runbook and no runbook path. At 3am that is several minutes of
+somebody grepping `docs/runbooks/` on a phone, and it is the most actionable line
+in the message.
+
+**Decision:** `withRunbookLine()` appends `Runbook: <path>` (and `रनबुक:` in
+Hindi, P7) to the body at delivery. Fixed in the body rather than in the channel
+so it survives EVERY channel — in-app today, whatever pager adapter lands later —
+without each one deciding to render a payload field. `data.runbook` is kept as
+the machine-readable copy for the in-app row.
+
+**Still open, and owned by `platform/mail` + `notify-channel/email-channel.ts`:**
+the correct end state is a real `ops-alert` `MailTemplate` with its own typed
+fields, at which point the body append becomes redundant. Reusing
+`weekly-digest` is a stand-in and the email-channel header already says so.
+
+### D-301 · "Stop claiming immediately" checked the call, not the result — and the miss also hung the process
+**Status:** Active — fixed
+
+`job-runner.ts` checked `stopping` immediately before `queue.claim(...)` and
+nowhere else, while its own header claimed "the instant a signal arrives the loop
+must not take another job". `claim` is a network round trip. **A SIGTERM landing
+inside it is the common case on a deploy, not an exotic interleaving** — so the
+flag flipped while the statement was on the wire, the claim came back holding a
+job, and the loop ran it. That job is then killed by the drain deadline and
+returned by the reaper, so it runs twice for no reason at all: exactly what the
+check existed to prevent.
+
+The second half was worse and is the one that reached production behaviour.
+`runStop` read `const inFlight = current`, and in this race `current` is
+`undefined` — nothing is executing, the claim has not returned. The `withDeadline`
+branch was therefore **skipped entirely** and control fell through to an
+unbounded `await stopped`, on a loop parked on the very claim that had not come
+back. `stop()` never resolved and `worker.drain_timeout` was never logged. Since
+`worker-main.ts` awaits `worker.stop()` inside the signal handler,
+`container.shutdown()` and `process.exit(0)` were never reached: **the process
+hung until SIGKILL, which is the outcome the deadline exists to prevent.**
+
+**Decision:** the flag is re-read AFTER the claim resolves, in `claimOrRelease`,
+and the in-flight CLAIM is tracked in `claiming` alongside `current` so
+`stop()` can see "the loop is busy" even when the busy part is not a handler.
+
+**Proved by mutation.** Removing the post-claim check reds four named tests
+across the unit and integration suites; restoring the original `runStop`
+(`inFlight = current` plus the unbounded `await stopped`) reds
+*"applies the drain deadline to a claim in flight, instead of hanging forever"*
+with the promise still `pending` after 80 turns — the hang itself, as an
+assertion rather than as a timeout.
+
+### D-302 · A job claimed into a shutdown is RELEASED — not run, not dropped, and not failed
+**Status:** Active — new queue method
+
+D-301 leaves a job in hand that must not be started. All three obvious disposals
+are wrong, which is why `JobQueue` grew a fourth completion method rather than
+reusing one:
+
+- **Run it** — forbidden by §12 step 3, and it will be killed and rerun anyway.
+- **Drop it** — the row stays `running` behind a lease nobody holds, invisible
+  until the 120-second reaper. A two-minute delay on work never started.
+- **`fail` it** — it did not fail. That writes a `last_error` describing an error
+  that never happened AND pushes `run_at` out by the backoff, so every job
+  unlucky enough to be claimed during a deploy is delayed 30 s minimum.
+
+**Decision:** `release(job, now)` — back to `pending`, `run_at` untouched,
+`last_error` cleared, **`attempts` decremented**, fenced by the lease exactly like
+`succeed`/`fail` (D-233). The decrement is the non-obvious part: the claim is
+being UNDONE rather than completed and the handler was never invoked, so leaving
+`attempts` raised would let a rolling deploy across five restarts walk a job that
+has never run once all the way to `dead`. `greatest(attempts - 1, 0)` so a
+concurrent reclaim can never drive it negative.
+
+Pinned against a real database in `tests/integration/worker-shutdown.test.ts`,
+including that a STALE worker's release is refused by the same fence — the new
+write is not a hole in D-233's.
+
+### D-303 · A completion write that threw aborted the shutdown before the heartbeat could stop
+**Status:** Active — fixed
+
+`execute`'s `catch` called `await queue.fail(...)` **outside any try**. The
+realistic co-occurrence is not exotic: **a database blip during a deploy makes
+the handler throw AND makes the failure write throw.** `execute` rejected,
+`withDeadline` propagated it, `runner.stop()` rejected — and `worker.ts`'s
+
+```
+await runner.stop(reason);   // rejects
+await heartbeat.stop(...);   // NEVER RUNS
+```
+
+meant the heartbeat row stayed `running`, went stale at 300 s, and
+`worker_heartbeat_stale` **paged somebody on a clean deploy**. That consequence
+was already written down four lines above the defect, in `worker.ts`'s own
+comment: "the difference between 'deploy went fine' and 'page somebody'".
+
+**Decision:** three layers, deliberately, and the redundancy is the point because
+each one is owned by a different file.
+
+1. `recordCompletion()` wraps every completion write (`fail` on the no-handler
+   path, `fail` on the failure path, `release`) and logs
+   `job.completion_write_failed`. Swallowing it loses nothing: the row keeps its
+   lease and the reaper returns it. Losing the SHUTDOWN is unrecoverable.
+2. `withDeadline` treats a rejection as FINISHED rather than rethrowing. The
+   question it answers is "is it still running?", and a promise that rejected is
+   not still running.
+3. `worker.stop()` wraps `runner.stop()` in its own try/catch, so the ordering
+   promise holds for a reason this file can enforce locally rather than depending
+   on a property of another module that a future change could quietly remove.
+
+**Proved by mutation:** reverting layer 1 alone reds three named tests; reverting
+all three reproduces the original failure exactly — `worker.stop()` rejects with
+`db down: could not record failure` and *"still marks the heartbeat row stopped
+rather than leaving it running"* goes red.
+
+### D-304 · `app.close()` rejecting skipped `closeResources()` and `exit(0)` — flagged before, unchanged
+**Status:** Active — fixed
+
+Same shape as D-303, in `src/app/shutdown.ts`, and **it had already been reported
+by a previous audit and was still there.** `const drained = await
+withDeadline(app.close(), drainTimeoutMs)` was bare. Fastify's `close()` runs
+every registered `onClose` hook, so any plugin teardown that rejects — a cache
+client already gone is the everyday one — made `run()` throw before the pools
+were released and before the process exited. Connections stayed held on the
+database until it timed them out, and the process sat there until SIGKILL:
+precisely the outcome that file's own header says the deadline exists to avoid,
+reached through a different door.
+
+**Decision:** the drain is wrapped; a failure leaves `drained` **false** and gets
+its OWN log line. "The drain timed out" and "the drain blew up" are different
+incidents, and reporting `drained: true` for a drain that threw would be worse
+than silence.
+
+Proved with a real Fastify instance and a real rejecting `onClose` hook rather
+than a stub with a rejecting `close` — the failure mode is *plugin teardown*, and
+a stub would only prove that a rejecting function rejects.
+
+### D-305 · `readWorkerLiveness` threw on the first real row — D-233/D-267 again, same directory, same driver
+**Status:** Active — fixed
+
+`heartbeat.ts` declared `last_beat_at: Date` on a raw `db.execute` and called
+`row.last_beat_at.getTime()`. The driver returns **wire text**. Against real
+Postgres: `TypeError: row.last_beat_at.getTime is not a function`.
+
+This is the identical defect D-233 found and D-267 finished in
+`postgres-queue.ts` — **in the same directory, on the same driver** — where a
+long comment types all three timestamps `Date | string` and predicts this exact
+failure: "the first caller to write `job.runAt.getTime()` gets a `TypeError` in a
+worker, at runtime, with a compiler that had already signed off on it."
+`heartbeat.ts` was simply not repaired in that wave.
+
+The only reason nobody hit it is that **the function has zero callers and had
+zero tests** — which is not evidence it was safe, it is evidence it was
+unexercised. Its own header advertises it for `/health/deps`; wiring it in as
+written would have **500'd the health endpoint**, the one thing that must not
+fail while everything else is.
+
+**Decision:** typed as the union the driver actually returns and normalised once
+at the row boundary, so `WorkerLiveness.lastBeatAt` is the real `Date` it has
+always claimed to be. Pinned against a real container.
+
+### D-306 · One shared budget bounds the whole of `stop()`, not just the handler
+**Status:** Active
+
+The old `runStop` applied `shutdownTimeoutMs` to the in-flight job and then
+awaited the loop **unbounded**, on the reasoning that a loop whose drain finished
+ends promptly. That is true of the handler and false of everything else in an
+iteration: `reapStuck`, and `onTick`'s scheduler probe and heartbeat, are all
+database calls — and a database that has just become unreachable is exactly the
+condition under which a deploy is happening.
+
+**Decision:** one deadline instant computed at the top of `runStop`, spent across
+both waits via `remainingMs()`. `shutdownTimeoutMs` is the promise made to the
+orchestrator; it has to bound the whole of `stop()` or SIGKILL arrives and skips
+every remaining cleanup step. The timeout branch still deliberately does NOT
+await the loop — abandoning a job to the reaper is the documented at-least-once
+edge, and awaiting it would honour a window it had just reported exceeding.
+
+### D-307 · `worker.ts` was at 0% coverage because it demanded the whole `Config` and built its own queue
+**Status:** Active — two seams added
+
+The file owning the shutdown choreography had **no tests at all**, and
+`scheduler.ts` had 27.58%. That is not an oversight anyone chose; it is what the
+constructor's shape made cheap. `createWorker` took the full `Config` — ~30 frozen
+sub-objects behind boot-time validation — so it was reachable only from a process
+that had already parsed the environment, and it built its own Postgres queue, so
+the failure that matters most (a completion write that throws) was unreachable
+against a healthy container.
+
+**Decision:** two narrow seams, both justified independently of testing.
+
+- `WorkerConfig` — the slice this process actually reads (`env`,
+  `shutdown.workerTimeoutMs`). The real `Config` satisfies it structurally, so
+  `worker-main.ts` is unchanged. Same rule `notify.service.ts` already follows
+  with "the narrow slice of `JobQueue` this module needs".
+- `WorkerDeps.queue?` — defaults to the real Postgres queue; nothing in
+  production passes it.
+
+A constructor that can only be called by the composition root is a constructor
+whose behaviour is asserted nowhere, and this one's behaviour is whether a deploy
+pages somebody.
+
+### D-308 · What the coverage gap actually cost, stated as a number
+**Status:** Active — measurement
+
+After this wave, on the targeted suites: **`worker.ts` 90.72% statements / 100%
+functions** (from 0%), **`scheduler.ts` 100% across all four metrics** (from
+27.58%), `job-runner.ts` 98.39%, `heartbeat.ts` 100% statements,
+`shutdown.ts` 95.83%.
+
+The residual uncovered block in `worker.ts` is lines 302-311 — the try/catch
+around `runner.stop()` from D-303 layer 3. It is **genuinely unreachable now**
+that `runner.stop()` cannot reject, and it is kept anyway: it defends an ordering
+promise against a future change in a different file. Recorded here so the next
+reader does not "clean up" a deliberate guard on the strength of a coverage
+report.
+
+Worth stating plainly because the audit that opened this wave predicted all of it
+in one sentence — *"the shutdown-ordering choreography is exactly what regresses
+silently"* — and four defects had already accumulated behind that 0%.
+
+### D-309 · Test-side rules this wave had to obey, and the one that nearly produced a flake
+**Status:** Active — testing note
+
+Two things here are not obvious and both were found the hard way.
+
+**"Did `stop()` hang" is measured in event-loop TURNS, not in a duration.**
+`await`ing a promise that never resolves gives a bare 15-second vitest timeout
+with nothing to say about why. `settlement()` races the promise against N turns
+and returns `'pending'`, so the hang becomes a named assertion with a readable
+message. A turn yields through `setTimeout(0)` rather than `setImmediate` so the
+timers phase runs and a deadline that IS due can fire — no duration is waited out
+and nothing encodes how long anything takes, which is what §9.5 actually bans.
+
+**`worker.start()` never resolves — it IS the loop — so "the worker is up" has to
+be OBSERVED.** A test that called `stop()` straight after `start()` raced the boot
+heartbeat against the stopping write, and the row could end up `running` for a
+worker that had shut down perfectly. That flake appeared only under `--coverage`,
+which is the worst way to find it. `startAndSettle()` waits for the boot beat to
+land first.
+
+### D-310 · What this wave did NOT do, listed so it is not mistaken for done
+**Status:** Open — residue, owned by other agents
+
+1. **`readWorkerLiveness` still has zero callers.** D-305 makes it safe to wire;
+   it does not wire it. `/health/deps` lives in `src/app/health.ts`, which this
+   wave does not own. The heartbeat blindspot is only closed when something
+   actually reads the row — and now that it no longer throws, that is a one-line
+   change rather than an incident.
+
+2. **`src/app/container.ts` fails lint** — `'servesRequests' is assigned a value
+   but never used` (line 452). Not this wave's file and not this wave's change;
+   `npm run lint` therefore exits 1 repo-wide while every file in
+   `src/worker/`, `src/platform/jobs/` and `src/app/shutdown.ts` is clean.
+
+3. **`worker-main.ts`'s own shutdown path is still untested.** Its `stopping`
+   guard, the two `catch` blocks and `process.exit(0)` are structurally identical
+   to what is now pinned one level down, but the entry point itself has no test —
+   it would need the process signal handlers injected the way
+   `createShutdownController` already injects `onSignal` and `exit`.
+
+4. **`release` is not exercised by `tests/integration/job-queue.test.ts`.** Its
+   SQL is covered through the worker suite instead. The queue's own file is the
+   more natural home for the fence and the `attempts` arithmetic, and that file
+   was left alone this wave to avoid colliding with concurrent work.
+
+### D-321 · The Foxy daily cap is pinned to LITERALS, because every test referenced the symbol
+**Status:** Active — product invariant
+
+`FOXY_DAILY_MESSAGE_LIMIT` is `{ free: 20, plus: 200 }`. An audit changed it to
+`{ free: 5000, plus: 9000 }` and the entire suite stayed green.
+
+Not because the limit was untested — it is exercised in `foxy.service.test.ts`,
+`usage.test.ts` and `foxy-plan-reader.test.ts` — but because every one of those
+places asserted `FOXY_DAILY_MESSAGE_LIMIT.free`, never a number. **A
+symbol-relative assertion moves with the symbol**, so a suite made entirely of
+them pins the plumbing perfectly and says nothing at all about the value. The
+single absolute claim anywhere was `plus > free`, which any ordered pair
+satisfies — 5000/9000 included.
+
+Meanwhile FIVE comments (`modules/foxy/index.ts:126`, `foxy.types.ts:63`,
+`app/routes.ts` twice, `foxy-plan-reader.test.ts:15`) went on stating the free
+cap as 20. That is the D-257 shape in prose: behaviour and documentation drift,
+documentation stays authoritative-looking, nothing mechanical relates the two.
+
+The commercial half matters as much as the mechanical one. D-257 fixed "every
+paying customer silently received the free tier" **structurally**, while the
+effect it was about — a paid tier worth buying — was absent: 5000 versus 9000 is
+1.8x on a ceiling no student reaches, and the free tier's model spend was bounded
+by nothing any test could observe.
+
+`modules/foxy/__tests__/daily-message-limit.test.ts` now asserts, as literals:
+`free === 20`, `plus === 200`, `free <= 60` (a cap nobody reaches is not a cap),
+`free >= 10` (nor is a demo a product), `plus / free >= 5`, and the boundary
+through `decideUsage` so the table is provably the number that decides. Changing
+either number is a commercial decision and now fails a test that names itself.
+
+Two stale paragraphs were also reconciled rather than left: the `FOXY_PLANS`
+header's "`billing` does not exist yet" and `app/routes.ts`'s identical sentence
+in the foxy block.
+
+### D-322 · The module-to-pool wiring was asserted NOWHERE, under a test named after it
+**Status:** Active — §3.1 bulkhead
+
+`routes.test.ts` carried a test called *"hands each module the pool §3.1 assigns
+it"*. **It never called `buildModules`.** Its eleven assertions read
+`built.poolFor('foxy').name === 'ai'` — the `MODULE_POOLS` lookup table evaluated
+against the container, with the composition root absent from the test entirely —
+and the very next test re-asserted the same table directly. The table was checked
+twice; the wiring zero times.
+
+Proved rather than argued: an auditor changed `routes.ts:633` from
+`container.poolFor('foxy')` to `container.poolFor('identity')` — putting a Foxy
+turn, which holds its connection across a model call, onto the ten connections
+reserved for login, the precise failure §3.1 exists to prevent — and ran the app
+suite: **164/164 passed.**
+
+`src/app/__tests__/module-pool-wiring.test.ts` closes it. No module exposes its
+handle (and none should — a module that could show you its pool is a module that
+could choose it), so `poolFor` is replaced by a factory issuing a **trap handle
+tagged with the module name it was asked for**. The tag is the MODULE, not the
+pool, so `poolFor('foxy')` and `poolFor('identity')` are distinguishable even
+when they resolve to the same pool. A trap's `db` is a proxy that records its tag
+and throws, ending the driver at the first database access; the driver table is
+total over `ModuleName`, so a new module with no way to observe its handle does
+not compile. 24 cases: eleven modules in the API, eleven in the worker
+(`forWorker` must swap every one), plus the two name-level assertions.
+
+**The driver choice is a constraint, not a detail, and it is the subtle part.**
+`foxy.listSessions` resolves the tenant through identity before touching anything
+of its own, so it reports `identity` no matter how foxy is wired — permanently
+green, permanently meaningless, the same defect one layer down.
+`foxy.getTranscript` loads the session from foxy's own repository first. Same for
+`practice.getSession` over `getHistory`, `parent.digestSource.findParentsDue`
+over `getChildren`, `billing.handleWebhook` (with a genuinely signed delivery)
+over anything authorised, and `notify.deliver` over `getUnreadCount`.
+
+Re-applying the mutation now turns two NAMED tests red: *"foxy reaches for its
+own handle first"* (`reached: 'identity'`) and *"requests all eleven module
+names"*. The old test was renamed to *"resolves each module NAME to the pool §3.1
+assigns it"* — it keeps its value under a name that claims only what it does.
+
+Also recorded: `notify` legitimately asks `poolFor` twice (the module and its
+write-through preferences store), so the name assertion is a SET rather than a
+multiset — pinning the multiset would turn a second correct call into a failure.
+
+### D-323 · Boot gates: both fixtures satisfy EVERY gate, and the refusals are scoped by process role
+**Status:** Active — deployment
+
+Two defects in one place.
+
+**(a) The fixtures encoded gate ORDER while claiming to assert gate CONTENT.**
+`createContainer` runs its production refusals in source order — mail, embed,
+llm, payments, migration journal — and every one throws. `boot-gates.test.ts`'s
+`PRODUCTION_ENV` was explicitly *"everything a production boot needs EXCEPT
+mail"*, so every case in it passed for whichever gate happened to be first among
+the unmet ones. `wiring.test.ts` had learned this in the D-226 wave and fixed its
+own block; this file was not given the same treatment. An auditor inserted one
+realistic new gate ahead of mail and **13 tests went red across both files, none
+of them about the new gate** — including the block whose header promises "a gate
+added ahead of payments tomorrow cannot break this block".
+
+`PRODUCTION_ENV` now satisfies every gate and each case removes exactly the
+variable it is about, via `without(...)`. A satisfied gate does not throw and
+therefore cannot be what a case observes. A new case, *"refuses for the MAIL
+reason, not because some other gate was unset"*, states the property directly.
+
+Re-run of the auditor's experiment with the complete fixtures: insert the gate,
+add its variable to both bases, **42/42 pass**. That is the durable property —
+no fixture can pre-satisfy a gate that does not exist yet, but adding a gate must
+cost exactly one line per base and break nothing else.
+
+Also removed from that fixture: `SESSION_SECRET` and `IP_HASH_SALT`. **Neither is
+a configuration key.** `SESSION_SECRET` appears nowhere in `src/`; the real
+variable is `IDENTITY_IP_HASH_SALT` (D-223). They contributed nothing while
+making the fixture look exhaustive, which is worse than an obviously partial one:
+a reader checking "did they set everything" sees two secrets and stops looking.
+
+**(b) The gates were role-blind.** `worker-main.ts` calls
+`createContainer(config, { role: 'worker' })`, and a worker sends the weekly
+digest and nothing else — `createWorker` is handed `modules.notify` alone — yet
+it refused to start without `VOYAGE_API_KEY`, `LLM_API_KEY` and all three
+`RAZORPAY_*` credentials, none of which it can reach. A refusal naming a
+credential the process cannot use is not safety; it is a deployment that will not
+start for a reason nobody can act on, and the usual resolution is to paste a
+placeholder — which makes the next refusal on that variable meaningless
+everywhere, including in the api where it matters.
+
+The container already knows the role (it trims the pools with it), so this cost
+one boolean. `embed`, `llm` and `payments` are gated for `role === 'api'` only.
+**Mail is NOT scoped** — both processes send it. **Nor is the migration journal**
+— it is a statement about the schema rather than a credential, and a worker
+writing into a half-migrated database is the same hazard as an api serving from
+one. The role still defaults to `'api'`, the conservative reading.
+
+### D-324 · `container.authz` is the CONTENT-ONLY guard, and it now says so out loud
+**Status:** Active — authorization boundary
+
+It was built as `createAccessGuard({ readLinkStatus: () => null })` under the
+comment *"the link reader is wired to the identity repository in build step 4"*.
+Build step 4 shipped. The line did not change. **This is D-257's
+`readPlan: () => null` one file over, still live.**
+
+Harmless BY ACCIDENT: every module builds its own per-call guard from its own
+async link edge, and the only consumer of this member asks about
+`{ kind: 'content' }` — the one resource kind whose rules never consult a link.
+But it is a **public member of `Container`, typed `AccessGuard`, that silently
+denied every parent-child relationship.** The next caller to reach for it instead
+of building their own would have got a boundary returning "denied" for every
+approved parent, with no error and nothing distinguishable from a correct
+refusal.
+
+**It cannot be wired properly at this seam.** `LinkStatusReader` is SYNCHRONOUS,
+every real link status is an async database read, and no module is constructed in
+the composition root. A correct reader is not merely missing here — it is not
+expressible here. Removing the member was the other candidate and was rejected
+because its one consumer lives in a file this change does not own
+(`modules/content/__tests__/content.service.test.ts:526`).
+
+So the reader now throws a named error (`UNWIRED_LINK_READER`, exported so the
+test pins the WORDING, which is the whole value). Both postures are fail-closed;
+only one can be told apart from a genuine authorisation decision.
+`container-authz.test.ts` asserts all three halves: `{ kind: 'content' }` still
+decides, a parent-child question throws the named error and specifically NOT a
+`ForbiddenError`, and every deny that does not need a link (student to another
+student, parent writing, tenant mismatch) is still exactly a `ForbiddenError` —
+so the change cannot have turned genuine 403s into 500s.
+
+The durable fix is `LinkStatusReader` becoming async, or the member being deleted
+once its one test consumer moves. Both are outside this change.
+
+### D-325 · `readChapter`'s bare `catch` turned a pool exhaustion into a 404
+**Status:** Active — resilience
+
+`app/routes.ts`'s practice wiring read
+`try { return await content.service.getChapter(actor, chapterId); } catch { return null; }`.
+
+A withdrawn chapter is a `NotFoundError` inside `content`, and practice genuinely
+wants that as a VALUE — it has its own wording, and a session whose chapter was
+withdrawn mid-flight must not surface content's. But a bare catch is a translator
+that cannot tell the two kinds of "no chapter came back" apart. A pool
+exhaustion, a statement timeout, a breaker rejection or a `ForbiddenError` became
+"there is no such chapter": nothing propagated, no breaker counted a failure it
+should have, no metric moved, and the student was told the chapter does not exist
+— the one answer guaranteed to make them stop looking. `platform/db` under load
+would have presented as a curriculum that had quietly emptied.
+
+Narrowed to `if (error instanceof NotFoundError) return null; throw error;`.
+
+Not yet pinned by a test: the closure is a local inside `buildModules` with no
+seam to reach it from, and provoking it needs a `content`/`practice` service test
+that injects a failing chapter read. Left for the owner of those suites.
+
+**RESOLVED by D-334 (11 August 2026).** The seam was made rather than found: the
+closure is now the exported `createPracticeChapterReader`, and its eight tests
+need no service, no container and no database.
+
+### D-326 · The service-test harness handed modules UNGUARDED ports for three of them
+**Status:** Active — test fidelity
+
+`tests/helpers/app-harness.ts` asserts of itself, three times, that it uses "the
+same wiring as `app/routes.ts`". For `llm`, `cache` and `mail` that was false.
+It passed the raw `MemoryCache`, the raw `RecordingMail` and the delegating
+`FakeLlm` straight into the modules, while production passes `container.cache`,
+`container.mail` and `container.llm` — each of which leaves the composition root
+already wrapped in its concurrency limit, its circuit breaker and its timeouts
+(04-RESILIENCE-PLAN.md sections 3.3, 4 and 5).
+
+The container's own header states the property that made the gap invisible: "no
+downstream caller can hold an unguarded port — not because they were told not to,
+but because one is never handed out". **The harness was handing them out**, so no
+service test in the repository exercised the breaker, the concurrency limiter or
+either LLM timeout on the paths that actually carry them.
+
+The delegating LLM is now constructed BEFORE the container and passed as the
+`llm` override, so `container.llm` wraps it and `useLlm` still swaps the script
+underneath the guard; modules receive `container.cache` and `container.mail`. The
+RAW objects remain on the harness (`harness.cache`, `harness.mail`,
+`harness.llm`) because a test has to read what was recorded and clear it between
+cases. 404/404 owned tests pass with the guards in place.
+
+No test yet asserts the guards are there — reverting this change leaves the suite
+green, which is the same defect class this entry is about. A breaker /
+limiter / first-token-timeout service test is now POSSIBLE for the first time and
+is left for the testing owner.
+
+### D-327 · What this wave did NOT do
+**Status:** Open — residue
+
+1. **`container.authz` still exists as a public member** (D-324). It throws
+   instead of lying, which is strictly better, but the durable answers are an
+   async `LinkStatusReader` or deletion of the member. Both touch files outside
+   this change.
+2. **`readChapter`'s narrowing has no test** (D-325). **CLOSED by D-334** — the
+   closure was lifted to an exported function and now has eight tests, five of
+   which go red if the bare catch returns.
+3. **The harness guards have no test** (D-326).
+4. **`wiring.test.ts`'s `PRODUCTION_BASE` and `boot-gates.test.ts`'s
+   `PRODUCTION_ENV` are two complete fixtures of the same thing.** They should be
+   one exported constant. Merging them means one file importing from the other or
+   a third helper, which is a wider change than this wave.
+5. **The `notify` module asks `poolFor('notify')` twice** — once for itself and
+   once for its write-through preferences store. Correct, but it is why D-322's
+   name assertion is a set; a module needing two handles for two reasons is worth
+   a look when preferences get their HTTP path (D-280 item 2).
+
+## Observability and deadline wave — 11 August 2026 (D-331 to D-334)
+
+### D-331 · `platform.port.call_failed` was emitted by NOTHING, so the metric it feeds was always zero
+**Status:** Active — **important**
+
+`dependency.errors`, the signal both dependency alert rules watch, is the sum of
+four counters. Three of them — `platform.port.timeout`,
+`platform.breaker.rejected`, `platform.concurrency.rejected` — are emitted when
+the GUARD abandons or refuses a call. The fourth, `platform.port.call_failed`, is
+the one for when the DEPENDENCY ITSELF refuses, and it existed, had its own bridge
+(`createPortFailureBridge`), had its own unit test, was listed in
+`IMMEDIATE_FLUSH_METRICS`, and was summed by `alert-sources.ts` — and **nothing
+ever called it.**
+
+A dependency that fails fast was therefore invisible to every rule. An auditor
+drove the real production wiring with a failing port and read the table back:
+
+    EMBED-DOWN turn:      502 DEPENDENCY_FAILURE
+    EMBED-DOWN metrics_events: []
+    PAY-DOWN checkout:    502 DEPENDENCY_FAILURE
+    PAY-DOWN metrics_events: []
+
+Empty, both times. Connection refused, DNS failure and provider-500 are the most
+common shape an outage takes; they return in milliseconds, far inside their
+timeout, and the breaker keeps its failure count privately until it transitions at
+five. So a payments outage that failed four checkouts and recovered left no trace
+anywhere an alert rule could see, and `dependency_error_rate_high` could only ever
+count timeouts and post-breaker rejections.
+
+**Decision:** `PortGuardOptions` gains `onFailure?: (name, error) => void`, shaped
+like the existing `onTimeout` / `onRetry`. `createPortGuard.run` invokes it for
+EVERY rejection leaving the guard — including timeouts and both rejection kinds —
+through a single `.catch` that RE-THROWS the original error, wrapped outside the
+limiter so it also sees a concurrency rejection raised before the adapter is ever
+called. `createResilienceRegistry` wires `onFailure: createPortFailureBridge(metrics)`,
+its sixth emission.
+
+**Filtering belongs in the bridge, not at the call site.** The bridge declines to
+emit for the three failures already counted, recognising them STRUCTURALLY
+(`details.timeoutMs`, `details.breaker`, `details.max` — never message text), so
+the four summands stay disjoint. Filtering in `platform/resilience` would put
+"which failures are already counted" in a module that is not allowed to know what a
+metric is called, six times over. A double-counted error rate is worse than a
+missing one: it is a number people quietly stop believing.
+
+Pinned by `src/platform/resilience/__tests__/port-call-failed.test.ts` — ten tests
+against a real registry and a real `MemoryMetrics`, deliberately NOT against the
+bridge, because the defect was never in the bridge. It asserts both halves: a plain
+`Error` from an adapter emits `call_failed` tagged with the port (including through
+the real `createGuardedEmbed` wrapper, the audit's exact shape), and a timeout emits
+`platform.port.timeout` and NOT `call_failed`. Removing the `onFailure` invocation
+turns five named tests red.
+
+The registry's `metrics` header said **FIVE emissions** and is now SIX. D-278 exists
+because that count went stale once already.
+
+### D-332 · A wedged SMTP socket had no deadline, and it stalls the alert evaluator, not just signup
+**Status:** Active — resilience
+
+`createNodemailerTransport` set no `connectionTimeout`, no `greetingTimeout` and no
+`socketTimeout`. nodemailer's defaults are effectively "wait for the OS", which for a
+silently dropped TCP connection is minutes. §4 is explicit: "every outbound call has
+a timeout. A call without one is a defect."
+
+Two consequences, and the second is the expensive one. Signup and password-reset mail
+inherit the hang, holding a connection and a pool slot. And the **alert evaluator
+awaits `deliver()` inside `runCycle`**, which its loop awaits — so one wedged SMTP
+socket stalls EVERY rule: readiness, pool saturation, backup age. The monitoring goes
+dark at exactly the moment something is wrong enough to be mailing about it.
+
+D-319 wrapped that send in `createGuardedMail`, which bounds the CALLER's wait, and
+that remains load-bearing. But a race cannot close a socket: the wedged connection
+keeps its file descriptor and one of the five `mail` concurrency slots until the OS
+gives up. A socket-level deadline is strictly better than an outer race, and having
+both is better still — the guard bounds the request, these bound the resource.
+
+**Decision:** all three are set, from the §4 `mail` timeout row rather than from new
+environment variables — `connectMs` for the connect and, separately, for the banner
+(a server that accepts and never greets is the same outage as one that never
+accepts); `totalMs` for socket idleness. No new env var means no new
+`env-contract.ts` entry and no way for the socket and the guard to disagree about how
+patient this dependency is allowed to be; `container.ts` passes `config.timeouts.mail`
+explicitly, and `SMTP_TIMEOUT_DEFAULTS` covers a caller that passes nothing, because
+"a call without a timeout is a defect" must not be satisfiable by omission.
+
+`createNodemailerTransport` also gains an injectable transport FACTORY. Without it,
+"does this transport carry a socket timeout" is answerable only by opening a socket to
+a real SMTP server that hangs, and **no test in this repository opens a socket to an
+SMTP server** — the same seam, and the same reason, as `MailTransport` itself. Nine
+tests: the exact options handed over, the defaults tied to the §4 row, an explicit
+override including a deliberate zero (`??`, not `||`), and two that drive a send which
+never settles through a fake applying the `socketTimeout` it was given, on fake timers.
+Deleting the three options turns four named tests red — two of them by hanging until
+the test timeout, which is precisely the production behaviour being pinned.
+
+### D-333 · Two copies of "which workers are alive", and the correct one had zero callers
+**Status:** Active
+
+`readWorkerLiveness` (`platform/jobs/heartbeat.ts`) is the per-worker,
+`status <> 'stopped'` liveness query. After D-305 repaired it, it had **zero
+callers** — while `scripts/ops/alert-sources.ts` carried a second copy of the same
+query with all of them, under a comment saying the shared one "is not reused here
+because it currently throws".
+
+The drift is not hypothetical: the duplicate already had two defects the original did
+not (`max()` across all rows, so one healthy replica hid every dead one; and no status
+filter, so a cleanly stopped worker read as a pulse). Both were fixed in the copy.
+Nothing forced the two back into agreement, and nothing would have forced the NEXT fix
+into both.
+
+**Decision:** `collectWorkerHeartbeatAge` now reads through `readWorkerLiveness`. The
+reference instant is read from the DATABASE (`select now()`) rather than taken from
+`options.now`: the age must be measured against the clock the row was timestamped by,
+or a few seconds of NTP skew between two containers becomes a "worker heartbeat stale"
+page — the old SQL got this right implicitly by doing the subtraction inside Postgres,
+and doing it in TypeScript makes the choice explicit. That `now` is normalised through
+the same `Date | string` union D-305 was about, because `db.execute` returns wire text
+for a `timestamptz`. Zero live rows is still `MAX_SAFE_INTEGER` (the loudest case, not
+the quietest), and the minimum beat is taken by `reduce` rather than by indexing the
+ordered result — an ordering a future caller of that function is free to change.
+
+The six behavioural heartbeat tests in `tests/ops/alert-sources.test.ts` pass unchanged
+against the shared implementation. They are joined by
+`tests/ops/worker-liveness-single-implementation.test.ts`, a STATIC drift guard,
+because a correct duplicate passes every behavioural test there is on the day it is
+written — it is the day after that costs. It scans the file with comments stripped (the
+prose quotes the banned SQL to explain why it was wrong; a scan that read the comments
+would ban the explanation).
+
+`/health/deps` — the other place `heartbeat.ts`'s header advertises — is still not
+wired. It needs a new optional `HealthDeps` member plus container and server wiring, and
+is left as the smaller remaining half.
+
+### D-334 · `readChapter`'s narrowing was correct and unprovable — closes D-327 item 2
+**Status:** Active — closes D-325's residue
+
+D-325 narrowed practice's chapter read from a bare `catch` to
+`if (error instanceof NotFoundError) return null; throw error;` and recorded that it
+was **not pinned by a test**, because "the closure is a local inside `buildModules`
+with no seam to reach it from". D-327 listed it as residue.
+
+An untestable correct fix is one refactor away from being an untestable wrong one:
+`catch {}` and the narrowed version were indistinguishable to the entire suite, which
+is exactly how the bare catch survived as long as it did. Before D-325, a pool
+exhaustion, a statement timeout, a breaker rejection or a `ForbiddenError` reached the
+student as a **404** — nothing propagated, no breaker counted a failure it should have,
+no metric moved, and `platform/db` under load presented as a curriculum that had
+quietly emptied.
+
+**Decision:** the closure is lifted to an exported `createPracticeChapterReader`,
+generic over the actor and the chapter so it stays a pure error-translation rule that
+cannot start knowing what a chapter is. This is the D-257 move
+(`createFoxyPlanReader`), for the same reason, after the same class of silent defect.
+The eight tests in `src/app/__tests__/practice-chapter-reader.test.ts` need no
+container, no module and no database. Their value is the NEGATIVE cases —
+`DependencyError`, `ForbiddenError`, `ConflictError`, a plain `TypeError` from a bug
+inside `content`, and a non-`Error` rejection — every one of which was a 404 before
+D-325 and would be a 404 again the moment somebody "simplified" the catch. Restoring
+the bare catch turns five named tests red.

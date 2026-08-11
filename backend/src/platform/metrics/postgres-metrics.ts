@@ -116,6 +116,15 @@ const IMMEDIATE_FLUSH_METRICS: ReadonlySet<string> = new Set<string>([
   PLATFORM_METRICS.JOB_DEAD,
   PLATFORM_METRICS.DEGRADATION_ACTIVATED,
   PLATFORM_METRICS.PII_SCRUBBED,
+  // A dependency that fails FAST is the shape that empties a buffer rather than
+  // filling it: the traffic that would have flushed the 100-row count trigger is
+  // the traffic that just started failing. Buffering this one for five seconds
+  // during a total provider outage would be five seconds of the alert evaluator
+  // reading zeros — the same trap the count trigger sets for a breaker.
+  PLATFORM_METRICS.PORT_CALL_FAILED,
+  // "Nobody was told" does not wait either, and it is by construction rare
+  // enough that immediate writes cost nothing.
+  PLATFORM_METRICS.NOTIFY_UNDELIVERABLE,
   'rate_limit.in_process_fallback',
   'identity.rate_limit.in_process_fallback',
   'app.authenticated_rate_limit.in_process_fallback',

@@ -349,6 +349,38 @@ export function createPostgresJobQueue(options: PostgresJobQueueOptions): JobQue
     },
 
     /**
+     * The claim, undone — D-301. See `JobQueue.release` for why this is not
+     * `fail` and why `attempts` goes back down.
+     *
+     * `run_at` is deliberately NOT touched. The job was already due when it was
+     * claimed, so the next worker to poll should be able to take it; rewriting
+     * `run_at` to `now` would be a no-op in the ordinary case and would silently
+     * move a job that had been scheduled into the future.
+     *
+     * `last_error` is cleared rather than set. Nothing went wrong, and leaving a
+     * stale error from a previous attempt beside a `pending` row is how an
+     * operator concludes a healthy job is failing.
+     */
+    async release(job: ClaimedJob, now: Date): Promise<boolean> {
+      const result = await db.db.execute<{ id: string }>(sql`
+        update jobs set
+          status = 'pending',
+          locked_by = null,
+          locked_at = null,
+          last_error = null,
+          attempts = greatest(attempts - 1, 0),
+          updated_at = ${now.toISOString()}::timestamptz
+        where id = ${job.id}
+          and status = 'running'
+          and locked_by = ${job.lockedBy}
+          and locked_at = ${job.lockedAt.toISOString()}::timestamptz
+        returning id
+      `);
+
+      return result.rows.length > 0;
+    },
+
+    /**
      * Back to `pending`, NOT to `failed`.
      *
      * `failed` means "this job ran and threw", and `run_at` would then be

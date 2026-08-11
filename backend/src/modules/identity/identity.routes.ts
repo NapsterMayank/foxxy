@@ -123,6 +123,25 @@ export async function registerIdentityRoutes(
   });
 
   /**
+   * D-291 — THE RESEND. ALWAYS 200, with a body identical on every branch.
+   *
+   * The seventh `/auth/*` route became the eighth because D-217's justification
+   * for a fire-and-forget verification email depended on a resend endpoint that
+   * had never been written: with mail down, signup created an account, took the
+   * address, and left no way to ask for the link again.
+   *
+   * Shaped exactly like `forgot-password` below, deliberately — same status,
+   * same constant body, same "the branch lives in the service and is invisible
+   * from here". An unknown address, an unverified one and an already-verified
+   * one are indistinguishable to the caller.
+   */
+  app.post(`${API_PREFIX}/auth/resend-verification`, async (request, reply) => {
+    const input = parseInput(identitySchemas.resendVerification, request.body);
+    await deps.service.resendVerification(input, contextOf(request));
+    return reply.status(200).send(OK);
+  });
+
+  /**
    * §6.3. On success: set the cookie and redirect to onboarding.
    *
    * A redirect carries no body, so there is no risk of the token appearing in

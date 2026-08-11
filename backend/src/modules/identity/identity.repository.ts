@@ -2,6 +2,7 @@ import { and, eq, or, sql } from 'drizzle-orm';
 import type { DbExecutor, DbHandle } from '@/platform/db/index';
 import { schema } from '@/platform/db/index';
 import { ConflictError } from '@/platform/errors/index';
+import type { PlatformRole } from '@/shared/constants/roles';
 import type { LinkStatusValue, Role } from '@/shared/contracts/identity.contract';
 import type { LinkRecord, LinkedChildRecord, SessionRecord, UserRecord } from './identity.types';
 
@@ -71,9 +72,32 @@ function toUserRecord(row: UserRow): UserRecord {
     id: row.id,
     email: row.email,
     passwordHash: row.passwordHash,
-    // The column carries a CHECK constraint limiting it to these two values,
-    // so the database is the guarantee behind this narrowing.
-    role: row.role as Role,
+    /**
+     * NARROWED TO `PlatformRole` — TEN VALUES — AND NOT TO `Role` — D-293.
+     *
+     * This cast used to read `row.role as Role` under a comment claiming "the
+     * column carries a CHECK constraint limiting it to these two values, so the
+     * database is the guarantee behind this narrowing." That was the OPPOSITE of
+     * the truth. `Role` is `z.enum(['student', 'parent'])`; the CHECK is built
+     * from `PLATFORM_ROLES` and admits ten, deliberately, so that granting a
+     * teacher in Phase 1 is an INSERT rather than a locking DDL change on a live
+     * table. The database guaranteed nothing of the kind, and the comment told
+     * every subsequent reader that it did.
+     *
+     * `PlatformRole` is what the CHECK actually enforces, so this narrowing is
+     * one the database really does stand behind — the same list, imported from
+     * the same constant the migration is generated from, so the two cannot drift.
+     *
+     * WHY IT MATTERED even though nothing grants a non-signup role today.
+     * `platform/authz/can-access.ts` documents this exact failure by name: with
+     * a two-value type, a `teacher` row arrives as a value the compiler believes
+     * impossible, and an "if student … otherwise parent" branch treats it as a
+     * PARENT — a privilege escalation delivered by a type that was merely out of
+     * date. That file widened its own type and the repository UPSTREAM of it was
+     * left behind. The narrowing was silent, and it would have stayed silent
+     * until the day the first teacher was granted.
+     */
+    role: row.role as PlatformRole,
     // NOT NULL since migration 0008 (D-073), so this is never null in a row
     // that exists. It is carried on the record rather than looked up later
     // because the ACTOR's tenant is one half of every authorisation decision,
@@ -187,7 +211,15 @@ export interface ConsumedLinkCode {
 export interface SessionWithUser {
   readonly session: SessionRecord;
   readonly userId: string;
-  readonly role: Role;
+  /**
+   * TEN VALUES, not two — D-293, and this is the sharper half of it.
+   *
+   * This is the row that becomes the request `Actor`: `validateSession` returns
+   * `{ userId, role, tenantId }` straight out of here and every authorisation
+   * decision in the product is made against it. A two-value type here is a lie
+   * told directly to the access boundary.
+   */
+  readonly role: PlatformRole;
   /** The actor's tenant, joined from `users`. Half of every authz decision. */
   readonly tenantId: string;
 }
@@ -211,6 +243,23 @@ export interface IdentityRepository {
   findUserTenant(userId: string): Promise<string | null>;
 
   createEmailVerificationToken(input: CreateTokenInput): Promise<void>;
+  /**
+   * Retires every outstanding verification token for the user and inserts a new
+   * one, in ONE transaction — the resend path, D-291.
+   *
+   * ONE LIVE TOKEN AT A TIME is the rule this buys, and it is why the two
+   * statements must not be split: between them, a crash leaves either two live
+   * tokens (retire second) or none at all (retire first) — and "none at all" is
+   * exactly the unverifiable account the resend endpoint exists to rescue.
+   *
+   * It is a REPLACEMENT and not an addition on purpose. A resend that merely
+   * added a row would leave every previously mailed link live, so a token
+   * captured from an old email — a shared inbox, a forwarded message, a mail
+   * archive — would still verify the account long after the user asked for a new
+   * one. Retiring is `consumed_at = now`, never a DELETE: the row is the record
+   * that a token was issued.
+   */
+  reissueEmailVerificationToken(input: CreateTokenInput & { now: Date }): Promise<void>;
   consumeEmailVerificationToken(tokenHash: string, now: Date): Promise<string | null>;
 
   createPasswordResetToken(input: CreateTokenInput): Promise<void>;
@@ -377,6 +426,27 @@ export function createIdentityRepository(handle: DbHandle): IdentityRepository {
         userId: input.userId,
         tokenHash: input.tokenHash,
         expiresAt: input.expiresAt,
+      });
+    },
+
+    /** The resend path — retire, then insert, in one transaction. D-291. */
+    reissueEmailVerificationToken(input: CreateTokenInput & { now: Date }): Promise<void> {
+      return handle.withTransaction(async (tx: DbExecutor) => {
+        await tx
+          .update(emailVerificationTokens)
+          .set({ consumedAt: input.now })
+          .where(
+            and(
+              eq(emailVerificationTokens.userId, input.userId),
+              sql`${emailVerificationTokens.consumedAt} is null`,
+            ),
+          );
+
+        await tx.insert(emailVerificationTokens).values({
+          userId: input.userId,
+          tokenHash: input.tokenHash,
+          expiresAt: input.expiresAt,
+        });
       });
     },
 
@@ -547,7 +617,8 @@ export function createIdentityRepository(handle: DbHandle): IdentityRepository {
           createdAt: row.createdAt,
         },
         userId: row.userId,
-        role: row.role as Role,
+        // The CHECK's list, not signup's list — D-293. See `toUserRecord`.
+        role: row.role as PlatformRole,
         tenantId: row.tenantId,
       };
     },

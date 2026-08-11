@@ -33,10 +33,12 @@ import { createDb } from '../../src/platform/db/index';
 import { createLogger } from '../../src/platform/logger/index';
 import {
   createConsoleMail,
+  createGuardedMail,
   createNodemailerTransport,
   createSmtpMail,
   type MailPort,
 } from '../../src/platform/mail/index';
+import { createResilienceRegistry } from '../../src/platform/resilience/index';
 import {
   createEmailChannel,
   createInAppChannel,
@@ -150,6 +152,35 @@ function parseArgs(argv: readonly string[]): Options {
  * a second SMTP client written for ops. A monitoring path built out of different
  * parts than the product's can succeed while the product's fails, and the one
  * message that would have told you is the one that goes through the ops path.
+ *
+ * =============================================================================
+ * AND IT USES THE SAME GUARD — a wedged SMTP server used to stall EVERY RULE.
+ *
+ * The application reaches mail through `createGuardedMail`: bulkhead, breaker,
+ * 10s timeout (§3.3, §4, §5). This path built `createSmtpMail` RAW, and
+ * `createNodemailerTransport` sets no `connectionTimeout`, `greetingTimeout` or
+ * `socketTimeout`, so a TCP connection that opens and then says nothing has no
+ * deadline anywhere in the stack.
+ *
+ * Follow that through the loop. `deliver()` is awaited inside `runCycle`, which
+ * is awaited by `runOnce`, which is awaited by the `while` loop. So ONE hung
+ * socket on ONE page-severity alert suspends the entire evaluator — readiness,
+ * pool saturation, backups, worker heartbeat, every rule — for as long as the
+ * peer holds the connection open. The monitoring system's own dependency taking
+ * the monitoring system down is the exact inversion §5 exists to prevent, and it
+ * fails in the silent direction: the process is alive, the container is healthy,
+ * and no alert has been produced for an hour.
+ *
+ * The guard bounds it at the `mail` rule's 10s and then, after five of those,
+ * opens the breaker and fails instantly — so a dead mail provider costs one
+ * cycle of latency rather than all of them. `createGuardedMail` deliberately
+ * does NOT declare mail idempotent (D-237), so this adds a deadline without
+ * adding a duplicate page.
+ *
+ * The `connectionTimeout`/`greetingTimeout`/`socketTimeout` settings still belong
+ * in `createNodemailerTransport` — a socket-level deadline is strictly better
+ * than an outer race, because the outer race leaves the wedged socket open. That
+ * file is not owned by this change and is reported instead.
  */
 function createAlertMail(transport: string, logger: ReturnType<typeof createLogger>): MailPort {
   if (transport === 'console') {
@@ -187,7 +218,7 @@ function createAlertMail(transport: string, logger: ReturnType<typeof createLogg
       { event: 'alerts.mail_transport_smtp', host: smtpHost, port: smtpPort },
       'page-severity alerts will be delivered over SMTP',
     );
-    return createSmtpMail({
+    const raw = createSmtpMail({
       transport: createNodemailerTransport({
         host: smtpHost,
         port: smtpPort,
@@ -197,6 +228,20 @@ function createAlertMail(transport: string, logger: ReturnType<typeof createLogg
       }),
       from: smtpFrom,
     });
+
+    // ITS OWN registry, not the application's — this is a separate process. One
+    // guard, for `mail`, built from the same §4 policy the API uses so the
+    // deadline an operator reads in the timeout table is the deadline the pager
+    // actually gets.
+    const resilience = createResilienceRegistry({
+      clock: createSystemClock(),
+      logger,
+      timeouts: config.timeouts,
+      concurrency: config.concurrency,
+      breaker: config.breaker,
+    });
+
+    return createGuardedMail(raw, resilience.guard('mail'));
   }
 
   if (transport === 'resend') {

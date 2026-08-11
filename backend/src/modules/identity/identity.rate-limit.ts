@@ -62,6 +62,19 @@ export const rateLimitKeys = {
     `${RATE_LIMIT_KEY_PREFIX}:forgot:email:${emailHash}`,
   tokenEndpointByIp: (ipHash: string): string => `${RATE_LIMIT_KEY_PREFIX}:token:ip:${ipHash}`,
   /**
+   * Resend-verification, keyed by the EMAIL, hashed — D-291.
+   *
+   * The IP side of this endpoint rides `tokenEndpointByIp` with the other two
+   * token endpoints. This second counter is what stops the endpoint being a MAIL
+   * BOMB aimed at one address: every accepted resend sends an email, so an
+   * attacker rotating IPs against one victim would otherwise be bounded only by
+   * how many hosts they have. Exactly the reasoning behind `forgotByEmail`, and
+   * its own namespace for exactly the same reason — a shared counter would let
+   * one person's resends spend another's budget.
+   */
+  resendVerificationByEmail: (emailHash: string): string =>
+    `${RATE_LIMIT_KEY_PREFIX}:resend-verification:email:${emailHash}`,
+  /**
    * The STUDENT minting a code — open item 2, 5 per hour.
    *
    * A separate namespace from `linkSubmitByParent` below, and the separation is

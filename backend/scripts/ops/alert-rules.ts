@@ -135,14 +135,110 @@ export const SIGNALS = {
    *
    * NOT "notifications that reached nobody on any channel", which is the thing
    * an operator actually wants and which does not exist as a metric. The
-   * dispatcher logs that case at `error` (`notify.undeliverable`) and emits no
-   * counter for it, so a rule watching it would never fire. Recorded as a gap
-   * rather than papered over with a rule that watches nothing — see D-146.
+   * dispatcher logs that case at `error` (`notify.undeliverable`) and emitted no
+   * counter for it for the whole life of the codebase — see D-146, and see
+   * `NOTIFY_UNDELIVERABLE` below, which is that gap closed.
    */
   NOTIFY_FAILED: 'notify.failed',
+  /**
+   * NOTIFICATIONS THAT REACHED NOBODY ON ANY CHANNEL — the thing an operator
+   * actually wants, and the thing D-146 recorded as missing.
+   *
+   * Distinct from `NOTIFY_FAILED` and the distinction is the whole reason this
+   * exists: that one counts per CHANNEL, so a notification that failed on both
+   * of its channels is arithmetically identical to two that each failed on one
+   * while their other channel landed. This one counts per NOTIFICATION, and only
+   * when every channel failed. Fed by
+   * `PLATFORM_METRICS.NOTIFY_UNDELIVERABLE`, emitted by the dispatcher.
+   */
+  NOTIFY_UNDELIVERABLE: 'notify.undeliverable',
 } as const;
 
 export type SignalName = (typeof SIGNALS)[keyof typeof SIGNALS];
+
+/**
+ * WHAT A THRESHOLD ON THIS SIGNAL IS ALLOWED TO BE.
+ *
+ * =============================================================================
+ * WHY THIS EXISTS — the satisfiability guard was satisfiable by a disabled
+ * alert set, and 23 tests said it was fine.
+ *
+ * `assertRulesAreSatisfiable` checked that every rule's SIGNAL NAME is in the
+ * producible set. It never checked that the THRESHOLD was reachable. An audit
+ * inflated every shipped threshold to a value no healthy or unhealthy system
+ * will ever emit — `1 -> 1000000`, `0.9 -> 99.0`, `36 -> 360000` — and
+ * downgraded ten of the eleven `page` rules to `ticket`. **Every test passed.**
+ *
+ * That is the codebase's recurring failure in its purest form: enforcement that
+ * looks installed and enforces nothing. A rule watching `readiness.failing >=
+ * 1000000` is not a rule at a different sensitivity, it is a DELETED rule that
+ * still appears in the config, in the start-up log line and in the rule count.
+ * Under a name-only check it is indistinguishable from a working one.
+ *
+ * =============================================================================
+ * WHAT THE BOUNDS MEAN, BECAUSE A WRONG BOUND IS ITS OWN FAILURE.
+ *
+ * `max` is the largest threshold at which the rule can still FIRE IN PRACTICE —
+ * not the largest value the underlying number could theoretically take. A
+ * ratio's max is 1 because 99.0 of a fraction is unreachable by arithmetic. A
+ * counter's max is a value that a genuinely catastrophic window would exceed, so
+ * the bound rejects "disabled" without rejecting "deliberately insensitive".
+ *
+ * `min` matters as much and for the opposite reason: a threshold of 0 on a
+ * `gte` counter fires on every cycle forever, which trains the on-call to ignore
+ * the pager and is the other way to destroy an alert set.
+ *
+ * A signal with NO entry here is itself an error — see the assert. A new signal
+ * must state its plausible range, because the alternative is a signal whose
+ * thresholds nothing checks, which is where this started.
+ */
+export interface SignalRange {
+  readonly min: number;
+  readonly max: number;
+  /** Why these bounds. Read at 3am and in the failure message. */
+  readonly unit: string;
+}
+
+export const SIGNAL_RANGES: Readonly<Record<SignalName, SignalRange>> = {
+  // Counters over one evaluation window. A window is minutes long; ten thousand
+  // breaker openings in it is already beyond any real incident.
+  [SIGNALS.BREAKER_OPENED]: { min: 1, max: 10_000, unit: 'transitions into open per window' },
+  [SIGNALS.RATE_LIMIT_FALLBACK]: { min: 1, max: 10_000, unit: 'fallback activations per window' },
+  [SIGNALS.JOB_DEAD_LETTERED]: { min: 1, max: 10_000, unit: 'dead-lettered jobs per window' },
+  [SIGNALS.DEPENDENCY_ERRORS]: { min: 1, max: 100_000, unit: 'dependency errors per window' },
+  [SIGNALS.NOTIFY_FAILED]: { min: 1, max: 10_000, unit: 'failed channel deliveries per window' },
+  [SIGNALS.NOTIFY_UNDELIVERABLE]: {
+    min: 1,
+    max: 10_000,
+    unit: 'notifications that reached nobody, per window',
+  },
+  // A BOOLEAN. The collector emits exactly 0 or 1, so any threshold above 1 is
+  // unreachable by construction and any threshold at or below 0 fires forever.
+  [SIGNALS.READINESS_FAILING]: { min: 1, max: 1, unit: '0 or 1' },
+  // A FRACTION of max_connections. 99.0 is not a stricter pool alert, it is no
+  // pool alert. 0.5 is the floor because paging on a half-used pool is noise.
+  [SIGNALS.DB_POOL_SATURATION]: { min: 0.5, max: 1, unit: 'fraction of max_connections, 0..1' },
+  // Seconds. A day of silence from every worker is the outer edge of "somebody
+  // still wants to hear about this"; 30s is the floor because the worker's own
+  // beat interval makes anything shorter fire on an ordinary long job.
+  [SIGNALS.WORKER_HEARTBEAT_AGE_SECONDS]: { min: 30, max: 86_400, unit: 'seconds' },
+  // Hours. 30 days is the outer edge; below 24 fires on every ordinary nightly
+  // gap plus clock skew.
+  [SIGNALS.BACKUP_AGE_HOURS]: { min: 24, max: 720, unit: 'hours' },
+};
+
+/**
+ * A COOLDOWN CAN DISABLE A RULE JUST AS COMPLETELY AS A THRESHOLD CAN.
+ *
+ * The shipped test asserted `cooldownSeconds > 0`, which `21_600_000` (250 days)
+ * satisfies. A rule that delivers once and then goes quiet for eight months is a
+ * rule that fired once — and it fired during the deployment nobody was watching.
+ *
+ * The ceiling is one day: `backup_stale` at six hours is the longest legitimate
+ * cooldown in the set and nothing plausible needs more. The floor is 60s because
+ * a cooldown shorter than the evaluation interval is not a cooldown.
+ */
+export const COOLDOWN_BOUNDS = { minSeconds: 60, maxSeconds: 86_400 } as const;
 
 /**
  * THE RULES.
@@ -228,8 +324,8 @@ export const ALERT_RULES: readonly AlertRule[] = [
       hi: 'रेट लिमिटिंग घटकर इन-प्रोसेस हो गई',
     },
     body: {
-      en: 'The cache is unavailable, so authentication rate limits are per-instance and weaker ({value} activation(s)). Login still works — that is the deliberate trade (D-034) — but brute-force protection is reduced until the cache returns.',
-      hi: 'कैश उपलब्ध नहीं है, इसलिए प्रमाणीकरण रेट लिमिट प्रति-इंस्टेंस और कमज़ोर हैं ({value} बार सक्रिय)। लॉगिन अब भी काम करता है — यह जानबूझकर किया गया समझौता है (D-034) — पर कैश लौटने तक ब्रूट-फ़ोर्स सुरक्षा घटी हुई है।',
+      en: 'The cache is unavailable, so authentication and authenticated-request rate limits are per-instance and weaker ({value} activation(s), summed across the identity limiter and the app-level throttle). Login still works — that is the deliberate trade (D-034) — but brute-force protection is reduced until the cache returns.',
+      hi: 'कैश उपलब्ध नहीं है, इसलिए प्रमाणीकरण और प्रमाणित-अनुरोध रेट लिमिट प्रति-इंस्टेंस और कमज़ोर हैं ({value} बार सक्रिय, आइडेंटिटी लिमिटर और ऐप-स्तरीय थ्रॉटल मिलाकर)। लॉगिन अब भी काम करता है — यह जानबूझकर किया गया समझौता है (D-034) — पर कैश लौटने तक ब्रूट-फ़ोर्स सुरक्षा घटी हुई है।',
     },
     runbook: 'docs/runbooks/incident-response.md#rate-limit-fallback',
   },
@@ -363,10 +459,39 @@ export const ALERT_RULES: readonly AlertRule[] = [
     },
     runbook: 'docs/runbooks/incident-response.md#notifications-failing',
   },
+  {
+    id: 'notify_undeliverable',
+    signal: SIGNALS.NOTIFY_UNDELIVERABLE,
+    comparison: 'gte',
+    // ONE. Not five, not "elevated". Every occurrence is a person the system
+    // decided to tell something and then did not tell — there is no healthy
+    // baseline to sit above, so a threshold above 1 would only be choosing how
+    // many people to silently not inform.
+    threshold: 1,
+    severity: 'ticket',
+    cooldownSeconds: 3600,
+    // TICKET, not page, and the reason is worth stating because the failure is
+    // total rather than partial. The product is up; a message did not arrive.
+    // What makes it a ticket rather than a page is that the fix is never at 3am
+    // — it is a deleted user's foreign key, a missing tenant, or a mail provider
+    // that needs its credentials rotated in the morning.
+    title: {
+      en: 'A notification reached nobody',
+      hi: 'एक सूचना किसी तक नहीं पहुँची',
+    },
+    body: {
+      en: '{value} notification(s) failed on EVERY channel in the window (threshold {threshold}). Not a per-channel failure — the in-app fallback did not land either, so nobody was told. D-146: this had no metric at all until it was given one, and a per-channel count cannot distinguish it from ordinary provider flakiness.',
+      hi: 'विंडो में {value} सूचनाएँ हर चैनल पर विफल हुईं (सीमा {threshold})। यह प्रति-चैनल विफलता नहीं है — इन-ऐप फ़ॉलबैक भी नहीं पहुँचा, इसलिए किसी को बताया ही नहीं गया। D-146: इसका कोई मीट्रिक था ही नहीं, और प्रति-चैनल गिनती इसे सामान्य प्रोवाइडर गड़बड़ी से अलग नहीं कर सकती।',
+    },
+    runbook: 'docs/runbooks/incident-response.md#notifications-failing',
+  },
 ];
 
 /**
- * Refuses a rule that watches a signal nothing produces.
+ * Refuses a rule that CANNOT FIRE — for either of the two reasons a rule cannot.
+ *
+ * =============================================================================
+ * REASON ONE: nothing produces the signal.
  *
  * A rule pointing at a misspelled signal never fires, and a rule that never
  * fires is indistinguishable from a system that is never unhealthy. This
@@ -374,6 +499,33 @@ export const ALERT_RULES: readonly AlertRule[] = [
  * files, a limiter hooked where no actor exists, a metrics sink wired to a
  * no-op, a harness applying one migration of nine, a `SET LOCAL` outside a
  * transaction. Alerting is the worst place for the sixth.
+ *
+ * =============================================================================
+ * REASON TWO: the threshold is out of reach — and this half was MISSING, which
+ * made the whole function a guard that could be walked straight past.
+ *
+ * The name check alone accepted `readiness.failing >= 1000000`,
+ * `db.pool_saturation >= 99.0` and `backup.age_hours >= 360000`. Every signal
+ * name was correct. Every rule was permanently disabled. The audit that applied
+ * exactly that mutation to all eleven shipped rules — and downgraded ten of the
+ * eleven pages to tickets on top of it — got 23 of 23 tests green.
+ *
+ * A signal name is only half of "can this fire". The threshold is the other
+ * half, and `SIGNAL_RANGES` is where each signal states what half means for it.
+ *
+ * The COOLDOWN is checked here too, because it is the third way to silence a
+ * rule while leaving it visible in the config: a rule that delivers once and
+ * then sleeps for 250 days has, in every sense an operator cares about, fired
+ * once.
+ *
+ * =============================================================================
+ * AN UNDECLARED SIGNAL IS AN ERROR, NOT A PASS.
+ *
+ * A signal absent from `SIGNAL_RANGES` cannot have its threshold checked, and
+ * "cannot be checked" must never quietly become "is fine" — that is the same
+ * inversion as treating an unmeasurable signal as zero, which `evaluate()`
+ * refuses to do one layer down. Adding a signal therefore means adding its
+ * range, by force.
  *
  * Called at evaluator START-UP, not lazily, so a bad rule fails the process
  * rather than being discovered during the incident it was written for.
@@ -390,6 +542,55 @@ export function assertRulesAreSatisfiable(
       `alert rules watch signals that nothing produces: ${detail}. ` +
         `Known signals: ${[...known].sort().join(', ')}. ` +
         `A rule on an unknown signal can never fire, which looks exactly like a healthy system.`,
+    );
+  }
+
+  const ranges: Readonly<Record<string, SignalRange | undefined>> = SIGNAL_RANGES;
+  const unreachable: string[] = [];
+
+  for (const rule of rules) {
+    const range = ranges[rule.signal];
+    if (range === undefined) {
+      unreachable.push(
+        `${rule.id} -> '${rule.signal}' has no entry in SIGNAL_RANGES, so its threshold ` +
+          `(${String(rule.threshold)}) cannot be checked for reachability`,
+      );
+      continue;
+    }
+
+    // `gte` fires when the value climbs to the threshold, so a threshold ABOVE
+    // the signal's ceiling can never be reached. `lte` fires when it falls, so
+    // the dangerous direction is a threshold BELOW the floor. Checking both
+    // bounds for both comparisons would reject legitimate rules — an `lte` rule
+    // at the ceiling is simply one that fires almost always, which is a
+    // sensitivity choice rather than a disabled rule.
+    const outOfReach =
+      rule.comparison === 'gte' ? rule.threshold > range.max : rule.threshold < range.min;
+
+    if (outOfReach) {
+      unreachable.push(
+        `${rule.id} -> '${rule.signal}' ${rule.comparison} ${String(rule.threshold)} ` +
+          `is outside the reachable range ${String(range.min)}..${String(range.max)} (${range.unit})`,
+      );
+    }
+
+    if (
+      rule.cooldownSeconds < COOLDOWN_BOUNDS.minSeconds ||
+      rule.cooldownSeconds > COOLDOWN_BOUNDS.maxSeconds
+    ) {
+      unreachable.push(
+        `${rule.id} has cooldownSeconds ${String(rule.cooldownSeconds)}, outside ` +
+          `${String(COOLDOWN_BOUNDS.minSeconds)}..${String(COOLDOWN_BOUNDS.maxSeconds)}; a cooldown ` +
+          `longer than the incident it suppresses silences the rule as completely as deleting it`,
+      );
+    }
+  }
+
+  if (unreachable.length > 0) {
+    throw new Error(
+      `alert rules can never fire: ${unreachable.join('; ')}. ` +
+        `A rule with an unreachable threshold is a DELETED rule that still appears in the ` +
+        `config and in the rule count, which looks exactly like a healthy system.`,
     );
   }
 }

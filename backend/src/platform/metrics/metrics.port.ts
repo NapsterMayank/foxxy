@@ -133,6 +133,40 @@ export const PLATFORM_METRICS = {
   /** §4 — an outbound call exceeded its timeout. */
   PORT_TIMEOUT: 'platform.port.timeout',
   /**
+   * §5 — A GUARDED CALL FAILED FAST. Tags: port.
+   *
+   * =========================================================================
+   * THE OUTAGE SHAPE THAT WAS INVISIBLE, AND IT IS THE COMMONEST ONE.
+   *
+   * Until this counter existed, the only dependency failures anything could
+   * see were the three the GUARD itself raises — a timeout, a breaker
+   * rejection, a concurrency rejection. Every one of those is the guard
+   * refusing or abandoning a call.
+   *
+   * A call that the DEPENDENCY refuses — connection refused, DNS failure, TLS
+   * handshake reset, an HTTP 500 an adapter turns into a throw — emits none of
+   * them. It fails in five milliseconds, well inside its timeout, and the
+   * breaker files the failure internally and says nothing until it transitions
+   * at five. So an embedding provider that is completely down, or a payments
+   * host that refuses four checkouts and recovers, produced literally zero
+   * rows in `metrics_events`, and `dependency.errors` could only ever count
+   * timeouts and post-open rejections.
+   *
+   * That is the ordinary shape of an outage: things fail FAST, not slow.
+   *
+   * =========================================================================
+   * DISJOINT FROM THE OTHER THREE, ON PURPOSE.
+   *
+   * This counts ONLY failures that are not already counted — see
+   * `createPortFailureBridge`, which classifies structurally and declines to
+   * emit for a timeout, a breaker rejection or a concurrency rejection. That
+   * disjointness is what lets the alert collector SUM all four into
+   * `dependency.errors` without inventing traffic that did not happen. A
+   * double-counted error rate is worse than a missing one: it is a threshold
+   * everybody quietly stops trusting.
+   */
+  PORT_CALL_FAILED: 'platform.port.call_failed',
+  /**
    * §4 — a guarded call was RETRIED against its `TimeoutRule.retries` budget
    * (D-237). Tags: port, attempt.
    *
@@ -171,6 +205,31 @@ export const PLATFORM_METRICS = {
   NOTIFY_SENT: 'platform.notify.sent',
   /** A notification could not be delivered. Tags: channel, kind. */
   NOTIFY_FAILED: 'platform.notify.failed',
+  /**
+   * A NOTIFICATION REACHED NOBODY ON ANY CHANNEL — D-146, finally closed.
+   * Tags: kind.
+   *
+   * =========================================================================
+   * WHY `NOTIFY_FAILED` WAS NOT ALREADY THIS.
+   *
+   * `NOTIFY_FAILED` counts DELIVERIES, per channel. So a single notification
+   * that failed on email AND on in-app increments it twice, and is arithmetically
+   * indistinguishable from two notifications that each failed on one channel
+   * while their other channel landed. The first case is somebody who was never
+   * told something the system decided they needed to know; the second is a
+   * degraded provider and a working product.
+   *
+   * The dispatcher has always DETECTED the first case — it logs
+   * `notify.undeliverable` at `error` — and emitted no counter for it, so no
+   * alert rule could watch it. D-146 recorded that as a known gap rather than
+   * papering over it with a rule watching a signal nothing produces. This is the
+   * counter that gap was waiting for.
+   *
+   * KIND ONLY, NEVER THE RECIPIENT. A tag is a low-cardinality label; a user id
+   * or an address in one is simultaneously a privacy breach and a cardinality
+   * explosion.
+   */
+  NOTIFY_UNDELIVERABLE: 'platform.notify.undeliverable',
   /**
    * Something PII-shaped was scrubbed on its way into a permanent record.
    * Non-zero means a module has a defect that needs fixing at the source —

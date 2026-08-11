@@ -110,6 +110,42 @@ export interface PortGuardOptions {
    */
   readonly onTimeout?: (name: string, timeoutMs: number) => void;
   /**
+   * ==========================================================================
+   * EVERY REJECTION LEAVING THE GUARD — D-331.
+   *
+   * `onTimeout` fires when the guard ABANDONS a call, the limiter's `onReject`
+   * when the guard REFUSES one, and the breaker's metrics when it TRANSITIONS.
+   * All three are things the guard did. Nothing fired when the DEPENDENCY
+   * simply said no.
+   *
+   * That is the most common outage shape there is — connection refused, DNS
+   * failure, a provider 500 — and it returns in milliseconds, far inside its
+   * timeout, so no timeout counter moves. The breaker records it in its own
+   * private counter and emits nothing at all until it transitions at five. An
+   * audit drove the real production wiring with a failing embeddings port and a
+   * failing payments port and read `metrics_events` back both times: EMPTY.
+   * `dependency_error_rate_high` could only ever count timeouts and post-breaker
+   * rejections, so the shape it most needed to see was the one shape invisible
+   * to it.
+   *
+   * THIS FIRES FOR EVERY REJECTION, INCLUDING THE THREE THAT ARE ALREADY
+   * COUNTED — timeouts, breaker rejections and concurrency rejections. That is
+   * deliberate and is the whole reason it is a bare callback: filtering here
+   * would put "which failures are already counted" at the call site, six times
+   * over, in a module that is not allowed to know what a metric is called.
+   * `createPortFailureBridge` in `platform/metrics` owns that decision, makes it
+   * STRUCTURALLY (`details.timeoutMs` / `details.breaker` / `details.max`, never
+   * message text) and declines to emit for those three, so the four summands of
+   * `dependency.errors` stay disjoint. A double-counted error rate is worse than
+   * a missing one: it is a number people quietly stop believing.
+   *
+   * The seam is a `.catch` that RE-THROWS. It observes without owning: the
+   * caller sees exactly the rejection it would have seen, and this cannot change
+   * a failure into a success or vice versa.
+   * ==========================================================================
+   */
+  readonly onFailure?: (name: string, error: unknown) => void;
+  /**
    * How the retry loop waits — D-237. Required by `platform/retry`, which has
    * no un-jittered path: "synchronised retries are a self-inflicted denial of
    * service" (§4).
@@ -249,20 +285,48 @@ export function createPortGuard(options: PortGuardOptions): PortGuard {
        * rule says `retries: 0` — this is the same single `attempt()` the guard
        * has always run, with no sleeper, no policy and no loop.
        */
-      if (attempts === 1) return limiter.run(attempt);
+      const guarded =
+        attempts === 1
+          ? limiter.run(attempt)
+          : limiter.run(() =>
+              retry(attempt, {
+                attempts,
+                idempotent: true,
+                isRetryable: isWorthRetrying,
+                sleeper,
+                ...(options.random === undefined ? {} : { random: options.random }),
+                onRetry: (info) => {
+                  options.onRetry?.(name, { attempt: info.attempt, delayMs: info.delayMs });
+                },
+              }),
+            );
 
-      return limiter.run(() =>
-        retry(attempt, {
-          attempts,
-          idempotent: true,
-          isRetryable: isWorthRetrying,
-          sleeper,
-          ...(options.random === undefined ? {} : { random: options.random }),
-          onRetry: (info) => {
-            options.onRetry?.(name, { attempt: info.attempt, delayMs: info.delayMs });
-          },
-        }),
-      );
+      /**
+       * THE ONE SEAM EVERY FAILURE PASSES THROUGH — D-331.
+       *
+       * Wrapped OUTSIDE the limiter, so it sees all four kinds: the concurrency
+       * rejection the limiter raises before `attempt` ever runs, the breaker
+       * rejection, the timeout, and the adapter's own rejection. One place, so
+       * no failure path can be added later that forgets to report itself.
+       *
+       * It observes the FINAL rejection of a retried call, not each attempt: a
+       * call that fails twice and succeeds on the third is a success, and a
+       * dependency error the caller never saw is not a dependency error. The
+       * per-attempt story is `onRetry`'s job, and that is already counted.
+       *
+       * `onFailure` absent leaves the promise untouched rather than adding a
+       * no-op `.catch`, preserving the fast path exactly for the dozens of test
+       * registries that wire no observers at all.
+       */
+      const { onFailure } = options;
+      if (onFailure === undefined) return guarded;
+
+      return guarded.catch((error: unknown): never => {
+        onFailure(name, error);
+        // RE-THROWN, always. This hook is an observer; swallowing here would
+        // turn every guarded failure into a resolved `undefined`.
+        throw error;
+      });
     },
   };
 }

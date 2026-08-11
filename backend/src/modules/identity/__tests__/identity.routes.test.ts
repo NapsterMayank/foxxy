@@ -782,3 +782,138 @@ describe('the global authenticated limit is really wired to module routes', () =
     expect(lastStatus).toBe(429);
   });
 });
+
+/**
+ * =============================================================================
+ * POST /api/v1/auth/resend-verification — D-291.
+ *
+ * The eighth `/auth/*` route, and the one D-217 assumed was already there. Its
+ * whole contract is HTTP-shaped, which is why these live here: one status, one
+ * body, three branches behind it that the caller cannot tell apart.
+ * =============================================================================
+ */
+describe('POST /api/v1/auth/resend-verification — D-291', () => {
+  it('EXISTS. Before this it was a 404, and D-217 depended on it', async () => {
+    const response = await post('/api/v1/auth/resend-verification', {
+      email: 'anyone@example.test',
+    });
+
+    // The assertion that would have caught the defect: the audit found seven
+    // /auth/* routes and this was not one of them.
+    expect(response.statusCode).not.toBe(404);
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ status: 'ok' });
+  });
+
+  it('ANSWERS IDENTICALLY for unknown, unverified and already-verified', async () => {
+    // An account awaiting verification…
+    await post('/api/v1/auth/signup', {
+      email: 'waiting@example.test',
+      password: GOOD_PASSWORD,
+      role: 'student',
+    });
+    // …and one that has finished.
+    await onboard('finished@example.test', 'student');
+
+    const unknown = await post('/api/v1/auth/resend-verification', {
+      email: 'nobody@example.test',
+    });
+    const unverified = await post('/api/v1/auth/resend-verification', {
+      email: 'waiting@example.test',
+    });
+    const verified = await post('/api/v1/auth/resend-verification', {
+      email: 'finished@example.test',
+    });
+
+    // Identical AND correct. Without the status assertion this test is happy
+    // with three identical 404s, which is the state the defect was in.
+    expect(unknown.statusCode).toBe(200);
+    // BYTE-IDENTICAL, all three. Two bits are being withheld here rather than
+    // one: whether the address has an account, and if so whether it is verified.
+    expect(unverified.statusCode).toBe(unknown.statusCode);
+    expect(verified.statusCode).toBe(unknown.statusCode);
+    expect(unverified.body).toBe(unknown.body);
+    expect(verified.body).toBe(unknown.body);
+  });
+
+  it('returns the same body as forgot-password, which it is modelled on', async () => {
+    const resend = await post('/api/v1/auth/resend-verification', {
+      email: 'nobody@example.test',
+    });
+    const forgot = await post('/api/v1/auth/forgot-password', { email: 'nobody@example.test' });
+
+    expect(resend.statusCode).toBe(forgot.statusCode);
+    expect(resend.body).toBe(forgot.body);
+  });
+
+  it('rejects a malformed email with a 400, before any lookup', async () => {
+    const response = await post('/api/v1/auth/resend-verification', { email: 'not-an-email' });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: { code: 'VALIDATION_ERROR' } });
+  });
+
+  it('RATE LIMITS: ten from one IP in an hour, and the ELEVENTH is a 429', async () => {
+    // The IP counter is `TOKEN_ENDPOINT_RATE_LIMIT`, shared with verify and
+    // reset-password. Ten is the literal — see D-292 and
+    // `identity.rate-limit-policy.test.ts`. Each request uses a DIFFERENT
+    // address so that the per-address counter is not what fires first.
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      const allowed = await post('/api/v1/auth/resend-verification', {
+        email: `flood-${attempt}@example.test`,
+      });
+      expect(allowed.statusCode).toBe(200);
+    }
+
+    const refused = await post('/api/v1/auth/resend-verification', {
+      email: 'flood-11@example.test',
+    });
+    expect(refused.statusCode).toBe(429);
+  });
+
+  it('lets the caller back in once the hour has passed', async () => {
+    for (let attempt = 1; attempt <= 11; attempt += 1) {
+      await post('/api/v1/auth/resend-verification', { email: `lapse-${attempt}@example.test` });
+    }
+    expect(
+      (await post('/api/v1/auth/resend-verification', { email: 'lapse-x@example.test' }))
+        .statusCode,
+    ).toBe(429);
+
+    // Through the injected clock. No sleep.
+    harness.clock.advanceMs(60 * 60 * 1000 + 1);
+
+    expect(
+      (await post('/api/v1/auth/resend-verification', { email: 'lapse-y@example.test' }))
+        .statusCode,
+    ).toBe(200);
+  });
+
+  it('completes the journey: signup, resend, verify, log in', async () => {
+    // The end-to-end point of the whole fix. The first verification email is
+    // ignored entirely — this is the user for whom it never arrived.
+    await post('/api/v1/auth/signup', {
+      email: 'rescued@example.test',
+      password: GOOD_PASSWORD,
+      role: 'student',
+    });
+
+    const resend = await post('/api/v1/auth/resend-verification', {
+      email: 'rescued@example.test',
+    });
+    expect(resend.statusCode).toBe(200);
+
+    // A SECOND email, and the journey continues on ITS token — not on the one
+    // from signup, which in the case this endpoint exists for never arrived.
+    expect(harness.mail.sent).toHaveLength(2);
+
+    const verify = await get(`/api/v1/auth/verify?token=${encodeURIComponent(lastVerifyToken())}`);
+    expect(verify.statusCode).toBe(302);
+
+    const login = await post('/api/v1/auth/login', {
+      email: 'rescued@example.test',
+      password: GOOD_PASSWORD,
+    });
+    expect(login.statusCode).toBe(200);
+    expect(loginResponseSchema.parse(login.json()).user.emailVerifiedAt).not.toBeNull();
+  });
+});

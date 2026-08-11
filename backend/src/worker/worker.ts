@@ -100,8 +100,26 @@ export function scheduledJobsFor(
   return jobs.filter((job) => handlers[job.kind] !== undefined);
 }
 
+/**
+ * The slice of `Config` this process actually reads — D-306.
+ *
+ * A narrow structural type rather than the whole `Config`, for the same reason
+ * `notify.service.ts` declares "the narrow slice of `JobQueue` this module
+ * needs". The full object is ~30 frozen sub-objects with boot-time validation
+ * behind it, and demanding all of it here made `createWorker` reachable only
+ * from a process that had already parsed the environment — which is why
+ * `worker.ts` sat at 0% coverage while owning the shutdown choreography.
+ *
+ * The real `Config` satisfies this structurally, so `worker-main.ts` passes it
+ * unchanged and nothing at the composition root moves.
+ */
+export interface WorkerConfig {
+  readonly env: Config['env'];
+  readonly shutdown: { readonly workerTimeoutMs: number };
+}
+
 export interface WorkerDeps {
-  readonly config: Config;
+  readonly config: WorkerConfig;
   /** MUST be the `worker` pool. See the header. */
   readonly db: DbHandle;
   readonly clock: Clock;
@@ -121,6 +139,17 @@ export interface WorkerDeps {
   readonly notify?: NotifyModule;
   /** Overridden by tests that want one deterministic job and nothing else. */
   readonly handlers?: Readonly<Record<string, JobHandler>>;
+  /**
+   * Overridden by tests that need the QUEUE to misbehave — D-306.
+   *
+   * Specifically: a completion write that throws. That is the co-occurrence
+   * D-302/D-303 are about — a database blip during a deploy — and it is not
+   * reproducible against a healthy container, so the seam has to exist for the
+   * ordering guarantee below to be a checked claim rather than a comment.
+   *
+   * Defaults to the real Postgres queue on `db`. Nothing in production passes it.
+   */
+  readonly queue?: JobQueue;
   readonly workerId?: string;
   readonly idlePollMs?: number;
 }
@@ -174,7 +203,7 @@ export function createWorker(deps: WorkerDeps): Worker {
   const startedAt = clock.now();
   const workerId = deps.workerId ?? buildWorkerId(startedAt, process.pid);
 
-  const queue = createPostgresJobQueue({ db });
+  const queue = deps.queue ?? createPostgresJobQueue({ db });
   const handlers =
     deps.handlers ??
     buildHandlers({
@@ -246,16 +275,48 @@ export function createWorker(deps: WorkerDeps): Worker {
     },
 
     async stop(reason: string): Promise<void> {
-      // §12 step 3: finish the current job, claim no new ones.
-      await runner.stop(reason);
+      /**
+       * §12 step 3: finish the current job, claim no new ones.
+       *
+       * ======================================================================
+       * GUARDED, BECAUSE THE STEP AFTER IT IS THE ONE THAT DECIDES WHETHER A
+       * CLEAN DEPLOY PAGES SOMEBODY — D-303.
+       *
+       * These two awaits used to be bare and sequential, and the comment below
+       * already stated the consequence of the second one not running. It did not
+       * run: a completion write that threw — a database blip during a deploy,
+       * which is the same blip that makes the deploy happen — rejected
+       * `runner.stop()`, so `heartbeat.stop()` was never reached and the row
+       * stayed `running`. Five minutes later `worker_heartbeat_stale` fired on a
+       * worker that had shut down perfectly.
+       *
+       * `runner.stop()` is now hardened not to reject (D-301, D-302) and this is
+       * belt and braces on top of it. That is deliberate: the ordering promise
+       * below must hold for reasons this file can enforce locally, rather than
+       * depending on a property of another module that a future change could
+       * quietly remove.
+       */
+      try {
+        await runner.stop(reason);
+      } catch (error) {
+        logger.error(
+          {
+            workerId,
+            reason,
+            err: error instanceof Error ? error.message : 'unknown drain failure',
+          },
+          'the job drain failed; continuing the shutdown so the heartbeat row still ' +
+            'reads as stopped rather than vanished',
+        );
+      }
       // BEFORE the pool closes. After it, this write fails and the row reads as
       // a worker that vanished rather than one that stopped cleanly — which is
       // the difference between "deploy went fine" and "page somebody".
+      //
+      // `heartbeat.stop` swallows its own failures by construction (see
+      // `createHeartbeat`), so nothing after this can be skipped by it either.
       await heartbeat.stop(runner.processed());
-      logger.warn(
-        { workerId, reason, processed: runner.processed() },
-        'worker stopped',
-      );
+      logger.warn({ workerId, reason, processed: runner.processed() }, 'worker stopped');
     },
   };
 }

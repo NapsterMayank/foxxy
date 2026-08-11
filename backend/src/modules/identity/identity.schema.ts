@@ -3,6 +3,7 @@ import {
   forgotPasswordRequestSchema,
   linkIdParamSchema,
   loginRequestSchema,
+  resendVerificationRequestSchema,
   resetPasswordRequestSchema,
   signupRequestSchema,
   submitLinkRequestSchema,
@@ -25,6 +26,7 @@ import {
 
 export const identitySchemas = {
   signup: signupRequestSchema,
+  resendVerification: resendVerificationRequestSchema,
   verify: verifyQuerySchema,
   login: loginRequestSchema,
   forgotPassword: forgotPasswordRequestSchema,

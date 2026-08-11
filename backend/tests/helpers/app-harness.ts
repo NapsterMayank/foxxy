@@ -323,12 +323,32 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     API_URL: 'http://api.test',
   });
 
+  /**
+   * ===========================================================================
+   * THE DELEGATING MODEL IS BUILT BEFORE THE CONTAINER, SO THE CONTAINER CAN
+   * GUARD IT — D-326.
+   *
+   * `currentLlm` is what a test swaps with `useLlm`; `delegatingLlm` is the
+   * stable object the module holds. Passing the DELEGATOR to `createContainer`
+   * (rather than handing it straight to `createFoxyModule`) is what puts the
+   * bulkhead, the breaker and both §4 timeouts between foxy and the script —
+   * exactly as production does. See the note on the container below.
+   * ===========================================================================
+   */
+  const defaultLlm = options.llm ?? createFakeLlm();
+  let currentLlm: FakeLlm = defaultLlm;
+  const delegatingLlm: LlmProvider = {
+    stream: (req) => currentLlm.stream(req),
+    complete: (req) => currentLlm.complete(req),
+  };
+
   const container = createContainer(config, {
     clock,
     cache,
     mail,
     logger,
     idGen: new CounterIdGen(),
+    llm: delegatingLlm,
   });
 
   /**
@@ -347,10 +367,36 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     logger,
   });
 
+  /**
+   * ===========================================================================
+   * THE GUARDED PORTS, AS PRODUCTION HANDS THEM OVER — D-326.
+   *
+   * This harness used to pass the RAW `cache`, `mail` and delegating `llm`
+   * objects straight to the modules, while `app/routes.ts` passes
+   * `container.cache`, `container.mail` and `container.llm` — every one of
+   * which leaves the composition root already wrapped in its concurrency
+   * limit, its circuit breaker and its timeouts (04-RESILIENCE-PLAN.md §3.3,
+   * §4, §5). The container's own header states the property that made the
+   * difference invisible: "no downstream caller can hold an unguarded port —
+   * not because they were told not to, but because one is never handed out".
+   * The harness was handing them out.
+   *
+   * So no service test in the repository exercised the breaker, the
+   * concurrency limiter or either LLM timeout on the paths that actually carry
+   * them, and "the same wiring as `app/routes.ts`" — which this file asserts of
+   * itself three times — was false for the three ports most likely to fail in
+   * production.
+   *
+   * The RAW objects are still returned on the harness (`harness.cache`,
+   * `harness.mail`, `harness.llm`) because a test has to be able to READ what
+   * was recorded and to clear it between cases. What the MODULES get is the
+   * guarded wrapper around those same objects.
+   * ===========================================================================
+   */
   const identity = createIdentityModule({
     db: container.poolFor('identity'),
-    cache,
-    mail,
+    cache: container.cache,
+    mail: container.mail,
     clock,
     logger,
     audit,
@@ -481,15 +527,6 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     threshold: options.threshold ?? HARNESS_ABSTAIN_THRESHOLD,
   });
 
-  const defaultLlm = options.llm ?? createFakeLlm();
-  // The DELEGATE the module actually holds. Swapping `currentLlm` changes what
-  // the already-built module talks to, without rebuilding it or the database.
-  let currentLlm: FakeLlm = defaultLlm;
-  const delegatingLlm: LlmProvider = {
-    stream: (req) => currentLlm.stream(req),
-    complete: (req) => currentLlm.complete(req),
-  };
-
   /**
    * THE SAME WIRING AS `app/routes.ts`, and it has to be the same.
    *
@@ -526,8 +563,11 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     db: container.poolFor('foxy'),
     clock,
     logger,
-    llm: delegatingLlm,
-    cache,
+    // GUARDED, exactly as `app/routes.ts` hands them over — see the note above
+    // the identity module (D-326). `container.llm` wraps `delegatingLlm`, so
+    // `useLlm` still swaps the script underneath the guard.
+    llm: container.llm,
+    cache: container.cache,
     requireSession: identity.requireSession,
     search: (query, filters) => currentSearch(query, filters),
     readTenantOfStudent: (studentUserId) => identity.service.getTenantOfUser(studentUserId),
@@ -560,7 +600,7 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     clock,
     logger,
     metrics: container.metrics,
-    cache,
+    cache: container.cache,
     // The SAME wiring as `app/routes.ts`: the in-app adapter directly (it is
     // the durable record, written in the request) and the dispatcher for the
     // remote fan-out.

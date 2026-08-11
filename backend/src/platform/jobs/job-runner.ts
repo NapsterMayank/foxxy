@@ -1,7 +1,7 @@
 import type { Clock, Sleeper } from '../clock/index';
 import type { Logger } from '../logger/index';
 import { PLATFORM_METRICS, createNoopMetrics, type MetricsPort } from '../metrics/index';
-import type { ClaimedJob, JobHandler, JobQueue } from './job.port';
+import type { ClaimedJob, FailureOutcome, JobHandler, JobQueue } from './job.port';
 
 /**
  * The job runner — the loop the worker process spends its life in.
@@ -17,8 +17,18 @@ import type { ClaimedJob, JobHandler, JobQueue } from './job.port';
  * take another job — not "after this poll interval", not "on the next
  * iteration". A job claimed one millisecond into a shutdown is a job that will
  * be killed thirty seconds later and reclaimed by the stuck-job reaper, which
- * means it runs twice for no reason. `stopping` is checked immediately before
- * every claim and is the first thing `stop()` sets.
+ * means it runs twice for no reason. `stopping` is the first thing `stop()`
+ * sets, and it is checked TWICE around every claim — D-301.
+ *
+ * TWICE, because once was a lie. The check used to sit immediately before the
+ * call and nowhere else, and this comment used to describe that as sufficient.
+ * `queue.claim` is a network round trip; a SIGTERM landing inside it is THE
+ * COMMON CASE ON A DEPLOY, not an exotic interleaving. The flag flips while the
+ * statement is on the wire, the claim comes back with a job, and the loop runs
+ * it — a job claimed and executed after shutdown began, which is exactly what
+ * the check existed to prevent. So the result is checked as well as the call,
+ * and a job claimed into a shutdown is handed straight back with
+ * `queue.release` (see `JobQueue.release` for why that is not `fail`).
  *
  * FINISH THE CURRENT ONE, UP TO 30 S. The in-flight job is tracked in
  * `current`, and `stop()` awaits it against a deadline. Exceeding the deadline
@@ -93,7 +103,18 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
  */
 const DEFAULT_LOCK_TIMEOUT_MS = 120_000;
 
-/** Waits for `promise`, but not past `ms`. Resolves true if it finished. */
+/**
+ * Waits for `promise`, but not past `ms`. Resolves true if it finished.
+ *
+ * A REJECTION COUNTS AS FINISHED, AND NEVER PROPAGATES — D-302.
+ *
+ * `promise.then(() => true)` alone made this function rethrow whatever it was
+ * waiting on, which made `stop()` reject, which skipped every step after it in
+ * the shutdown sequence. The question this function answers is "is it still
+ * running?", and a promise that rejected is not still running. The CALLER logs
+ * the outcome; what it must never do is fall over on it, because the one place
+ * this is used is the path that has to keep going no matter what.
+ */
 async function withDeadline(promise: Promise<unknown>, ms: number): Promise<boolean> {
   if (ms <= 0) return false;
   let timer: NodeJS.Timeout | undefined;
@@ -104,7 +125,13 @@ async function withDeadline(promise: Promise<unknown>, ms: number): Promise<bool
     timer.unref();
   });
   try {
-    return await Promise.race([promise.then(() => true), deadline]);
+    return await Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      deadline,
+    ]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -134,6 +161,19 @@ export function createJobRunner(options: JobRunnerOptions): JobRunner {
   let processedCount = 0;
   /** The in-flight job, so `stop()` has something to await. */
   let current: Promise<void> | undefined;
+  /**
+   * The in-flight CLAIM, for the same reason — D-301.
+   *
+   * `stop()` used to read `current` alone, and in the race this whole change is
+   * about `current` is still `undefined`: the claim has not returned, so nothing
+   * is executing yet. The deadline branch was therefore skipped entirely and
+   * control fell through to `await stopped` — an UNBOUNDED wait on the loop,
+   * which was itself parked on the very claim that had not come back. The
+   * shutdown window was silently not applied and `worker.drain_timeout` was
+   * never logged. Tracking the claim as well is what makes the deadline cover
+   * the whole of "the loop is busy", not just the part of it that is a handler.
+   */
+  let claiming: Promise<void> | undefined;
   let stopped: Promise<void> | undefined;
   /** The single in-progress shutdown, so a second signal joins rather than restarts. */
   let stopRun: Promise<void> | undefined;
@@ -165,6 +205,46 @@ export function createJobRunner(options: JobRunnerOptions): JobRunner {
     );
   }
 
+  /**
+   * The queue write that records a completion, and the reason it is wrapped.
+   *
+   * ===========================================================================
+   * A COMPLETION WRITE THAT THROWS USED TO ABORT THE SHUTDOWN — D-302.
+   *
+   * `execute`'s `catch` called `queue.fail(...)` outside any try. The realistic
+   * co-occurrence is not exotic: a database blip DURING A DEPLOY makes the
+   * handler throw AND makes the failure write throw, so `execute` rejected,
+   * `stop()` rejected, and every step after `runner.stop()` in the worker's
+   * shutdown — including moving the heartbeat row to `stopped` — was skipped.
+   * The row then stayed `running`, went stale at 300 s, and paged somebody
+   * about a deploy that had in fact gone fine.
+   *
+   * The job itself is not lost by swallowing this. The row is still `running`
+   * with a lease, and the reaper returns it to the queue at the lock timeout —
+   * the documented at-least-once edge, which is safe because handlers are
+   * required to be idempotent. Losing the SHUTDOWN is the unrecoverable one.
+   */
+  async function recordCompletion(
+    write: () => Promise<void>,
+    job: ClaimedJob,
+  ): Promise<void> {
+    try {
+      await write();
+    } catch (error) {
+      logger.error(
+        {
+          event: 'job.completion_write_failed',
+          kind: job.kind,
+          jobId: job.id,
+          attempts: job.attempts,
+          err: error instanceof Error ? error.message : 'unknown completion failure',
+        },
+        'the job outcome could not be written to the queue; the row keeps its lease and ' +
+          'the reaper will return it at the lock timeout',
+      );
+    }
+  }
+
   async function execute(job: ClaimedJob): Promise<void> {
     const handler = handlers[job.kind];
     const startedAt = clock.now().getTime();
@@ -176,7 +256,9 @@ export function createJobRunner(options: JobRunnerOptions): JobRunner {
         { event: 'job.no_handler', kind: job.kind, jobId: job.id },
         'no handler registered for this job kind; the worker is behind the enqueuer',
       );
-      await queue.fail(job, `no handler registered for kind "${job.kind}"`, clock.now());
+      await recordCompletion(async () => {
+        await queue.fail(job, `no handler registered for kind "${job.kind}"`, clock.now());
+      }, job);
       return;
     }
 
@@ -214,7 +296,14 @@ export function createJobRunner(options: JobRunnerOptions): JobRunner {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown job failure';
-      const outcome = await queue.fail(job, message, clock.now());
+      // D-302 — the write is guarded. A database blip during a deploy makes the
+      // handler AND this write throw, and an unguarded throw here rejected
+      // `stop()` and skipped the rest of the shutdown. See `recordCompletion`.
+      let outcome: FailureOutcome | undefined;
+      await recordCompletion(async () => {
+        outcome = await queue.fail(job, message, clock.now());
+      }, job);
+      if (outcome === undefined) return;
 
       if (outcome === 'lease_lost') {
         // Same race as above, on the failure path — and the more dangerous
@@ -274,7 +363,27 @@ export function createJobRunner(options: JobRunnerOptions): JobRunner {
     // that gets killed and reclaimed, so it runs twice for no reason at all.
     if (isStoppingNow()) return false;
 
-    const job = await queue.claim(workerId, kinds, clock.now());
+    // AND checked again on the way out of `claimOrRelease`, because the flag can
+    // flip while the claim is on the wire — D-301. See the header.
+    const attempt = claimOrRelease();
+    /**
+     * Published so `stop()` has something to await while a claim is in flight.
+     *
+     * Rejections are absorbed here rather than at the awaiting end: `stop()`
+     * asks "is this still running?", and the loop below has its own error
+     * handling for the answer. A rejecting `claiming` would have made the
+     * shutdown path throw, which is D-302 in a second costume.
+     */
+    claiming = attempt.then(
+      () => undefined,
+      () => undefined,
+    );
+    let job: ClaimedJob | null;
+    try {
+      job = await attempt;
+    } finally {
+      claiming = undefined;
+    }
     if (job === null) return false;
 
     current = execute(job);
@@ -284,6 +393,42 @@ export function createJobRunner(options: JobRunnerOptions): JobRunner {
       current = undefined;
     }
     return true;
+  }
+
+  /**
+   * Claims, then re-reads the stopping flag — D-301.
+   *
+   * The window between those two lines is a network round trip, and a SIGTERM
+   * inside it is the ordinary case on a deploy rather than a rare interleaving.
+   * A job claimed into a shutdown is handed straight back so the next process
+   * picks it up immediately, instead of being run (and killed by the drain
+   * deadline) or stranded until the 120-second reaper notices.
+   */
+  async function claimOrRelease(): Promise<ClaimedJob | null> {
+    const job = await queue.claim(workerId, kinds, clock.now());
+    if (job === null) return null;
+    if (!isStoppingNow()) return job;
+
+    // The release is best-effort by construction. If it fails, the row keeps its
+    // lease and the reaper returns it at the lock timeout — slower, but never
+    // wrong, and never a reason for the shutdown to stop making progress.
+    await recordCompletion(async () => {
+      const released = await queue.release(job, clock.now());
+      logger.warn(
+        {
+          event: released ? 'job.released' : 'job.release_lease_lost',
+          kind: job.kind,
+          jobId: job.id,
+          attempts: job.attempts,
+        },
+        released
+          ? 'shutdown began while this job was being claimed; it was returned to the queue ' +
+              'unrun rather than started'
+          : 'shutdown began while this job was being claimed, but the lease had already been ' +
+              'reclaimed; the job belongs to another worker now',
+      );
+    }, job);
+    return null;
   }
 
   async function loop(): Promise<void> {
@@ -344,20 +489,43 @@ export function createJobRunner(options: JobRunnerOptions): JobRunner {
       'worker shutdown started; claiming no new jobs',
     );
 
-    const inFlight = current;
-    if (inFlight !== undefined) {
-      const finished = await withDeadline(inFlight, shutdownTimeoutMs);
-      if (!finished) {
-        logger.error(
-          { event: 'worker.drain_timeout', reason, shutdownTimeoutMs },
-          'a job did not finish within the shutdown window; it will be reclaimed and rerun',
-        );
-        // Deliberately NOT awaiting the loop. See above.
-        return;
-      }
+    /**
+     * ONE budget, spanning both waits — D-301.
+     *
+     * `current ?? claiming` is the fix for the race: when a SIGTERM lands inside
+     * a claim there is no `current` yet, and reading only `current` skipped
+     * straight past the deadline into an unbounded `await stopped`.
+     *
+     * And `stopped` is now waited on UNDER THE SAME DEADLINE rather than
+     * unbounded. The old shape trusted the loop to end promptly once the drain
+     * finished, which is true of the handler and NOT true of everything else in
+     * an iteration — `reapStuck`, `onTick`'s heartbeat and scheduler probe are
+     * all database calls, and a database that has just gone away is exactly the
+     * condition under which a deploy is happening. `shutdownTimeoutMs` is the
+     * promise made to the orchestrator; it has to bound the whole of `stop()`,
+     * or SIGKILL arrives and skips every remaining cleanup step — which is the
+     * outcome the deadline exists to prevent.
+     */
+    const deadlineAt = Date.now() + shutdownTimeoutMs;
+    const remainingMs = (): number => deadlineAt - Date.now();
+
+    const timedOut = (): void => {
+      logger.error(
+        { event: 'worker.drain_timeout', reason, shutdownTimeoutMs },
+        'a job did not finish within the shutdown window; it will be reclaimed and rerun',
+      );
+    };
+
+    const inFlight = current ?? claiming;
+    if (inFlight !== undefined && !(await withDeadline(inFlight, remainingMs()))) {
+      timedOut();
+      // Deliberately NOT awaiting the loop. See above.
+      return;
     }
 
-    await stopped;
+    if (stopped !== undefined && !(await withDeadline(stopped, remainingMs()))) {
+      timedOut();
+    }
   }
 
   return {

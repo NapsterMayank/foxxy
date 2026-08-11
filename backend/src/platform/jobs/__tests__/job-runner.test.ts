@@ -55,6 +55,8 @@ class YieldingSleeper implements Sleeper {
 class FakeQueue implements JobQueue {
   readonly succeeded: string[] = [];
   readonly failed: { readonly id: string; readonly error: string }[] = [];
+  /** D-301 — jobs handed back unrun because shutdown began during the claim. */
+  readonly released: string[] = [];
   readonly claims: string[] = [];
   reapCount = 0;
   /**
@@ -91,6 +93,12 @@ class FakeQueue implements JobQueue {
     if (this.leaseLost) return Promise.resolve('lease_lost');
     this.failed.push({ id: job.id, error });
     return Promise.resolve('retry');
+  }
+
+  release(job: ClaimedJob): Promise<boolean> {
+    if (this.leaseLost) return Promise.resolve(false);
+    this.released.push(job.id);
+    return Promise.resolve(true);
   }
 
   reapStuck(): Promise<number> {
@@ -323,6 +331,7 @@ describe('failures', () => {
       claim: () => Promise.reject(new Error('db down')),
       succeed: () => Promise.reject(new Error('db down')),
       fail: () => Promise.reject(new Error('db down')),
+      release: () => Promise.reject(new Error('db down')),
       reapStuck: () => Promise.reject(new Error('db down')),
       countByStatus: () => Promise.reject(new Error('db down')),
     };
