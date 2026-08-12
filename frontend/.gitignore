@@ -5,3 +5,6 @@ playwright-report/
 test-results/
 .env*
 !.env.example
+
+# Lighthouse CI output — reports, not sources.
+.lighthouseci/

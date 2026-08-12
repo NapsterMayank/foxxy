@@ -17,7 +17,7 @@ export function RoleCard({ action, description, href, illustration, label, theme
       data-motion="lift"
       data-theme={theme}
     >
-      <div className="grid min-h-48 place-items-center bg-brand-subtle p-8 text-brand" aria-hidden="true">
+      <div className="grid min-h-card place-items-center bg-brand-subtle p-8 text-brand" aria-hidden="true">
         {illustration}
       </div>
       <div className="flex flex-1 flex-col items-center p-6 text-center sm:p-8">

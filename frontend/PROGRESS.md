@@ -6,7 +6,7 @@
 
 ## Build-order step 0 and step 6 — 12 August 2026
 
-Four of the five foundation gaps in `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` §11 step 0 are closed, plus step 6 in full. **Tests 10 → 57.**
+All five foundation gaps in `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` §11 step 0 are closed, plus step 6 in full. **Tests 10 → 146 unit and 24 end-to-end.**
 
 | Piece | Files | What is load-bearing |
 |---|---|---|
@@ -15,9 +15,35 @@ Four of the five foundation gaps in `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` §
 | Typed client (§5.2) | `src/lib/api/client.ts` | `credentials: 'include'` on every request; the response is parsed against its Zod contract, so a backend change surfaces at the boundary instead of three components deep. It throws on 401 rather than redirecting — the redirect needs the query cache cleared in the same step, which a module-scope `location` assignment cannot do |
 | Session (§5.5) | `src/lib/session/`, `src/app/providers.tsx`, `src/components/layout/session-gate.tsx` | One bootstrap query, `loading \| authenticated \| unauthenticated`. **`loading` renders a skeleton and never redirects** — redirecting during bootstrap signs out every user on every refresh. Any 401 anywhere clears the cache and redirects with `?next=` |
 | Foxy streaming (§7) | `src/features/foxy/lib/sse.ts`, `hooks/use-foxy-stream.ts` | `fetch` + `ReadableStream` (the endpoint is a POST and `EventSource` is GET-only). Frames are buffered across chunk boundaries; unknown frame types are ignored so the backend can add a sixth. **All seven cases in §7 are tests.** The assistant bubble is created lazily on the first token, which is what makes "error before any token" an error state rather than an empty bubble |
-| Design tokens (§9.1) | `tailwind.config.ts`, `src/app/globals.css` | Spacing, type, radius, elevation and motion scales are REPLACED, not extended — an off-scale utility does not exist. Tailwind is silent about that (it emits nothing and the element renders with no spacing), so `architecture/spacing-scale-only` makes it a build failure. It caught five real breakages on existing screens the moment it was enabled |
+| Design tokens (§9.1) | `tailwind.config.ts`, `src/app/globals.css` | Spacing, type, radius, elevation and motion scales are REPLACED, not extended — an off-scale utility does not exist. Tailwind is silent about that (it emits nothing and the element renders with no spacing), so `architecture/spacing-scale-only` makes it a build failure. It caught ELEVEN real breakages on existing screens, each of which was rendering with no size at all |
 
-**Still open from step 0: the CI gates (§10.7)** — per-route and shared bundle budgets, Lighthouse LCP/TBT, axe on both journeys, contrast in both themes, visual regression, coverage floors. None has been proven to fail on a deliberate violation, which is the bar the backend's eight gates met.
+### The CI gates — §10.7, closed 12 August 2026
+
+`npm run gates` runs everything that needs no build. The rest run in `frontend-ci.yml` after `npm run build`.
+
+| Gate | Command | Deliberately broken? |
+|---|---|---|
+| Type check | `npm run typecheck` | ✅ failed twice during this work |
+| Lint — boundaries · arbitrary values · brand literals · **off-scale spacing** | `npm run lint` | ✅ **eleven real breakages** the moment the spacing rule ran |
+| Contracts match the backend | `npm run contracts:check` | ✅ edited a generated file → red |
+| Deployable isolation | `npm run check:isolation` | ✅ imported `../../../backend/src` → exit 1 |
+| Coverage floors, per area | `npm run test:coverage` | ✅ deleted a test file → `components/ui` 71% vs 90% |
+| Contrast, WCAG AA, **both themes** | `playwright test` | ✅ lightened `--muted` → both dashboards failed |
+| Visual regression | `playwright test` | ✅ changed the parent `--brand` → screenshot failed |
+| axe, zero serious or critical | `playwright test` | pre-existing |
+| Bundle budgets — 180 kB route, 120 kB shared | `npm run check:bundle` | 🟡 arithmetic only, over a synthetic `.next`; never run against a real build |
+| LCP ≤ 2.5s · TBT ≤ 200ms, throttled 4G | `npm run check:lighthouse` | ⬜ never executed |
+
+**Why two gates are unproven.** Both need a completed production build. `next build` dies at worker teardown on this machine (root `PROGRESS.md` open item 33) and CI has never run at all.
+
+**Visual baselines are per platform.** The committed ones are `win32`. The first Linux CI run writes its own, and those must be committed from that run's artifact before the gate means anything in CI.
+
+**The language axis of visual regression does not exist yet and is not faked.** Three of §10.7's four axes are real — breakpoints (two Playwright projects), themes (the two route groups), journeys (the two dashboards). There is one dictionary, in English; a "Hindi" run today would screenshot the same English strings and report green for the exact property the axis exists to catch. It lands with step 5.
+
+### Two defects the gates found in this session's own code
+
+1. **An infinite 401 loop in the session provider.** `expire` used `queryClient.clear()`, which removes the bootstrap query — whose live observer immediately refetches, 401s, publishes, and expires again, calling `router.replace` every cycle so the login page never painted. The browser test caught it at thirty-odd requests; the jsdom test had asserted "fetched once" and settled before the second cycle.
+2. **Eleven layout utilities rendering with no size.** Closing the token scales makes an off-scale class not exist, and Tailwind emits nothing rather than warning. `pb-28` on the mobile bottom-nav clearance would have hidden the last card of every student screen behind the nav bar.
 
 ### Two plan corrections this work forced
 
@@ -95,9 +121,9 @@ The optimized production server was queried directly. `/`, all five secondary la
 |---|---|---|
 | Product | `npm run typecheck` | Pass |
 | Product | `npm run lint` | Pass, zero warnings |
-| Product | `npm test` | Pass: **57 tests in 11 files** (12 August) |
+| Product | `npm run gates` | Pass: type-check · lint · contract sync · isolation · **146 tests with §10.5 coverage floors** (12 August) |
 | Product | `npm run build` | Pass: 12 generated routes; preview dashboards static |
-| Product | `npm run test:e2e` | Pass: 8 tests across mobile and desktop production builds |
+| Product | `npx playwright test` | Pass: **24 tests** across mobile and desktop — session gate, axe, contrast in both themes, visual regression (12 August, against the dev server; CI runs them against `next start`) |
 | Product | `npm audit --omit=dev` | Pass: 0 vulnerabilities |
 | Marketing | `npm run typecheck` | Pass |
 | Marketing | `npm run lint` | Pass, zero warnings |
@@ -131,7 +157,7 @@ The optimized production server was queried directly. `/`, all five secondary la
 1. ✅ ~~Freeze the identity/session and shared response contracts~~ — generated from the backend, with a drift test.
 2. ✅ ~~Add one credentialed API client and wire current-user behavior~~ — done; the auth FORMS still need wiring to it.
 3. ✅ ~~Protect role layouts with session/role handling~~ — `SessionGate` on both route groups. Preview fixtures still need replacing screen by screen.
-4. **Close the CI gates (§10.7).** Bundle budgets, Lighthouse, axe, contrast, visual regression, coverage floors — and prove each one fails on a deliberate violation before trusting it. `@vitest/coverage-v8` is still not installed, so the floors cannot even be measured. **The build environment must set `NEXT_PUBLIC_API_URL`** — `lib/config/env.ts` throws without it, which is deliberate and will fail a CI build that does not.
+4. ✅ ~~Close the CI gates (§10.7)~~ — eleven exist, six proven by deliberate breakage; bundle budgets and Lighthouse remain unproven until a build completes and CI runs. Original note kept for the record: **Close the CI gates (§10.7).** Bundle budgets, Lighthouse, axe, contrast, visual regression, coverage floors — and prove each one fails on a deliberate violation before trusting it. `@vitest/coverage-v8` is still not installed, so the floors cannot even be measured. **The build environment must set `NEXT_PUBLIC_API_URL`** — `lib/config/env.ts` throws without it, which is deliberate and will fail a CI build that does not.
 5. `components/ui` primitives and `components/patterns`, then the auth screens onto the live client.
 6. Implement the marketing CMS/editor preview and independent deployment pipeline.
 7. Complete i18n, legal content, approved assets and launch-content review.

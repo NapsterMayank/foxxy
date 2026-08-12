@@ -169,7 +169,14 @@ const config: Config = {
       minHeight: {
         /** 44px. Every interactive element, every breakpoint (§12). */
         control: '2.75rem',
+        /** The illustration well on a role card. A layout measurement. */
+        card: '12rem',
         screen: '100vh',
+      },
+      /** Avatar and logo squares. Named because they are objects, not gaps. */
+      size: {
+        avatar: '2.5rem',
+        logo: '2.25rem',
       },
       minWidth: {
         control: '2.75rem',

@@ -6,6 +6,12 @@
 # 06-FRONTEND-SEPARATION-PLAN.md: "The product pipeline owns only `frontend/`."
 # It installs nothing from `website/` and nothing from `backend/`, so a
 # marketing dependency bump cannot rebuild or break the product.
+#
+# THE GATES ARE 02-FRONTEND-IMPLEMENTATION-PLAN.md §10.7, and the plan's rule
+# for them is the backend's: "each gate is proven by deliberately breaking it
+# once — a gate that has never failed is not known to work." Which of these have
+# been so proven, and which have not, is recorded in `frontend/PROGRESS.md`
+# rather than assumed here.
 # =============================================================================
 
 name: frontend-ci
@@ -18,7 +24,7 @@ permissions:
 
 jobs:
   frontend:
-    name: type-check · lint · test · build
+    name: gates · build · docker
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -30,6 +36,10 @@ jobs:
       # production secret or point at a production origin — the separation plan
       # is explicit that preview builds get "synthetic content and no production
       # secrets".
+      #
+      # REQUIRED, not decorative: `src/lib/config/env.ts` throws without it, so
+      # a workflow that drops this line fails the build rather than shipping an
+      # application pointed at nothing.
       NEXT_PUBLIC_API_URL: https://api.example.com
       NEXT_PUBLIC_APP_URL: https://app.example.com
       NEXT_PUBLIC_MARKETING_URL: https://example.com
@@ -49,11 +59,29 @@ jobs:
       - name: type-check
         run: npm run typecheck
 
+      # Boundary violations, arbitrary Tailwind values, brand-colour literals
+      # and off-scale spacing utilities. The last one matters most: the scales
+      # are CLOSED, so an off-scale class renders with no spacing at all and
+      # Tailwind says nothing.
       - name: lint
         run: npm run lint
 
-      - name: test
-        run: npm test
+      # The generated contracts must match the backend's. A stale copy is a
+      # hand-written mirror with extra steps.
+      - name: contracts are in sync with the backend
+        run: npm run contracts:check
+
+      # `website/` and `frontend/` must not import each other, and nothing may
+      # climb out of `src/`. Such an import compiles here and fails in Docker,
+      # where the other directory does not exist.
+      - name: deployable isolation
+        run: npm run check:isolation
+
+      # Unit, hook and component tests, with the §10.5 coverage floors enforced
+      # per area. A single global percentage is satisfied by testing the easy
+      # half.
+      - name: test with coverage floors
+        run: npm run test:coverage
 
       - name: build
         run: npm run build
@@ -68,6 +96,38 @@ jobs:
           test -f .next/standalone/server.js \
             || { echo "FAIL: no .next/standalone/server.js — is output:'standalone' still set in next.config.ts?"; exit 1; }
           echo "standalone output present"
+
+      # First-load JS per route and the shared chunk, gzipped, against the
+      # §10.7 budgets. Runs after the build because it measures the build.
+      - name: bundle budgets
+        run: npm run check:bundle
+
+      - name: install browsers
+        run: npx playwright install --with-deps chromium
+
+      # End-to-end, accessibility (axe, zero serious or critical), contrast in
+      # BOTH themes, and visual regression. `CI=true` makes the Playwright
+      # config start `next start` over the build above rather than `next dev`.
+      #
+      # VISUAL BASELINES ARE PER PLATFORM. The committed ones are win32; the
+      # first Linux run writes its own and they must be committed from that
+      # run's artifact before this step is trustworthy here.
+      - name: end-to-end, accessibility, contrast and visual regression
+        run: npx playwright test
+
+      - name: upload the playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          retention-days: 7
+
+      # LCP and TBT on throttled 4G. Separate from the Playwright run because it
+      # starts its own server and takes three runs per URL to get a stable
+      # median.
+      - name: lighthouse — LCP and TBT budgets
+        run: npm run check:lighthouse
 
       - name: the Docker image builds
         run: |

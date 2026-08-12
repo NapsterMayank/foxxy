@@ -417,7 +417,172 @@ describe('CASE: the user navigates away', () => {
   });
 });
 
+describe('frames that must not break the stream', () => {
+  it('ignores an unrecognised frame type and keeps going', async () => {
+    const stream = controllableStream();
+    fetchMock.mockResolvedValue(streamingResponse(stream.body));
+
+    const { result } = renderHook(() => useFoxyStream(SESSION_ID), { wrapper });
+    act(() => {
+      void result.current.send({ text: 'hi' });
+    });
+    await waitFor(() => {
+      expect(result.current.isStreaming).toBe(true);
+    });
+
+    act(() => {
+      // A sixth frame type from a newer backend. Deployed clients must survive
+      // it — that guarantee is why the parser drops unknown types.
+      stream.push(encodeFrame('telemetry', { latencyMs: 12 }));
+      stream.push(encodeFrame('token', { text: 'still here' }));
+      stream.push(encodeFrame('done', { messageId: 'server-1', abstained: false }));
+      stream.close();
+    });
+
+    await waitFor(() => {
+      expect(result.current.isStreaming).toBe(false);
+    });
+    expect(result.current.messages.at(-1)).toMatchObject({
+      text: 'still here',
+      status: 'complete',
+    });
+    expect(result.current.error).toBeNull();
+  });
+
+  it('ignores a citation addressed to a different message', async () => {
+    const stream = controllableStream();
+    fetchMock.mockResolvedValue(streamingResponse(stream.body));
+
+    const { result } = renderHook(() => useFoxyStream(SESSION_ID), { wrapper });
+    act(() => {
+      void result.current.send({ text: 'hi' });
+    });
+    await waitFor(() => {
+      expect(result.current.isStreaming).toBe(true);
+    });
+
+    act(() => {
+      stream.push(encodeFrame('token', { text: 'answer' }));
+      stream.push(
+        encodeFrame('citation', {
+          messageId: 'server-1',
+          citation: { chunkId: 'mine', chapterNumber: 1, chapterTitle: 'A' },
+        }),
+      );
+      // Now bound to server-1. A citation for another message is not ours.
+      stream.push(
+        encodeFrame('citation', {
+          messageId: 'server-OTHER',
+          citation: { chunkId: 'theirs', chapterNumber: 2, chapterTitle: 'B' },
+        }),
+      );
+      stream.push(encodeFrame('done', { messageId: 'server-1', abstained: false }));
+      stream.close();
+    });
+
+    await waitFor(() => {
+      expect(result.current.isStreaming).toBe(false);
+    });
+    expect(result.current.messages.at(-1)?.citations).toEqual([
+      { chunkId: 'mine', chapterNumber: 1, chapterTitle: 'A' },
+    ]);
+  });
+
+  it('treats a done with no content as a completed turn, not an error', async () => {
+    const stream = controllableStream();
+    fetchMock.mockResolvedValue(streamingResponse(stream.body));
+
+    const { result } = renderHook(() => useFoxyStream(SESSION_ID), { wrapper });
+    act(() => {
+      void result.current.send({ text: 'hi' });
+    });
+    await waitFor(() => {
+      expect(result.current.isStreaming).toBe(true);
+    });
+
+    act(() => {
+      stream.push(encodeFrame('done', { messageId: 'server-1', abstained: false }));
+      stream.close();
+    });
+
+    await waitFor(() => {
+      expect(result.current.isStreaming).toBe(false);
+    });
+    expect(result.current.error).toBeNull();
+    expect(result.current.messages.filter((m) => m.role === 'assistant')).toHaveLength(0);
+  });
+
+  it('reports a stream failure when the body closes having said nothing', async () => {
+    const stream = controllableStream();
+    fetchMock.mockResolvedValue(streamingResponse(stream.body));
+
+    const { result } = renderHook(() => useFoxyStream(SESSION_ID), { wrapper });
+    act(() => {
+      void result.current.send({ text: 'hi' });
+    });
+    await waitFor(() => {
+      expect(result.current.isStreaming).toBe(true);
+    });
+
+    act(() => {
+      stream.close();
+    });
+
+    await waitFor(() => {
+      expect(result.current.error).not.toBeNull();
+    });
+    // No bubble to mark failed, so only the error state carries it.
+    expect(result.current.messages.filter((m) => m.role === 'assistant')).toHaveLength(0);
+  });
+
+  it('errors when the response carries no body at all', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, body: null } as unknown as Response);
+
+    const { result } = renderHook(() => useFoxyStream(SESSION_ID), { wrapper });
+    await act(async () => {
+      await result.current.send({ text: 'hi' });
+    });
+
+    expect(result.current.error).not.toBeNull();
+    expect(result.current.isStreaming).toBe(false);
+  });
+
+  it('reports a transport failure without leaving the UI streaming', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+
+    const { result } = renderHook(() => useFoxyStream(SESSION_ID), { wrapper });
+    await act(async () => {
+      await result.current.send({ text: 'hi' });
+    });
+
+    expect(result.current.error?.status).toBe(0);
+    expect(result.current.isStreaming).toBe(false);
+  });
+});
+
 describe('retry', () => {
+  it('does nothing when nothing has been sent', async () => {
+    const { result } = renderHook(() => useFoxyStream(SESSION_ID), { wrapper });
+
+    await act(async () => {
+      await result.current.retry();
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('cancelling with nothing in flight is a no-op', () => {
+    const { result } = renderHook(() => useFoxyStream(SESSION_ID), { wrapper });
+
+    act(() => {
+      result.current.cancel();
+    });
+
+    expect(result.current.isStreaming).toBe(false);
+    expect(result.current.messages).toEqual([]);
+  });
+
+
   it('drops the whole failed turn so the question is not asked twice on screen', async () => {
     const failing = controllableStream();
     const succeeding = controllableStream();

@@ -41,7 +41,7 @@ function NavigationLink({ href, isCurrent = false, label, marker }: ProductNavig
 function Brand() {
   return (
     <Link className="inline-flex items-center gap-2 font-extrabold tracking-tight text-ink" href="/">
-      <span aria-hidden="true" className="grid size-9 place-items-center rounded-md bg-brand text-white">
+      <span aria-hidden="true" className="grid size-logo place-items-center rounded-md bg-brand text-white">
         A
       </span>
       <span>Alfanumrik</span>
@@ -62,7 +62,7 @@ export function ProductShell({ children, navigation, roleLabel, userName }: Prod
             </div>
             <span
               aria-label={`${userName}, ${roleLabel}`}
-              className="grid size-10 place-items-center rounded-full bg-brand-subtle text-sm font-extrabold text-brand-strong"
+              className="grid size-avatar place-items-center rounded-full bg-brand-subtle text-sm font-extrabold text-brand-strong"
               role="img"
             >
               {userName.slice(0, 1)}

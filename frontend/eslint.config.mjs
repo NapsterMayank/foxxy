@@ -71,8 +71,18 @@ const architecturePlugin = {
       },
       create(context) {
         const allowed = new Set(['0', 'px', '1', '2', '3', '4', '6', '8', '12', '16']);
+        /*
+         * `w`, `h` and `size` are in the list because Tailwind's width and
+         * height scales are BUILT FROM `spacing` — closing spacing closes them
+         * too, and `h-5` is exactly as silent as `p-5`. Named layout tokens
+         * (`w-sidebar`, `h-panel`) are non-numeric and never match.
+         *
+         * The `(?!\/)` is what keeps `w-1/2` legal: fractions come from
+         * Tailwind's own width scale, not from spacing, and flagging them would
+         * make the rule wrong in the one direction nobody forgives.
+         */
         const spacingUtility =
-          /\b(?:-)?(p|px|py|pt|pb|pl|pr|m|mx|my|mt|mb|ml|mr|gap|gap-x|gap-y|space-x|space-y|inset|inset-x|inset-y|top|right|bottom|left|scroll-m|scroll-p)-([0-9]+(?:\.[0-9]+)?|px)\b/g;
+          /\b(?:-)?(p|px|py|pt|pb|pl|pr|m|mx|my|mt|mb|ml|mr|gap|gap-x|gap-y|space-x|space-y|inset|inset-x|inset-y|top|right|bottom|left|scroll-m|scroll-p|w|h|size)-([0-9]+(?:\.[0-9]+)?|px)\b(?!\/)/g;
 
         return {
           JSXAttribute(node) {

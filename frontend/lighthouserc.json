@@ -1,0 +1,61 @@
+{
+  "//": [
+    "LCP and TBT gates — 02-FRONTEND-IMPLEMENTATION-PLAN.md §10.7.",
+    "",
+    "Throttled 4G on a mid-range Android, because that is the device and network",
+    "the product targets. Measuring on an unthrottled CI runner would report",
+    "numbers no user will ever see and pass a gate that guarantees nothing.",
+    "",
+    "Three runs per URL: a single Lighthouse run varies by tens of percent on",
+    "shared CI hardware, and lhci asserts against the median.",
+    "",
+    "The three URLs are the entry points a first-time visitor actually lands on.",
+    "The dashboards are behind the session gate and would measure a skeleton.",
+    "",
+    "NOT YET PROVEN. This gate has never executed — `next build` dies at worker",
+    "teardown on the development machine (root PROGRESS.md open item 33) and CI",
+    "has never run at all. It is wired here so the first CI run measures it."
+  ],
+  "ci": {
+    "collect": {
+      "url": [
+        "http://127.0.0.1:3000/",
+        "http://127.0.0.1:3000/login?role=student",
+        "http://127.0.0.1:3000/onboarding?role=student"
+      ],
+      "startServerCommand": "npm run start",
+      "startServerReadyPattern": "Ready",
+      "numberOfRuns": 3,
+      "settings": {
+        "formFactor": "mobile",
+        "throttlingMethod": "simulate",
+        "throttling": {
+          "rttMs": 150,
+          "throughputKbps": 1638.4,
+          "cpuSlowdownMultiplier": 4,
+          "requestLatencyMs": 562.5,
+          "downloadThroughputKbps": 1474.56,
+          "uploadThroughputKbps": 675
+        },
+        "screenEmulation": {
+          "mobile": true,
+          "width": 360,
+          "height": 800,
+          "deviceScaleFactor": 2.625,
+          "disabled": false
+        }
+      }
+    },
+    "assert": {
+      "assertions": {
+        "largest-contentful-paint": ["error", { "maxNumericValue": 2500 }],
+        "total-blocking-time": ["error", { "maxNumericValue": 200 }],
+        "cumulative-layout-shift": ["error", { "maxNumericValue": 0.1 }]
+      }
+    },
+    "upload": {
+      "target": "filesystem",
+      "outputDir": ".lighthouseci"
+    }
+  }
+}

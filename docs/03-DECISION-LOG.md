@@ -6456,3 +6456,100 @@ The rule inherits D-031's known hole: `staticClassName()` only unwraps a bare li
 so `className={cx('p-5')}` is not flagged. That matters more here than for the brand
 rule — a missed brand literal renders the wrong colour, a missed spacing utility
 renders no spacing at all.
+
+---
+
+### D-339 · `queryClient.clear()` in the expiry path was an infinite 401 loop
+
+`SessionProvider.expire` did what §5.5 asks in as many words — "clears the query
+cache" — with `queryClient.clear()`.
+
+`clear()` removes EVERY query, including the bootstrap query itself. That query has
+a live observer (the provider), so removing it makes TanStack Query refetch
+immediately; the refetch 401s; the 401 publishes to `notifyUnauthenticated`; `expire`
+runs again. The cycle continues until the tab is closed, and every iteration also
+calls `router.replace`, so each navigation supersedes the last and **the login page
+never paints**. A browser test caught it doing exactly this: thirty-odd `/auth/me`
+requests and an empty body at `/login`.
+
+The jsdom suite did not catch it. Its test asserted "fetched once" and settled before
+the second cycle, with a faked router that performs no navigation. That is the
+difference the end-to-end tests exist for.
+
+**Decision:** three changes, each with its own reason.
+
+ 1. `expire` removes every query EXCEPT the session one
+    (`predicate: query.queryKey[0] !== sessionKeys.currentUser[0]`). The cross-user
+    leak §5.5 names is about a previous user's profile, practice history and digest —
+    none of which is the bootstrap. Leaving the bootstrap in place also preserves its
+    401, which is what makes `status` read `unauthenticated` rather than flipping back
+    to `loading`.
+ 2. A one-shot guard (`expiredRef`), re-armed when a bootstrap succeeds. A burst of
+    parallel 401s is the ORDINARY case on an expired session, not an edge one.
+ 3. No redirect at all from a public route. On `/login` a 401 from the bootstrap is
+    the expected answer, and redirecting to login from login is a wasted navigation
+    that, combined with the clear, was the second half of the storm.
+
+Pinned by `session-provider.test.tsx` ("publishing 401 twice clears and redirects
+ONCE") and by the browser test that found it.
+
+---
+
+### D-340 · The frontend CI gates, and which of them are PROVEN
+
+§10.7's rule is the backend's: "each gate is proven by deliberately breaking it once —
+a gate that has never failed is not known to work." Eleven gates now exist. Six have
+been broken on purpose and observed to fail; five have not, and pretending otherwise
+would be worse than not having them.
+
+| Gate | Where | Proven by |
+|---|---|---|
+| Type check | `npm run typecheck` | routine — it failed twice during this work |
+| Lint: boundaries, arbitrary values, brand literals, **off-scale spacing** | `eslint.config.mjs` | ELEVEN real breakages found the moment the spacing rule was switched on, including `pb-28` on the mobile-nav clearance and `size-9`/`size-10` on the avatar and logo |
+| Contracts in sync with the backend | `contracts:check` + a test | appended a line to a generated file → red; re-synced → green |
+| Deployable isolation | `check:isolation` | added an import of `../../../backend/src` → exit 1, two named violations |
+| Coverage floors, per area | `vitest.config.ts` | removed `primitives.test.tsx` → `components/ui` failed at 71% against the 90% floor |
+| Contrast, WCAG AA, BOTH themes | `visual.spec.ts` | lightened `--muted` → both dashboards failed |
+| Visual regression | `visual.spec.ts` | changed the parent `--brand` → the parent screenshot failed |
+| Bundle budgets | `check-bundle-budget.mjs` | **arithmetic only** — ten unit tests over a synthetic `.next`. The gate itself has never run against a real build, because `next build` dies at worker teardown here (open item 33) |
+| LCP ≤ 2.5s, TBT ≤ 200ms | `lighthouserc.json` | **NOT PROVEN.** Needs a production build and has never executed |
+| axe, zero serious or critical | `foundation.spec.ts` | pre-existing; not deliberately broken during this work |
+| Route-group isolation between features | `eslint.config.mjs` | pre-existing; not deliberately broken during this work |
+
+The two unproven-in-anger gates are both blocked on the same two things: a build that
+completes on this machine, and CI ever running at all. Both are already the top of
+`PROGRESS.md` §2.
+
+**On the coverage floors being per area.** A single global percentage is satisfied by
+testing the easy half: 90% overall with every primitive untested and every pure
+function exhaustively tested is a number that bounds nothing. The globs are disjoint
+on purpose — Vitest applies one glob's thresholds to the files it matches, and
+overlapping patterns make it ambiguous which floor applies. Two areas the plan's table
+does not name (`lib/api`, `lib/session`) are held at the hook floor rather than left to
+a default, because the error table and the bootstrap are what every screen depends on.
+
+---
+
+### D-341 · The language axis of visual regression does not exist yet, and is not faked
+
+§10.7 specifies visual regression over two journeys x two breakpoints x two languages x
+two themes. Three of those axes are real today: the breakpoints are the two Playwright
+projects, the themes are the two route groups (`data-theme` is set by the layout, so
+`/student` IS purple and `/parent` IS orange), and the journeys are the two dashboards.
+
+There is one dictionary, in English. Build-order step 5 has not been done.
+
+**Decision:** run the three axes that exist and add the fourth when the Hindi
+dictionary lands, rather than adding a `?lang=hi` run now. A Hindi run today would
+screenshot the same English strings and report a green gate for the exact property
+§10.7 says the axis exists to catch — "a Hindi string overflowing a button". A gate
+that cannot fail is worse than a missing one, because it is counted as coverage.
+
+A companion test asserts the two themes really do resolve `--brand` to different
+values. Without it, "both themes" could quietly become one theme tested twice, and
+every contrast assertion in the file would be half a check.
+
+**On baselines.** Playwright names snapshots per platform and it is right to: font
+hinting and anti-aliasing genuinely differ. The committed baselines are `win32`. The
+first Linux CI run writes its own, and they must be committed from that run's artifact
+before the gate means anything in CI.

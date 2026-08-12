@@ -154,19 +154,23 @@ export async function apiRequest<T>(request: ApiRequest<T>): Promise<T> {
 
   if (!response.ok) throw await toApiError(response, method);
 
-  if (BODILESS_STATUSES.has(response.status)) {
-    // Validated anyway, so an endpoint that starts returning a body without
-    // saying so does not silently become `null` at every call site.
-    return request.schema.parse(null);
-  }
+  // Validated even when there is no body, so an endpoint that starts returning
+  // one without saying so does not silently become `null` at every call site.
+  const payload: unknown = BODILESS_STATUSES.has(response.status)
+    ? null
+    : await response.json();
 
-  const payload: unknown = await response.json();
   const parsed = request.schema.safeParse(payload);
   if (!parsed.success) {
     /*
-     * A 200 whose SHAPE is wrong. This is the case point 2 exists for, and it
+     * A 2xx whose SHAPE is wrong. This is the case point 2 exists for, and it
      * is deliberately loud: the alternative is the value flowing on as
      * `undefined` and failing somewhere with no connection to the cause.
+     *
+     * It is an `ApiError` and NOT the raw `ZodError`, so that every failure
+     * leaving this module is the one type callers branch on. A single escaping
+     * `ZodError` means every `catch` has to handle two shapes, and the one that
+     * forgets is the one that renders a stack trace at a child.
      */
     throw new ApiError({
       status: response.status,

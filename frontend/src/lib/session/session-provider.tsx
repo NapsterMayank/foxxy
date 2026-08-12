@@ -2,7 +2,15 @@
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { usePathname, useRouter } from 'next/navigation';
-import { createContext, useCallback, useContext, useEffect, useMemo, type ReactNode } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from 'react';
 import { apiRequest } from '@/lib/api/client';
 import { ApiError } from '@/lib/api/errors';
 import { currentUserResponseSchema } from '@/lib/api/generated/contracts/identity.contract';
@@ -58,6 +66,23 @@ const SessionContext = createContext<SessionState | null>(null);
 /** Where an expired session lands, carrying where it came from. */
 export const LOGIN_PATH = '/login';
 
+/**
+ * Routes where being signed out is the NORMAL state.
+ *
+ * A 401 from the bootstrap on the login page is the expected answer, not an
+ * expiry, and redirecting to login from login is at best a wasted navigation.
+ * Listed rather than inferred from the route group, because the route group is
+ * a build-time fact and this runs in the browser.
+ */
+const PUBLIC_PATHS: readonly string[] = [
+  '/',
+  '/login',
+  '/signup',
+  '/verify',
+  '/forgot-password',
+  '/reset-password',
+];
+
 function fetchCurrentUser(signal: AbortSignal): Promise<{ user: UserProfile }> {
   return apiRequest({
     path: '/auth/me',
@@ -89,17 +114,50 @@ export function SessionProvider({ children }: Readonly<{ children: ReactNode }>)
     staleTime: 30_000,
   });
 
-  const expire = useCallback(() => {
-    /*
-     * ORDER MATTERS. The cache is cleared BEFORE the navigation: `router` may
-     * render the login route synchronously, and a cache still holding the
-     * previous user's data would be read by anything mounted underneath it.
-     */
-    queryClient.clear();
+  /**
+   * ==========================================================================
+   * THE LOOP GUARD, AND WHY IT IS NOT OPTIONAL.
+   *
+   * `expire` used to call `queryClient.clear()`, which removes the BOOTSTRAP
+   * QUERY ITSELF. That query has a live observer — this component — so removing
+   * it makes TanStack Query refetch immediately, the refetch 401s, the 401
+   * publishes again, and the whole thing runs until the tab is closed. A
+   * browser test caught it doing exactly that: thirty-odd `/auth/me` requests
+   * and a login page that never painted, because every navigation was
+   * superseded by the next one.
+   *
+   * The jsdom test did not catch it — it asserted "fetched once" and settled
+   * before the second cycle. That is the difference between a fake router and a
+   * real one, and it is why the gate has browser tests at all.
+   * ==========================================================================
+   */
+  const expiredRef = useRef(false);
 
-    const next = pathname === null || pathname === LOGIN_PATH ? null : pathname;
-    const target =
-      next === null ? LOGIN_PATH : `${LOGIN_PATH}?next=${encodeURIComponent(next)}`;
+  const expire = useCallback(() => {
+    if (expiredRef.current) return;
+    expiredRef.current = true;
+
+    /*
+     * EVERY QUERY EXCEPT THE SESSION ONE. The cross-user leak §5.5 names is
+     * about a previous user's PROFILE, PRACTICE HISTORY and DIGEST surviving in
+     * cache on a shared family device — none of which is the bootstrap. Leaving
+     * the bootstrap in place also preserves its 401, which is the answer that
+     * makes `status` read `unauthenticated` rather than flipping back to
+     * `loading`.
+     *
+     * Removed BEFORE the navigation: the login route may render synchronously,
+     * and anything mounted underneath would otherwise read the stale cache.
+     */
+    queryClient.removeQueries({
+      predicate: (query) => query.queryKey[0] !== sessionKeys.currentUser[0],
+    });
+
+    // On a public route, being signed out is the expected state — there is
+    // nothing to redirect away from.
+    if (pathname !== null && PUBLIC_PATHS.includes(pathname)) return;
+
+    const next = pathname === null ? null : pathname;
+    const target = next === null ? LOGIN_PATH : `${LOGIN_PATH}?next=${encodeURIComponent(next)}`;
     router.replace(target);
   }, [pathname, queryClient, router]);
 
@@ -108,6 +166,16 @@ export function SessionProvider({ children }: Readonly<{ children: ReactNode }>)
    * why this arrives as a published fact rather than a direct call.
    */
   useEffect(() => onUnauthenticated(expire), [expire]);
+
+  /*
+   * A NEW SIGN-IN RE-ARMS THE GUARD. The provider is not remounted by logging
+   * in — the same instance sees the bootstrap succeed — so without this, the
+   * second expiry of a browser session would clear nothing and redirect
+   * nowhere.
+   */
+  useEffect(() => {
+    if (query.data !== undefined) expiredRef.current = false;
+  }, [query.data]);
 
   const value = useMemo<SessionState>(() => {
     if (query.isPending) return { status: 'loading', user: null, expire };

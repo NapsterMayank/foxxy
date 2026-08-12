@@ -166,7 +166,7 @@ describe('mid-session expiry', () => {
     expect(replace).toHaveBeenCalledWith('/login?next=%2Fstudent');
   });
 
-  it('does not append ?next= when already on the login route', async () => {
+  it('does not navigate at all when already on a public route', async () => {
     pathname = '/login';
     fetchMock.mockResolvedValue(unauthenticatedResponse());
     renderProvider();
@@ -179,8 +179,57 @@ describe('mid-session expiry', () => {
       notifyUnauthenticated();
     });
 
-    // `?next=/login` would send a successful sign-in straight back to the form.
-    expect(replace).toHaveBeenCalledWith('/login');
+    /*
+     * On the login page a 401 from the bootstrap is the EXPECTED answer, not an
+     * expiry. Redirecting to login from login is at best a wasted navigation —
+     * and it was worse than that: combined with the cache clear it produced a
+     * navigation storm that stopped the login page ever painting.
+     */
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it('publishing 401 twice clears and redirects ONCE — the loop guard', async () => {
+    fetchMock.mockResolvedValue(userResponse());
+    renderProvider();
+    await waitFor(() => {
+      expect(screen.getByTestId('status')).toHaveTextContent('authenticated');
+    });
+
+    act(() => {
+      notifyUnauthenticated();
+      notifyUnauthenticated();
+    });
+
+    /*
+     * THE REGRESSION THIS PINS. `expire` used to call `queryClient.clear()`,
+     * which removes the BOOTSTRAP QUERY ITSELF — and that query has a live
+     * observer, so removing it refetches, the refetch 401s, and the cycle runs
+     * until the tab closes. A browser test caught it making thirty-odd requests
+     * while the login page never painted; this suite did not, because it
+     * settled before the second cycle.
+     */
+    expect(replace).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the bootstrap query in place so it cannot refetch-loop', async () => {
+    fetchMock.mockResolvedValue(userResponse());
+    const { queryClient } = renderProvider();
+    await waitFor(() => {
+      expect(screen.getByTestId('status')).toHaveTextContent('authenticated');
+    });
+
+    queryClient.setQueryData(['practice', 'history'], { sessions: ['secret'] });
+
+    act(() => {
+      notifyUnauthenticated();
+    });
+
+    // Other users' data goes; the session query stays, because its 401 is what
+    // makes the status read `unauthenticated` instead of flipping to `loading`.
+    await waitFor(() => {
+      expect(queryClient.getQueryData(['practice', 'history'])).toBeUndefined();
+    });
+    expect(queryClient.getQueryState(['session', 'current-user'])).toBeDefined();
   });
 
   it('survives a burst of parallel 401s', async () => {
