@@ -1,39 +1,45 @@
 # Context — resume here
 
-**Last session:** 12 August 2026. Frontend build-order steps 0, 1-5 and 6 closed.
+**Last session:** 12 August 2026. Frontend build-order steps 0-8 closed, and the
+build blocker (open item 33) turned out to be the Windows host, not Next.
 Read `PROGRESS.md` §2 for the full picture; this file is the 30-second version.
 
 ## Current task
 
-Frontend. The data layer, the shared components, the CI gates and i18n are done.
-**Next: build-order steps 7-8 — wire the auth and onboarding screens to the live
-client.** They are still presentational: they prevent default, set a local
-"preview complete" message, and call nothing.
+**Next: build-order step 9 — the Foxy chat UI on `useFoxyStream`.** The hook and
+its seven §7 cases are already done and tested; only the UI is missing. Steps
+10-13 (practice, progress, parent, billing) follow; both dashboards still render
+fixtures.
 
 ## Key decisions from this session
 
-- `GET /api/v1/auth/me` is the session bootstrap. `/me/profile` cannot be — a
-  parent gets 403 and an un-onboarded student 404, and neither carries the role.
-- No `proxy.ts` cookie check. The session cookie is host-bound to the API, so the
-  Next server never sees it; a presence check would bounce every signed-in user.
-- Backend contracts are GENERATED into `frontend/src/lib/api/generated/` and
-  committed. Run `npm run contracts:sync` after any backend contract change or
-  the drift test fails.
+- **Build in the container, not on Windows.** `docker build -f frontend/Dockerfile`
+  produces `.next/standalone`; `docker run -p 3000:3000` then serves it for
+  Playwright and Lighthouse. Nothing in the app was ever broken.
+- **Field errors come from the generated request schemas.** The wire envelope is
+  `{ error: { code, message } }` and drops `details`, so no field is named on a
+  400 — validating with the backend's own copied schema is the only route to
+  §5.6's "map onto the form", and the rules cannot drift.
+- **A 401 from `POST /auth/login` is a credential verdict, not an expired
+  session.** `ApiError` carries the request path so `providers.tsx` can tell them
+  apart; without it a wrong password cleared the query cache.
 
 ## Next steps
 
-1. Steps 7-8: mutations for signup/login/verify/reset and onboarding, 400 field
-   errors onto `FormField`, honour `?next=` after sign-in.
-2. Step 9: the Foxy chat UI on top of `useFoxyStream` (the hook and its seven
-   §7 cases are already done and tested).
-3. Still blocked on the owner: `LLM_API_KEY`, a git remote (CI has never run),
-   and confirming the Foxy caps. See `PROGRESS.md` §2.
+1. Step 9 — the Foxy chat UI.
+2. Items 41-43: the bundle gate reads a manifest Next 16.3 no longer emits; LCP
+   is ~370 ms over budget on two auth screens; four dashboard baselines are stale
+   and need a human before re-recording.
+3. Still blocked on the owner: `LLM_API_KEY`, **GitHub Actions billing** (every
+   run is `startup_failure`, account-level), and confirming the Foxy caps.
 
 ## Gotchas that cost time
 
-- `next build` dies at worker teardown on Windows (open item 33). `--webpack`
-  fails identically, so the bundler is ruled out. No `.next/standalone/` locally.
+- Piping a long build or test run through `tail` throws away the error that
+  matters. Write the full log to a file, then grep it.
 - Never export a value from a `'use client'` module and read it on the server —
   it does not arrive as a string. That silently broke the language cookie read.
 - An async server component nested inside another cannot be rendered in a test.
   One `await` per tree; pass the translator down.
+- `frontend/.gitattributes` now forces LF. Without it the generated contracts
+  check out as CRLF on Windows and the drift test calls every file stale.
