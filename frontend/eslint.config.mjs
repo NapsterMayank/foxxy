@@ -193,7 +193,7 @@ const config = [
     },
   },
   {
-    ignores: ['.next/**', 'coverage/**', 'node_modules/**', 'playwright-report/**', 'test-results/**'],
+    ignores: ['.next/**', '.next-from-image/**', 'coverage/**', 'node_modules/**', 'playwright-report/**', 'test-results/**'],
   },
 ];
 

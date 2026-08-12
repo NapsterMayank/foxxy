@@ -25,9 +25,31 @@
    *
    * Every value below is checked against `--surface` and against white at
    * WCAG AA by `tests/e2e`'s contrast pass, in both themes.
+   *
+   * ---------------------------------------------------------------------------
+   * AND AGAINST ITS OWN 10% TINT, WHICH IS THE CASE THAT ACTUALLY FAILED.
+   *
+   * The badges are `bg-<tone>/10 text-<tone>` — the tone on a tint of itself,
+   * not on `--surface`. That pairing was never in the sentence above, and the
+   * first browser run against a production build found it: `--success` at
+   * `21 128 61` clears white at 5.02:1 and its own tint at 4.38:1, under the
+   * 4.5:1 floor. Every "Strong evidence" label on both dashboards was a serious
+   * WCAG AA violation while the token it was built from looked compliant.
+   *
+   * Darkened to `22 101 52` — 6.14:1 on the tint, 7.13:1 on white. The tint
+   * moves with the token, so both figures are computed from the new value
+   * rather than assumed from the old one.
    */
-  --success: 21 128 61;
-  --warning: 161 98 7;
+  --success: 22 101 52;
+  /*
+   * Darkened for the same reason as `--success`, and found by the same
+   * arithmetic rather than by another browser run: `161 98 7` is 4.92:1 on
+   * white and 4.32:1 on its own tint. `--danger` (5.45:1) and `--info`
+   * (5.72:1) already clear it and are left alone — the failure is not "all
+   * tones are too light", it is the two that sat just above the floor on
+   * white and just below it on the tint.
+   */
+  --warning: 133 77 14;
   --danger: 185 28 28;
   --info: 29 78 216;
 

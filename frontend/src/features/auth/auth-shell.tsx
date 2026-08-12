@@ -50,7 +50,19 @@ export function AuthShell({
         sign-in form cannot reach a preference stored on their profile — so the
         cookie-backed switch has to be on the unauthenticated screens too.
       */}
-      <header className="flex items-center justify-between gap-3">
+      {/*
+        `flex-wrap`, AND IT IS LOAD-BEARING AT 360px.
+
+        The wordmark, the language switch and "Change role" total 378px on a
+        360px viewport — the first browser run against a production build
+        measured the document scrolling 18px sideways on every auth screen.
+        Horizontal overflow on a phone is the defect a desktop review never
+        sees, and this is the narrowest viewport the product supports.
+
+        Wrapping rather than shrinking: the two controls are a language switch
+        and a navigation link, and neither survives being truncated.
+      */}
+      <header className="flex flex-wrap items-center justify-between gap-3">
         <Link
           className="rounded-full px-3 py-2 text-lg font-extrabold tracking-tight text-ink focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25"
           href="/"
