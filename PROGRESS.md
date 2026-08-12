@@ -571,7 +571,7 @@ Build order from `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` section 11. **Steps 0
 | Streaming | `src/features/foxy/` | `fetch` + `ReadableStream`, frames reassembled across chunk boundaries, unknown frame types ignored. **All seven cases in plan §7 are tests.** The bubble is created lazily on the first token, which is what makes "error before any token" an error state instead of an empty bubble |
 | Tokens | `tailwind.config.ts` + `globals.css` | The scales are REPLACED, not extended, so an off-scale value does not exist. Tailwind is silent about that — it emits nothing and the element renders with no padding — so `architecture/spacing-scale-only` turns it into a build failure. It found five real breakages on the existing screens the moment it was switched on |
 
-**Frontend tests: 10 → 236 unit and 28 end-to-end.** Type-check, lint, coverage floors, contract sync, deployable isolation and the whole browser suite are green.
+**Frontend tests at the close of step 6: 10 → 236 unit and 28 end-to-end** (252 and 32 after steps 7-8). Type-check, lint, coverage floors, contract sync, deployable isolation and the whole browser suite are green.
 
 ### The CI gates — §10.7, closed 12 August 2026
 
@@ -585,7 +585,7 @@ Build order from `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` section 11. **Steps 0
 | Coverage floors, per area (§10.5) | ✅ removed the primitives test → `components/ui` failed at 71% against 90% |
 | Contrast, WCAG AA, **both themes** | ✅ lightened `--muted` → both dashboards failed |
 | Visual regression | ✅ changed the parent `--brand` → the parent screenshot failed |
-| Bundle budgets — 180 kB route, 120 kB shared, gzipped | 🟡 **arithmetic only** — ten unit tests over a synthetic `.next`. Never run against a real build: `next build` dies at worker teardown here (item 33) |
+| Bundle budgets — 180 kB route, 120 kB shared, gzipped | ❌ **BROKEN, found 12 August once a real build existed.** It reads `.next/app-build-manifest.json`, which Next 16.3 does not emit. The ten unit tests pass against a synthetic `.next` the script itself defines. Item 41 |
 | LCP ≤ 2.5s · TBT ≤ 200ms, throttled 4G | ⬜ **NOT PROVEN.** Config and CI step exist; needs a completed build and a CI run |
 | axe · type check · feature-boundary isolation | pre-existing, not deliberately broken this session |
 

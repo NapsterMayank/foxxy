@@ -2,11 +2,11 @@
 
 **Last verified:** 12 August 2026  
 **Scope:** product application in `frontend/` and public marketing application in `website/`  
-**Status:** the data layer is live — the product makes real, typed, credentialed API calls. Screens are still presentational; CMS and production content approval remain pending
+**Status:** build-order steps 0-8 closed. Auth and onboarding call the live backend; the remaining screens (Foxy chat, practice, progress, parent, billing) are still fixtures. The production build runs in the container — see "The build blocker is gone" below. CMS and production content approval remain pending
 
 ## Build-order step 0 and step 6 — 12 August 2026
 
-Build-order steps 0, 1-5 and 6 are closed. **Tests 10 → 236 unit and 28 end-to-end.**
+Build-order steps 0, 1-5 and 6 are closed. **Tests 10 → 236 unit and 28 end-to-end at this point** — 252 and 32 after steps 7-8, below.
 
 | Piece | Files | What is load-bearing |
 |---|---|---|
@@ -32,10 +32,10 @@ Build-order steps 0, 1-5 and 6 are closed. **Tests 10 → 236 unit and 28 end-to
 | Visual regression | `playwright test` | ✅ changed the parent `--brand` → screenshot failed |
 | axe, zero serious or critical | `playwright test` | pre-existing |
 | No user-facing string literals (JSX text · `aria-label` · `alt` · `placeholder` · `title`) | `npm run lint` | ✅ probe component with both → 2 errors |
-| Bundle budgets — 180 kB route, 120 kB shared | `npm run check:bundle` | 🟡 arithmetic only, over a synthetic `.next`; never run against a real build |
-| LCP ≤ 2.5s · TBT ≤ 200ms, throttled 4G | `npm run check:lighthouse` | ⬜ never executed |
+| Bundle budgets — 180 kB route, 120 kB shared | `npm run check:bundle` | ❌ **BROKEN — 12 August.** It reads `.next/app-build-manifest.json`, which Next 16.3 does not emit; `APP_BUILD_MANIFEST` is gone from the framework's constants. Its ten unit tests pass against a SYNTHETIC `.next` the script's own author defined, so the shape was never checked against a build. Root item 41 |
+| LCP ≤ 2.5s · TBT ≤ 200ms, throttled 4G | `npm run check:lighthouse` | ✅ **RUN — 12 August, and two URLs failed.** `/` passes; `/login?role=student` 2870 ms and `/onboarding?role=student` 2873 ms against 2500 ms. TBT and CLS pass everywhere. Root item 42 |
 
-**Why two gates are unproven.** Both need a completed production build. `next build` dies at worker teardown on this machine (root `PROGRESS.md` open item 33) and CI has never run at all.
+**Both build-dependent gates now execute** — see "The build blocker is gone" below. `next build` was never the problem; a Windows host was. Running them for the first time is what exposed the broken bundle gate and the LCP failures, neither of which was visible while they could not run.
 
 **Visual baselines are per platform.** The committed ones are `win32`. The first Linux CI run writes its own, and those must be committed from that run's artifact before the gate means anything in CI.
 
@@ -151,7 +151,7 @@ The optimized production server was queried directly. `/`, all five secondary la
 
 ## Still blocked by backend/database contracts
 
-1. Auth forms are still presentational: no login, signup, verification-resend or reset call is wired to the client yet. **The current-user bootstrap now exists** (`GET /api/v1/auth/me`) and the session context consumes it.
+1. ✅ **Auth forms wired — 12 August 2026, build-order steps 7-8.** Login, signup, verify, resend, forgot, reset and both onboarding roles all call the backend. See "Build-order steps 7-8" below.
 2. ~~`/student` and `/parent` are public preview routes~~ — **both route groups are now behind `SessionGate`**, which reads the session context, redirects an unauthenticated visitor with `?next=`, and refuses the wrong role. The authoritative check remains the API's, on every request.
 3. ~~The future browser API client must send `credentials: 'include'`~~ — **it does, on every request, and a test asserts it.** The API must still use credentialed CORS with an explicit product origin, never `*`; `CORS_READ_ORIGINS`/`CORS_WRITE_ORIGINS` must name the deployed product origin.
 4. Onboarding values, parent/child linking, progress evidence and dashboard activity do not persist yet — the screens are not wired to the client.
@@ -176,7 +176,87 @@ The optimized production server was queried directly. `/`, all five secondary la
 2. ✅ ~~Add one credentialed API client and wire current-user behavior~~ — done; the auth FORMS still need wiring to it.
 3. ✅ ~~Protect role layouts with session/role handling~~ — `SessionGate` on both route groups. Preview fixtures still need replacing screen by screen.
 4. ✅ ~~Close the CI gates (§10.7)~~ — **twelve exist, eight proven by deliberate breakage.** Bundle budgets (arithmetic only) and Lighthouse (never executed) stay unproven until `next build` completes on a machine here and CI runs at all. **The build environment must set `NEXT_PUBLIC_API_URL`** — `lib/config/env.ts` throws without it, deliberately, and will fail a CI build that forgets it.
-5. `components/ui` primitives and `components/patterns`, then the auth screens onto the live client.
+5. ✅ ~~`components/ui` primitives and `components/patterns`, then the auth screens onto the live client~~ — **done 12 August 2026.** Six primitives and nine patterns (92 tests), then build-order steps 7-8: signup, login, verify, resend, forgot, reset, student onboarding and the parent link-code claim, all through the typed client. See "Steps 7-8" below.
 6. Implement the marketing CMS/editor preview and independent deployment pipeline.
 7. Complete i18n, legal content, approved assets and launch-content review.
 8. Build the Foxy chat UI on top of `useFoxyStream`, then practice, progress, parent reporting and billing.
+
+## Build-order steps 7-8 — auth and onboarding on the live client, 12 August 2026
+
+**Tests 236 → 252 unit, 28 → 32 end-to-end. Every gate green.**
+
+The screens made no requests. They now call the backend through the typed client,
+validate with the backend's own generated schemas, and map every §5.6 treatment
+onto copy that exists in both dictionaries.
+
+| Screen | Endpoint |
+|---|---|
+| Login | `POST /auth/login` — seeds `sessionKeys.currentUser`, then `?next=` or the role home |
+| Signup | `POST /auth/signup` — success line, no auto-navigation; the address is unverified |
+| Verify | `GET /auth/verify?token=` read from the URL, plus resend |
+| Forgot · Reset | `POST /auth/forgot-password` · `POST /auth/reset-password`, token from the URL |
+| Onboarding (student) | `POST /me/onboarding` |
+| Onboarding (parent) | `POST /links/submit` — the link starts `pending` and grants nothing |
+
+### Six contract mismatches, each of which would have failed against every backend build
+
+1. Login posted `identifier`; `loginRequestSchema` has `email`.
+2. Signup collected a name and enforced 8 characters; the contract takes
+   `{email, password, role}` and requires 10.
+3. **Verify asked for a six-digit code. That endpoint has never existed** —
+   verification is a link token. The screen had no path to success.
+4. Onboarding offered English and Social Science; `SUBJECTS` is
+   `['mathematics','science']`. Both would have written a subject with no chapters,
+   no questions and no corpus, met as an empty practice screen rather than an error.
+5. Parent onboarding collected a name nothing stores, and posted nowhere.
+6. `?next=` was honoured verbatim — `//evil.example` is protocol-relative, so an
+   open redirect on the screen where a password was just typed.
+
+### Three defects in that same work, found by re-reading it rather than by a test
+
+- `noValidate` disarmed the terms checkbox — the browser had been enforcing it.
+- The post-login redirect read `?role=`, which anyone can type: a student opening
+  `/login?role=parent` was sent to a route their own session gate refuses.
+- "Remember me" promised something no request could carry; `loginRequestSchema` is
+  `{email, password}` and nothing varies session lifetime.
+
+### Two decisions worth knowing before touching these screens
+
+- **Field errors come from the generated request schema, not from the 400.**
+  `toClientPayload()` sends `{ error: { code, message } }` and drops `details`, so
+  no field is named on the wire (D-344).
+- **A 401 from `POST /auth/login` is a credential verdict, not an expired session.**
+  `ApiError` carries the request path so `providers.tsx` can tell them apart (D-345).
+
+## The build blocker is gone — 12 August 2026
+
+`next build` never had anything wrong with it; a Windows host did. The same source
+builds cleanly in `frontend/Dockerfile` and produces `.next/standalone` (D-348).
+
+```bash
+docker build -f Dockerfile -t foxxy/frontend:local \
+  --build-arg NEXT_PUBLIC_API_URL=http://localhost:4000 .
+docker run -d --name foxxy-fe -p 3000:3000 foxxy/frontend:local
+npx playwright test                              # 26/26; reuses the running server
+npx lhci autorun --collect.startServerCommand="" # LCP/TBT/CLS
+```
+
+**The first browser run against a production build found four real defects:**
+`npm ci` refused to install on Linux (D-350); `--success` and `--warning` failed
+WCAG AA on their own 10% tint (D-349); every auth screen scrolled sideways at 360px;
+and the bundle-budget gate reads `app-build-manifest.json`, which Next 16.3 no longer
+emits — its ten unit tests pass against a synthetic build.
+
+**Visual baselines went 8 → 24.** The suite had been watching only the two dashboards,
+neither of which anyone was changing. Login, signup and both onboarding roles are now
+covered at two languages and two breakpoints.
+
+### Still open here
+
+| | |
+|---|---|
+| Bundle-budget gate | Measures a file Next 16.3 does not emit (root item 41) |
+| LCP | 2870 ms on `/login`, 2873 ms on `/onboarding`, against 2500 ms. One run, developer hardware — a signal, not the verdict (root item 42) |
+| 4 dashboard baselines | Stale: first production renders plus the token change. Need a human before re-recording (root item 43) |
+| Hindi | Engineering-quality, not native-reviewed — including the ~20 strings added in this step |
+| Steps 9-13 | Foxy chat UI, practice, progress, parent, billing. Both dashboards still render fixtures |

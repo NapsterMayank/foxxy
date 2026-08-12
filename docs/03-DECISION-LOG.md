@@ -6553,3 +6553,119 @@ every contrast assertion in the file would be half a check.
 hinting and anti-aliasing genuinely differ. The committed baselines are `win32`. The
 first Linux CI run writes its own, and they must be committed from that run's artifact
 before the gate means anything in CI.
+
+### D-342 · The Dialog is hand-written rather than native `<dialog>`
+
+jsdom implements neither `showModal()` nor the top layer, so a native modal's focus
+trap could only ever be tested against a polyfill — and the trap IS the component.
+A test that exercises a polyfill proves the polyfill works.
+
+**Decision:** hand-write the dialog, with an explicit focus trap, a restore-focus-on-close
+step and an Escape handler, all of which the test suite drives directly. Revisit when
+the test environment implements the top layer, not before.
+
+### D-343 · A rejected `onConfirm` must not escape `ConfirmDialog`
+
+Found by the component suite in the same session that wrote it. A confirm handler that
+rejected left an unhandled promise rejection — a console error in the user's browser,
+under a dialog that had silently re-enabled itself with no explanation of why nothing
+happened.
+
+**Decision:** the dialog awaits the handler inside a `try`/`finally`, re-enables in the
+`finally`, and lets the rejection reach the caller's own error boundary rather than the
+window. A destructive action that fails must say so; re-enabling a button is not a message.
+
+### D-344 · Field errors come from the generated request schema, not from the 400
+
+§5.6 requires a 400 to "map onto the form, never a page-level error". THE BACKEND CANNOT
+SUPPLY THAT MAPPING. `AppError.toClientPayload()` sends `{ error: { code, message } }`
+and deliberately drops `details`, so a validation failure arrives as one prose sentence
+with no field attached to it.
+
+**Decision:** validate with the GENERATED request schema before the request goes out, and
+map `(field, Zod issue)` onto a dictionary key. The schema is the backend's own, copied by
+`contracts:sync` and drift-tested, so the rules are identical by construction rather than
+by discipline. A 400 that survives it means client and server have drifted — a defect, not
+a typo — and renders as a form-level message.
+
+**Rejected:** extending the wire envelope with per-field details. That is a backend
+contract change to solve a problem the frontend already has the information to solve, and
+it would put user-facing prose on the wire, which §5.6 forbids rendering anyway.
+
+### D-345 · A 401 from `POST /auth/login` is a credential verdict, not an expired session
+
+`identity.service.ts` answers a wrong address and a wrong password identically, with
+`UnauthenticatedError` — 401 `UNAUTHENTICATED`, the same status and the same code as an
+expired cookie. `providers.tsx` routes every 401 into `notifyUnauthenticated()`, so a
+wrong password cleared the query cache and reported a sign-out on the sign-in screen.
+
+**Decision:** `ApiError` carries the request path, and the 401 handler skips
+`authPaths.login`. The path is the only thing that distinguishes the two cases; status,
+code and body are identical by design. The constant lives in `lib/api/paths.ts` because
+`providers.tsx` is app-level infrastructure and must not import a feature to learn a path.
+
+### D-346 · `?next=` is untrusted, and "starts with /" is not the check
+
+`?next=` arrives in a URL anyone can send to anyone. `//evil.example/login` starts with
+a slash and is protocol-relative — a browser reads it as another origin. On the one
+screen where a password has just been typed, that is an open redirect.
+
+**Decision:** honour only a value that starts with `/` and does NOT start with `//`.
+Tested against `//`, `https://`, `javascript:` and null.
+
+### D-347 · The verify screen has no code field, because no code endpoint exists
+
+The presentational screen asked for a six-digit verification code. Verification is
+`GET /api/v1/auth/verify?token=` and always has been: an opaque token in the link the
+signup email carries. There has never been an endpoint that accepts a six-digit code.
+
+**Decision:** the screen reads the token from the URL that opened it, verifies once
+(guarded by a ref, because React double-invokes effects in development and verification
+CONSUMES the token — the second call would paint "expired" over a success), and offers
+the resend affordance §5.6 requires. Its only input is an email address, because
+`/auth/resend-verification` needs one and the person holding a dead link is not signed in.
+
+### D-348 · Build in the container; a Windows-host build is not the target
+
+Open item 33 recorded `next build` dying at worker teardown (`kill EPERM`) on Windows,
+with the bundler ruled out and the worker pool named as the next avenue. The next avenue
+was neither.
+
+**Decision:** stop treating a Windows-host build as the target. `frontend/Dockerfile`
+already builds on `node:22-bookworm-slim`; the same source compiles cleanly there and
+produces `.next/standalone` — the artefact item 33 recorded as never written. Extract
+`.next` from the `build` stage with `docker create` + `docker cp` for the bundle gate,
+and `docker run -p 3000:3000` for Playwright and Lighthouse.
+
+**What it cost to not do this sooner:** the browser suite had never run. The first run
+found two colour tokens failing WCAG AA, horizontal overflow on every auth screen at
+360px, and a bundle gate measuring a file the framework no longer emits.
+
+### D-349 · Colour tokens are checked against their own tint, not only against the surface
+
+The token block asserted every tone against `--surface` and against white. The badges are
+`bg-<tone>/10 text-<tone>` — a tone on a 10% tint of ITSELF — and that pairing was in no
+assertion. `--success` measured 5.02:1 on white and 4.38:1 on its tint; `--warning` 4.92:1
+and 4.32:1. Every "Strong evidence" label on both dashboards was a serious WCAG AA
+violation while the tokens looked compliant.
+
+**Decision:** darken to `22 101 52` (6.14:1) and `133 77 14` (5.90:1), and state the tint
+case in the token block so the next person adding a tone knows which pairings matter.
+`--danger` (5.45:1) and `--info` (5.72:1) already cleared it and are untouched — the fault
+was two tones sitting just above the floor on white and just below it on the tint, not a
+palette that was too light. The tint moves with the token, so both figures are computed
+from the new value rather than assumed from the old one.
+
+### D-350 · A lockfile generated on Windows cannot install on Linux
+
+`npm ci` failed in the image with EUSAGE, naming `@emnapi/core` and `@emnapi/runtime` as
+missing. Their entries were absent because the lock was generated on Windows, where the
+optional `@img/sharp` variant that pulls them in never installs — so the tree was recorded
+for one platform only. The frontend image had therefore never built anywhere, and
+`frontend-ci.yml` would have failed on the same line the first time CI ran.
+
+**Decision:** regenerate with `npm install --package-lock-only` INSIDE
+`node:22-bookworm-slim`, which is the only place the Linux-only optional dependencies
+resolve, and verify both directions — `npm ci` completes in the image, and
+`npm ci --dry-run` still resolves on Windows. Any future dependency change needs the same
+treatment; a lockfile written by a Windows `npm install` is not portable.
