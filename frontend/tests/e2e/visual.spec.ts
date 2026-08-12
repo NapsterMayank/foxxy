@@ -31,9 +31,25 @@ import { signInAs, useLanguage } from './support/session';
  * ===========================================================================
  */
 
+/**
+ * `role: null` MEANS A PUBLIC ROUTE, and signing in first would defeat the
+ * test — an authenticated visit to `/login` is a redirect, so the screen under
+ * review never renders.
+ *
+ * THE AUTH AND ONBOARDING SCREENS ARE HERE BECAUSE THEY WERE NOT. Build-order
+ * steps 7-8 replaced their bespoke fields with `FormField`, removed a control
+ * and changed the shell header, and nothing in this suite was looking at them:
+ * the list covered two dashboards, both of which still render fixtures. A gate
+ * that watches the screens nobody is changing is a gate that reports green
+ * through the whole build.
+ */
 const journeys = [
   { name: 'student-dashboard', path: '/student', role: 'student' },
   { name: 'parent-dashboard', path: '/parent', role: 'parent' },
+  { name: 'auth-login', path: '/login?role=student', role: null },
+  { name: 'auth-signup', path: '/signup?role=parent', role: null },
+  { name: 'onboarding-student', path: '/onboarding?role=student', role: null },
+  { name: 'onboarding-parent', path: '/onboarding?role=parent', role: null },
 ] as const;
 
 const languages = ['en', 'hi'] as const;
@@ -46,7 +62,7 @@ test.describe('visual regression', () => {
         page,
       }) => {
         await useLanguage(context, language);
-        await signInAs(page, journey.role);
+        if (journey.role !== null) await signInAs(page, journey.role);
         await page.goto(journey.path);
         await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 
@@ -71,7 +87,7 @@ test.describe('Hindi does not break the layout', () => {
        * symptom at 360px is a page that scrolls sideways.
        */
       await useLanguage(context, 'hi');
-      await signInAs(page, journey.role);
+      if (journey.role !== null) await signInAs(page, journey.role);
       await page.goto(journey.path);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 
@@ -100,7 +116,7 @@ test.describe('Hindi does not break the layout', () => {
 test.describe('contrast, in both themes', () => {
   for (const journey of journeys) {
     test(`${journey.name} meets WCAG AA`, async ({ page }) => {
-      await signInAs(page, journey.role);
+      if (journey.role !== null) await signInAs(page, journey.role);
       await page.goto(journey.path);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 
