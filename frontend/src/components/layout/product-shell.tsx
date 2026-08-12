@@ -1,5 +1,7 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
+import { OfflineBanner } from '@/components/patterns/offline-banner';
+import { messages } from '@/lib/i18n/messages';
 import { cx } from '@/lib/utils/cx';
 
 export interface ProductNavigationItem {
@@ -52,6 +54,14 @@ function Brand() {
 export function ProductShell({ children, navigation, roleLabel, userName }: ProductShellProps) {
   return (
     <div className="min-h-screen bg-canvas text-ink">
+      {/*
+        Plan §4: the offline banner belongs to the app shell. ABOVE the sticky
+        header rather than inside it — a notice that scrolls away is a notice
+        the person who needs it has already missed, and the audience here is
+        students on mobile data where losing the connection is ordinary.
+      */}
+      <OfflineBanner message={messages.offline} />
+
       <header className="sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
         <div className="mx-auto flex h-16 max-w-shell items-center justify-between px-4 sm:px-6 lg:px-8">
           <Brand />

@@ -25,6 +25,8 @@ export const messages = {
     description: 'Try loading this section again. Check your entries before continuing.',
     action: 'Try again',
   },
+  /** The app-shell offline notice. Plain, and never alarming. */
+  offline: 'You are offline. Your work will not be saved until the connection returns.',
   /**
    * The session gate. Deliberately says nothing about WHY access was refused —
    * §5.6's rule for a 403 on a read is "a no-access state carrying no detail

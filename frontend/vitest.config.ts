@@ -79,6 +79,14 @@ export default defineConfig({
         'src/features/*/*.tsx': COMPONENT_FLOOR,
         'src/features/*/components/**': COMPONENT_FLOOR,
         'src/components/layout/**': COMPONENT_FLOOR,
+        /*
+         * Patterns are held at the PRIMITIVE floor, not the component one, and
+         * the plan's table does not name them either way. They are shared
+         * infrastructure: a defect in `FormField` or `ConfirmDialog` is a defect
+         * on every form and every destructive action at once, which is the same
+         * blast radius a primitive has and nothing like a feature component's.
+         */
+        'src/components/patterns/**': PRIMITIVE_FLOOR,
         'src/components/ui/**': PRIMITIVE_FLOOR,
       },
     },
