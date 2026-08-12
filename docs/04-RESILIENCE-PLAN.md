@@ -76,7 +76,7 @@ Each external port carries a maximum in-flight request count. Beyond it, calls a
 | Port | Max in flight | On overflow |
 |---|---|---|
 | `llm` | 20 | Reject with `DependencyError`; the caller degrades |
-| `embed` | 10 | Reject; retrieval falls back to keyword-only |
+| `embed` | 10 | Reject with `DependencyError`; Foxy tells the student it is unavailable |
 | `mail` | 5 | Enqueue for the worker instead |
 | `payments` | 5 | Reject; the client retries |
 
@@ -135,11 +135,29 @@ Every state transition is logged at `warn` and emitted as a metric. **A breaker 
 | Dependency down | Foxy | Practice | Progress | Parent | Auth | Billing |
 |---|---|---|---|---|---|---|
 | **LLM API** | ❌ "Unavailable, try shortly" | ✅ | ✅ | ⚠️ digest deferred, snapshot fine | ✅ | ✅ |
-| **Embeddings** | ⚠️ keyword-only retrieval, still answers | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Embeddings** | ❌ "Unavailable, try shortly" — see the note below | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Valkey** | ⚠️ no answer cache, slower | ✅ | ✅ | ✅ | ⚠️ in-process rate limits (built — D-034; link codes are unaffected, they are rows) | ✅ |
 | **Email** | ✅ | ✅ | ✅ | ⚠️ digest queued | ⚠️ verification queued, signup completes | ✅ |
 | **Payments** | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ new checkout disabled, existing plans honoured |
 | **Postgres** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+**Why the embeddings row says ❌ and not "keyword-only" (open item 25, closed 12 August 2026).**
+
+Both rows above promised a keyword-only fallback, and `retrieval.service.ts`
+raises `DependencyError` instead. §11 calls every row a testable requirement, so
+this was a stated guarantee with no test and contradicting code — and the code is
+the half that is right.
+
+The reason is arithmetic, not preference. The abstention threshold is MEASURED
+against fused scores from both halves of the pipeline: 0.029877. A sparse-only
+turn cannot reach a fused score above 1/(60+1) = 0.016393 however good the
+passage is. Serving half the pipeline under a floor calibrated for the whole one
+would abstain on everything — the exact failure §8.4 exists to prevent, dressed
+as a graceful degradation.
+
+A keyword-only mode remains possible, but it needs its own calibrated threshold
+and belongs to `foxy`, which owns what a student is told when the system is
+degraded. Until that exists, this table says what the system does.
 
 ✅ unaffected · ⚠️ degraded but useful · ❌ unavailable
 

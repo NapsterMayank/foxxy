@@ -40,8 +40,25 @@ const actionKeys: Record<AuthFormKind, TranslationKey> = {
   'reset-password': 'auth.resetAction',
 };
 
-/** Where each role lands when it has no `?next=` to honour. */
-const homeByRole: Record<AccountRole, string> = { student: '/student', parent: '/parent' };
+/**
+ * Where a sign-in lands with no `?next=` to honour.
+ *
+ * ===========================================================================
+ * THE ROLE COMES FROM THE RESPONSE, NEVER FROM `?role=`.
+ *
+ * The query parameter dresses the screen — heading and illustration — and
+ * anyone can type it. Sending a student who opened `/login?role=parent` to
+ * `/parent` hands them a route their own session gate refuses, so a correct
+ * sign-in ends in a bounce that reads as a broken login.
+ *
+ * `users.role` holds ten values (D-293), not two, so anything that is not a
+ * parent lands on the student home rather than being enumerated here — a
+ * `teacher` account arriving one day gets a real page, not a dead branch.
+ * ===========================================================================
+ */
+function homeFor(accountRole: string): string {
+  return accountRole === 'parent' ? '/parent' : '/student';
+}
 
 /**
  * ===========================================================================
@@ -135,6 +152,7 @@ export function AuthForm({ kind, role }: AuthFormProps) {
       setMismatch(false);
     }
 
+
     if (kind === 'login') {
       const parsed = loginRequestSchema.safeParse({
         email: read('email'),
@@ -143,9 +161,9 @@ export function AuthForm({ kind, role }: AuthFormProps) {
       if (!parsed.success) return setState({ ...EMPTY, fields: fieldIssues(parsed.error) });
 
       loginMutation.mutate(parsed.data, {
-        onSuccess: () => {
+        onSuccess: (data) => {
           const next = safeNextPath(searchParams.get('next'));
-          router.replace(next ?? homeByRole[role]);
+          router.replace(next ?? homeFor(data.user.role));
         },
         onError: (error) => {
           failWith(error, true);
@@ -160,7 +178,30 @@ export function AuthForm({ kind, role }: AuthFormProps) {
         password: read('password'),
         role: read('role'),
       });
-      if (!parsed.success) return setState({ ...EMPTY, fields: fieldIssues(parsed.error) });
+
+      /*
+       * THE TERMS BOX IS CHECKED IN JAVASCRIPT BECAUSE THE FORM IS `noValidate`.
+       *
+       * It carries `required`, and that attribute did the work while the form
+       * relied on browser validation. `noValidate` is deliberate — the browser's
+       * bubbles are untranslated, unstyled and announce nothing useful, and
+       * every other rule here comes from the contract — but switching it on
+       * silently disarmed the one control the browser was enforcing. A consent
+       * gate that stops gating is worse than no gate: it still looks present.
+       *
+       * REPORTED ALONGSIDE THE FIELD ERRORS, not before them. Bailing early on
+       * the checkbox hides every other problem until it is ticked, so a form
+       * with three faults is fixed in three rounds instead of one.
+       */
+      const termsMissing = data.get('terms') === null;
+      if (!parsed.success || termsMissing) {
+        setState({
+          fields: parsed.success ? {} : fieldIssues(parsed.error),
+          formMessage: termsMissing ? t('auth.errorTermsRequired') : null,
+          successMessage: null,
+        });
+        return;
+      }
 
       signupMutation.mutate(parsed.data, {
         onSuccess: () => {
@@ -270,11 +311,18 @@ function LoginFields({
       <FormField error={error('password')} label={t('auth.passwordLabel')} required>
         <Input autoComplete="current-password" name="password" type="password" />
       </FormField>
-      <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-        <label className="inline-flex items-center gap-2 text-muted">
-          <input className="h-4 w-4 accent-brand" name="remember" type="checkbox" />
-          {t('auth.rememberLabel')}
-        </label>
+
+      {/*
+        THE "REMEMBER ME" CHECKBOX IS GONE, NOT MOVED.
+
+        `loginRequestSchema` is `{ email, password }` and nothing in the
+        identity module reads a remember flag or varies the session lifetime —
+        so the box was a promise about how long the sign-in lasts that nothing
+        could keep. Ticking it and untucking it produced the same request. A
+        control that silently does nothing is worse than an absent one: it is
+        the reason somebody does not tick it again next time.
+      */}
+      <div className="flex justify-end text-sm">
         <Link
           className="font-semibold text-brand hover:underline"
           href={`/forgot-password?role=${role}`}

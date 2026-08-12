@@ -90,6 +90,38 @@ describe('client-side validation', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  /*
+   * THE FORM IS `noValidate`, so the `required` attribute on the terms box
+   * enforces nothing. The browser used to do it; turning its validation off
+   * disarmed the one control whose rule lived there rather than in a contract.
+   */
+  it('will not create an account with the terms box unticked', () => {
+    render(<AuthForm kind="signup" role="student" />);
+
+    typeInto('Email address', 'learner@example.com');
+    typeInto('Password', 'a-long-enough-password');
+    typeInto('Confirm password', 'a-long-enough-password');
+    fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+    expect(
+      screen.getByText('Accept the Terms and the Privacy Policy to create an account.'),
+    ).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  /* Three faults must be fixable in one round, not three. */
+  it('reports the terms and the field errors together', () => {
+    render(<AuthForm kind="signup" role="student" />);
+
+    typeInto('Email address', 'not-an-email');
+    fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+    expect(screen.getByText('Enter a valid email address.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Accept the Terms and the Privacy Policy to create an account.'),
+    ).toBeInTheDocument();
+  });
+
   it('catches a confirmation mismatch before the schema sees anything', () => {
     render(<AuthForm kind="signup" role="student" />);
 
@@ -137,6 +169,36 @@ describe('sign-in', () => {
     await waitFor(() => {
       expect(replace).toHaveBeenCalledWith('/parent');
     });
+  });
+
+  /*
+   * THE DESTINATION COMES FROM THE RESPONSE, NOT FROM `?role=`.
+   *
+   * Anyone can open `/login?role=parent`. A student who does, and signs in
+   * correctly, would be sent to a route their own session gate refuses — a
+   * successful sign-in ending in a bounce that reads as a broken login.
+   */
+  it('ignores ?role= and uses the role the account actually has', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { user: profile })); // a student
+
+    render(<AuthForm kind="login" role="parent" />); // dressed as parent
+    typeInto('Email address', 'learner@example.com');
+    typeInto('Password', 'a-long-enough-password');
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }));
+
+    await waitFor(() => {
+      expect(replace).toHaveBeenCalledWith('/student');
+    });
+  });
+
+  /*
+   * `loginRequestSchema` is `{ email, password }`, and nothing in the identity
+   * module reads a remember flag or varies the session lifetime. The checkbox
+   * promised something no request could carry.
+   */
+  it('offers no remember-me control, because no request can carry one', () => {
+    render(<AuthForm kind="login" role="student" />);
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
   });
 
   /*

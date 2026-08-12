@@ -109,24 +109,19 @@ export const en = {
     forgotDescription: 'Enter your email and we will send password reset instructions.',
     resetEyebrow: 'Account recovery',
     resetTitle: 'Choose a new password',
-    resetDescription: 'Use at least eight characters and keep your password private.',
+    resetDescription: 'Use at least 10 characters and keep your password private.',
 
-    identifierLabel: 'Email or mobile number',
     emailLabel: 'Email address',
     passwordLabel: 'Password',
     newPasswordLabel: 'New password',
     confirmPasswordLabel: 'Confirm password',
     confirmNewPasswordLabel: 'Confirm new password',
-    nameLabel: 'Full name',
-    codeLabel: 'Six-digit verification code',
     accountTypeLabel: 'Account type',
-    rememberLabel: 'Remember me',
     forgotLink: 'Forgot password?',
     termsLabel: 'I agree to the Terms and Conditions and Privacy Policy.',
 
     loginAction: 'Sign in',
     signupAction: 'Create account',
-    verifyAction: 'Verify email',
     forgotAction: 'Send reset link',
     resetAction: 'Save new password',
     waitAction: 'Please wait…',
@@ -144,6 +139,7 @@ export const en = {
     errorEmailInvalid: 'Enter a valid email address.',
     errorPasswordTooShort: 'Use at least 10 characters.',
     errorPasswordTooLong: 'Use at most 200 characters.',
+    errorTermsRequired: 'Accept the Terms and the Privacy Policy to create an account.',
 
     /* FORM-LEVEL MESSAGES, one per §5.6 treatment the auth screens can meet. */
     errorInvalidCredentials: 'That email and password do not match an account.',
@@ -172,11 +168,6 @@ export const en = {
     footerHaveAccount: 'Already have an account?',
     footerSignIn: 'Sign in',
 
-    previewLoading: 'Preview: the request is taking longer than usual.',
-    previewError: 'Preview: review your details and try again.',
-    previewRateLimited: 'Preview: too many attempts. Please wait before trying again.',
-    previewDependency: 'Preview: this service is temporarily unavailable.',
-    previewSuccess: 'Preview: your request was accepted.',
   },
 
   onboarding: {
@@ -193,11 +184,9 @@ export const en = {
     languageLabel: 'Preferred language',
     subjectsLabel: 'Subjects to begin with',
     gradeOption: 'Grade {grade}',
-    parentNameLabel: 'Your name',
     consentLabel: 'I confirm that I am the parent or legal guardian responsible for this child.',
     linkCodeLabel: 'Child invitation code',
     linkCodeHint: 'Your child generates this code in their account.',
-    relationshipLabel: 'Your relationship',
     action: 'Save and continue',
 
     subjectOption: {

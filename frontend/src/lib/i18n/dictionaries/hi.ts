@@ -119,24 +119,19 @@ export const hi: Dictionary = {
     forgotDescription: 'अपना ईमेल दर्ज करें, हम पासवर्ड रीसेट करने के निर्देश भेजेंगे।',
     resetEyebrow: 'खाता पुनःप्राप्ति',
     resetTitle: 'नया पासवर्ड चुनें',
-    resetDescription: 'कम से कम आठ अक्षर रखें और अपना पासवर्ड गोपनीय रखें।',
+    resetDescription: 'कम से कम 10 अक्षर रखें और अपना पासवर्ड गोपनीय रखें।',
 
-    identifierLabel: 'ईमेल या मोबाइल नंबर',
     emailLabel: 'ईमेल पता',
     passwordLabel: 'पासवर्ड',
     newPasswordLabel: 'नया पासवर्ड',
     confirmPasswordLabel: 'पासवर्ड दोहराएँ',
     confirmNewPasswordLabel: 'नया पासवर्ड दोहराएँ',
-    nameLabel: 'पूरा नाम',
-    codeLabel: 'छह अंकों का सत्यापन कोड',
     accountTypeLabel: 'खाते का प्रकार',
-    rememberLabel: 'मुझे याद रखें',
     forgotLink: 'पासवर्ड भूल गए?',
     termsLabel: 'मैं नियम व शर्तों और गोपनीयता नीति से सहमत हूँ।',
 
     loginAction: 'साइन इन करें',
     signupAction: 'खाता बनाएँ',
-    verifyAction: 'ईमेल सत्यापित करें',
     forgotAction: 'रीसेट लिंक भेजें',
     resetAction: 'नया पासवर्ड सहेजें',
     waitAction: 'कृपया प्रतीक्षा करें…',
@@ -148,6 +143,7 @@ export const hi: Dictionary = {
     errorEmailInvalid: 'सही ईमेल पता दर्ज करें।',
     errorPasswordTooShort: 'कम से कम 10 अक्षर रखें।',
     errorPasswordTooLong: 'अधिकतम 200 अक्षर रखें।',
+    errorTermsRequired: 'खाता बनाने के लिए नियम व शर्तें और गोपनीयता नीति स्वीकार करें।',
 
     errorInvalidCredentials: 'यह ईमेल और पासवर्ड किसी खाते से मेल नहीं खाते।',
     errorRateLimited: 'बहुत बार कोशिश हुई। थोड़ी देर बाद फिर कोशिश करें।',
@@ -174,11 +170,6 @@ export const hi: Dictionary = {
     footerHaveAccount: 'पहले से खाता है?',
     footerSignIn: 'साइन इन करें',
 
-    previewLoading: 'झलक: अनुरोध में सामान्य से अधिक समय लग रहा है।',
-    previewError: 'झलक: अपनी जानकारी जाँचकर फिर कोशिश करें।',
-    previewRateLimited: 'झलक: बहुत अधिक कोशिशें। कुछ देर बाद फिर प्रयास करें।',
-    previewDependency: 'झलक: यह सेवा अभी अस्थायी रूप से उपलब्ध नहीं है।',
-    previewSuccess: 'झलक: आपका अनुरोध स्वीकार कर लिया गया।',
   },
 
   onboarding: {
@@ -195,11 +186,9 @@ export const hi: Dictionary = {
     languageLabel: 'पसंदीदा भाषा',
     subjectsLabel: 'किन विषयों से शुरू करें',
     gradeOption: 'कक्षा {grade}',
-    parentNameLabel: 'आपका नाम',
     consentLabel: 'मैं पुष्टि करता/करती हूँ कि मैं इस बच्चे का अभिभावक या कानूनी संरक्षक हूँ।',
     linkCodeLabel: 'बच्चे का आमंत्रण कोड',
     linkCodeHint: 'यह कोड आपका बच्चा अपने खाते में बनाता है।',
-    relationshipLabel: 'आपका रिश्ता',
     action: 'सहेजें और आगे बढ़ें',
 
     subjectOption: {
