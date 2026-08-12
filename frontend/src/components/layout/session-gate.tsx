@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, type ReactNode } from 'react';
-import { messages } from '@/lib/i18n/messages';
+import { useT } from '@/lib/i18n/i18n-provider';
 import { LOGIN_PATH, useSession } from '@/lib/session/session-provider';
 
 /**
@@ -55,10 +55,10 @@ export type GuardedRole = 'student' | 'parent';
  * applications. `loading` is the absence of an answer; only `unauthenticated`
  * is an answer.
  */
-function SessionSkeleton() {
+function SessionSkeleton({ label }: { label: string }) {
   return (
     <div aria-busy="true" aria-live="polite" className="mx-auto w-full max-w-shell px-4 py-12">
-      <span className="sr-only">{messages.session.checking}</span>
+      <span className="sr-only">{label}</span>
       <div className="h-bar w-full max-w-prose rounded-md bg-line" />
       <div className="mt-6 grid gap-6 sm:grid-cols-2">
         <div className="h-panel rounded-card bg-line" />
@@ -68,16 +68,16 @@ function SessionSkeleton() {
   );
 }
 
-function NoAccess() {
+function NoAccess({ t }: { t: ReturnType<typeof useT> }) {
   return (
     <div className="mx-auto w-full max-w-prose px-4 py-12 text-center">
-      <h1 className="text-2xl font-bold text-ink">{messages.session.noAccess.title}</h1>
-      <p className="mt-4 text-base text-muted">{messages.session.noAccess.description}</p>
+      <h1 className="text-2xl font-bold text-ink">{t('session.noAccessTitle')}</h1>
+      <p className="mt-4 text-base text-muted">{t('session.noAccessDescription')}</p>
       <Link
         className="mt-8 inline-flex min-h-control min-w-control items-center justify-center rounded-full bg-brand px-6 py-3 text-base font-semibold text-brand-fg transition-surface duration-micro hover:bg-brand-strong focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/40"
         href={LOGIN_PATH}
       >
-        {messages.session.noAccess.action}
+        {t('session.noAccessAction')}
       </Link>
     </div>
   );
@@ -88,6 +88,7 @@ export function SessionGate({
   children,
 }: Readonly<{ role: GuardedRole; children: ReactNode }>) {
   const { status, user } = useSession();
+  const t = useT();
   const router = useRouter();
   const pathname = usePathname();
 
@@ -123,8 +124,10 @@ export function SessionGate({
     }
   }, [isSignedOut, pathname, router, user, wrongRoleWithHome]);
 
-  if (status === 'loading' || isSignedOut || wrongRoleWithHome) return <SessionSkeleton />;
-  if (user === null || user.role !== role) return <NoAccess />;
+  if (status === 'loading' || isSignedOut || wrongRoleWithHome) {
+    return <SessionSkeleton label={t('session.checking')} />;
+  }
+  if (user === null || user.role !== role) return <NoAccess t={t} />;
 
   return <>{children}</>;
 }

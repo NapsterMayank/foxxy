@@ -2,6 +2,8 @@ import Link from 'next/link';
 import { AuthForm, type AuthFormKind } from '@/features/auth/auth-form';
 import type { AccountRole, PreviewState } from '@/features/auth/auth-fixtures';
 import { AuthShell } from '@/features/auth/auth-shell';
+import { getServerT } from '@/lib/i18n/server';
+import type { TranslationKey, Translator } from '@/lib/i18n/translate';
 
 interface AuthScreenProps {
   kind: AuthFormKind;
@@ -9,41 +11,61 @@ interface AuthScreenProps {
   role: AccountRole;
 }
 
-const copy: Record<AuthFormKind, { description: string; eyebrow: string; title: string }> = {
+/**
+ * The dictionary keys for each kind of auth screen.
+ *
+ * A TABLE rather than string building (`auth.${kind}Title`): a computed key is
+ * a key the compiler cannot check, and `TranslationKey` exists precisely so a
+ * typo fails the build instead of rendering an empty heading.
+ */
+const copyKeys: Record<
+  AuthFormKind,
+  { description: TranslationKey; eyebrow: TranslationKey; title: TranslationKey }
+> = {
   login: {
-    eyebrow: 'Welcome back',
-    title: 'Sign in to continue',
-    description: 'Use the account details connected to your learning space.',
+    eyebrow: 'auth.loginEyebrow',
+    title: 'auth.loginTitle',
+    description: 'auth.loginDescription',
   },
   signup: {
-    eyebrow: 'Join Alfanumrik',
-    title: 'Create your account',
-    description: 'Start with the essentials. Learning preferences come next.',
+    eyebrow: 'auth.signupEyebrow',
+    title: 'auth.signupTitle',
+    description: 'auth.signupDescription',
   },
   verify: {
-    eyebrow: 'One quick check',
-    title: 'Verify your email',
-    description: 'Enter the six-digit code sent to your email address.',
+    eyebrow: 'auth.verifyEyebrow',
+    title: 'auth.verifyTitle',
+    description: 'auth.verifyDescription',
   },
   'forgot-password': {
-    eyebrow: 'Account recovery',
-    title: 'Reset your password',
-    description: 'Enter your email and we will send password reset instructions.',
+    eyebrow: 'auth.forgotEyebrow',
+    title: 'auth.forgotTitle',
+    description: 'auth.forgotDescription',
   },
   'reset-password': {
-    eyebrow: 'Account recovery',
-    title: 'Choose a new password',
-    description: 'Use at least eight characters and keep your password private.',
+    eyebrow: 'auth.resetEyebrow',
+    title: 'auth.resetTitle',
+    description: 'auth.resetDescription',
   },
 };
 
-function Footer({ kind, role }: { kind: AuthFormKind; role: AccountRole }) {
+/**
+ * The role-specific sign-in headings are WHOLE SENTENCES, not "Sign in as a" +
+ * role. Hindi does not put the role where English does, and a sentence
+ * assembled from fragments is untranslatable by construction.
+ */
+const loginTitleByRole: Record<AccountRole, TranslationKey> = {
+  student: 'auth.loginTitleStudent',
+  parent: 'auth.loginTitleParent',
+};
+
+function Footer({ kind, role, t }: { kind: AuthFormKind; role: AccountRole; t: Translator }) {
   if (kind === 'login') {
     return (
       <>
-        New here?{' '}
+        {t('auth.footerNewHere')}{' '}
         <Link className="font-semibold text-brand hover:underline" href={`/signup?role=${role}`}>
-          Create an account
+          {t('auth.footerCreate')}
         </Link>
       </>
     );
@@ -51,24 +73,26 @@ function Footer({ kind, role }: { kind: AuthFormKind; role: AccountRole }) {
 
   return (
     <>
-      Already have an account?{' '}
+      {t('auth.footerHaveAccount')}{' '}
       <Link className="font-semibold text-brand hover:underline" href={`/login?role=${role}`}>
-        Sign in
+        {t('auth.footerSignIn')}
       </Link>
     </>
   );
 }
 
-export function AuthScreen({ kind, preview, role }: AuthScreenProps) {
-  const content = copy[kind];
-  const title = kind === 'login' ? `${content.title} as a ${role}` : content.title;
+export async function AuthScreen({ kind, preview, role }: AuthScreenProps) {
+  const t = await getServerT();
+  const keys = copyKeys[kind];
+  const title = kind === 'login' ? t(loginTitleByRole[role]) : t(keys.title);
 
   return (
     <AuthShell
-      description={content.description}
-      eyebrow={content.eyebrow}
-      footer={<Footer kind={kind} role={role} />}
+      description={t(keys.description)}
+      eyebrow={t(keys.eyebrow)}
+      footer={<Footer kind={kind} role={role} t={t} />}
       role={role}
+      t={t}
       title={title}
     >
       <AuthForm kind={kind} preview={preview} role={role} />

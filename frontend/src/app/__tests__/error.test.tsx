@@ -1,4 +1,5 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent,  screen } from '@testing-library/react';
+import { renderClient as render } from '@test/setup/render';
 import { describe, expect, it, vi } from 'vitest';
 import ErrorPage from '@/app/error';
 

@@ -48,6 +48,56 @@ const architecturePlugin = {
       },
     },
     /**
+     * NO USER-FACING STRING LITERALS — plan §8, and a §10.7 CI gate.
+     *
+     * "No literal user-facing string in a component. Ever. Enforced by an
+     * ESLint rule rejecting string literals in JSX text nodes."
+     *
+     * Without it, translation coverage is a thing somebody remembers, and the
+     * failure is invisible to everybody working in English: one English
+     * sentence in the middle of a Hindi screen, on the screen nobody reviewed
+     * in Hindi.
+     *
+     * IT ALSO COVERS FOUR PROPS, which the plan's wording does not name and
+     * which are every bit as user-facing: `aria-label` and `title` are read
+     * aloud, `placeholder` is read on screen, and `alt` is the whole content
+     * for somebody who cannot see the image. An untranslated `aria-label` is a
+     * screen reader switching language mid-sentence.
+     *
+     * PUNCTUATION AND SYMBOLS PASS. `·`, `→`, `↓`, `*` and digits carry no
+     * language, and routing them through a dictionary would add keys nobody
+     * translates while making the markup harder to read.
+     */
+    'no-literal-jsx-text': {
+      meta: {
+        type: 'problem',
+        messages: {
+          text: 'User-facing text "{{text}}" must come from the dictionary — see lib/i18n.',
+          prop: '"{{prop}}" is read by users or screen readers; take it from the dictionary.',
+        },
+      },
+      create(context) {
+        // At least one letter in any script. Digits and symbols alone are fine.
+        const hasWords = /\p{L}/u;
+        const translatableProps = new Set(['aria-label', 'alt', 'placeholder', 'title']);
+
+        return {
+          JSXText(node) {
+            const value = String(node.value).trim();
+            if (value.length === 0 || !hasWords.test(value)) return;
+            context.report({ node, messageId: 'text', data: { text: value.slice(0, 40) } });
+          },
+          JSXAttribute(node) {
+            const name = typeof node.name.name === 'string' ? node.name.name : '';
+            if (!translatableProps.has(name)) return;
+            const value = staticClassName(node);
+            if (value === null || !hasWords.test(value)) return;
+            context.report({ node, messageId: 'prop', data: { prop: name } });
+          },
+        };
+      },
+    },
+    /**
      * THE SILENT HALF OF A CLOSED SCALE — plan §9.1.
      *
      * `tailwind.config.ts` REPLACES the spacing scale rather than extending it,
@@ -139,6 +189,7 @@ const config = [
       'architecture/no-cross-feature-imports': 'error',
       'architecture/semantic-tailwind-only': 'error',
       'architecture/spacing-scale-only': 'error',
+      'architecture/no-literal-jsx-text': 'error',
     },
   },
   {

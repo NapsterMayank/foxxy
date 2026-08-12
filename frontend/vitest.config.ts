@@ -34,6 +34,9 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': new URL('./src', import.meta.url).pathname,
+      // Test-only helpers. Not under `src/`, so they never reach a bundle and
+      // never count towards the coverage floors they support.
+      '@test': new URL('./tests', import.meta.url).pathname,
     },
   },
   test: {

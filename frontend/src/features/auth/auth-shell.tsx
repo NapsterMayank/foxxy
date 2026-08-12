@@ -1,9 +1,29 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
+import { LanguageSwitch } from '@/components/patterns/language-switch';
 import type { AccountRole } from '@/features/auth/auth-fixtures';
+import type { Translator } from '@/lib/i18n/translate';
+
+/**
+ * The frame every auth screen sits in.
+ *
+ * A SERVER COMPONENT that reads the dictionary itself rather than taking every
+ * string as a prop. The alternative — threading `changeRoleLabel`, the two
+ * wordmark halves and the rest down from `AuthScreen` — makes the caller
+ * responsible for strings it does not render, and each new element in the frame
+ * adds a prop to a component that should not have to change at all.
+ */
 
 interface AuthShellProps {
   children: ReactNode;
+  /**
+   * The translator, from the ONE `await` at the top of the screen.
+   *
+   * This component used to fetch it itself, which works in Next and cannot be
+   * rendered in a test: an async component nested inside an already-awaited
+   * tree is treated as an async client component and never resolves.
+   */
+  t: Translator;
   description: string;
   eyebrow: string;
   footer?: ReactNode;
@@ -17,6 +37,7 @@ export function AuthShell({
   eyebrow,
   footer,
   role = 'student',
+  t,
   title,
 }: AuthShellProps) {
   return (
@@ -24,19 +45,28 @@ export function AuthShell({
       className="mx-auto flex min-h-screen max-w-shell flex-col px-4 py-6 sm:px-6 sm:py-8 lg:px-8"
       data-theme={role}
     >
-      <header className="flex items-center justify-between">
+      {/*
+        THE SWITCH IS AVAILABLE BEFORE SIGN-IN. A person who cannot read the
+        sign-in form cannot reach a preference stored on their profile — so the
+        cookie-backed switch has to be on the unauthenticated screens too.
+      */}
+      <header className="flex items-center justify-between gap-3">
         <Link
           className="rounded-full px-3 py-2 text-lg font-extrabold tracking-tight text-ink focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25"
           href="/"
         >
-          <span className="text-brand">Alfa</span>numrik
+          <span className="text-brand">{t('common.brandPrefix')}</span>
+          {t('common.brandSuffix')}
         </Link>
-        <Link
-          className="rounded-full px-3 py-2 text-sm font-semibold text-muted hover:text-ink focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25"
-          href="/"
-        >
-          Change role
-        </Link>
+        <div className="flex items-center gap-2">
+          <LanguageSwitch />
+          <Link
+            className="rounded-full px-3 py-2 text-sm font-semibold text-muted hover:text-ink focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25"
+            href="/"
+          >
+            {t('auth.changeRole')}
+          </Link>
+        </div>
       </header>
 
       <section className="mx-auto flex w-full max-w-lg flex-1 flex-col justify-center py-8 sm:py-12">
@@ -45,7 +75,11 @@ export function AuthShell({
           <h1 className="mt-3 text-3xl font-extrabold tracking-tight text-ink sm:text-4xl">{title}</h1>
           <p className="mt-3 text-base leading-7 text-muted">{description}</p>
           <div className="mt-8">{children}</div>
-          {footer ? <div className="mt-8 border-t border-line pt-6 text-center text-sm text-muted">{footer}</div> : null}
+          {footer ? (
+            <div className="mt-8 border-t border-line pt-6 text-center text-sm text-muted">
+              {footer}
+            </div>
+          ) : null}
         </div>
       </section>
     </main>

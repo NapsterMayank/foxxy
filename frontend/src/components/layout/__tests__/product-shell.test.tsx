@@ -1,6 +1,22 @@
-import { render, screen, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { screen, within } from '@testing-library/react';
+import { renderClient } from '@test/setup/render';
+import { createTranslator } from '@/lib/i18n/translate';
+import { describe, expect, it, vi } from 'vitest';
 import { ProductShell, type ProductNavigationItem } from '../product-shell';
+
+/*
+ * `getServerT` reaches for `next/headers`, which only exists inside a request.
+ * The REAL dictionary is still used — only the cookie read is replaced — so
+ * these tests assert the strings a user actually sees.
+ */
+vi.mock('@/lib/i18n/server', () => ({
+  getServerT: () => Promise.resolve(createTranslator('en')),
+  getServerLanguage: () => Promise.resolve('en'),
+}));
+
+// The shell contains the LanguageSwitch, which is a client component.
+vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
+
 
 /**
  * The application shell — plan build-order step 4.
@@ -17,22 +33,29 @@ const navigation: readonly ProductNavigationItem[] = [
   { href: '/student#progress', label: 'Progress', marker: '↗' },
 ];
 
-function renderShell() {
-  return render(
-    <ProductShell navigation={navigation} roleLabel="Student" userName="Aarav">
-      <h1>Today</h1>
-    </ProductShell>,
-  );
+/*
+ * `ProductShell` is an ASYNC SERVER COMPONENT. React's test renderer cannot
+ * mount one — `<ProductShell />` is a promise where an element is expected — so
+ * it is called and its output rendered, which is what the framework does too.
+ */
+async function renderShell(items = navigation) {
+  const element = await ProductShell({
+    children: <h1>Today</h1>,
+    navigation: items,
+    roleLabel: 'Student',
+    userName: 'Aarav',
+  });
+  return renderClient(element);
 }
 
 describe('ProductShell', () => {
-  it('renders its children', () => {
-    renderShell();
+  it('renders its children', async () => {
+    await renderShell();
     expect(screen.getByRole('heading', { level: 1, name: 'Today' })).toBeVisible();
   });
 
-  it('exposes both navigations with the same links', () => {
-    renderShell();
+  it('exposes both navigations with the same links', async () => {
+    await renderShell();
     const navs = screen.getAllByRole('navigation', { name: 'Student navigation' });
     expect(navs).toHaveLength(2);
 
@@ -45,8 +68,8 @@ describe('ProductShell', () => {
     }
   });
 
-  it('marks the current page in both navigations, and only the current one', () => {
-    renderShell();
+  it('marks the current page in both navigations, and only the current one', async () => {
+    await renderShell();
     const current = screen.getAllByRole('link', { current: 'page' });
 
     // One per navigation, and never the second item.
@@ -54,8 +77,8 @@ describe('ProductShell', () => {
     for (const link of current) expect(link).toHaveAccessibleName(/Learn/);
   });
 
-  it('gives every navigation link the 44px touch target', () => {
-    renderShell();
+  it('gives every navigation link the 44px touch target', async () => {
+    await renderShell();
     /*
      * Scoped to the navigations. The brand link in the header is a text link
      * inside a 64px-tall bar and is not held to the control minimum here — if
@@ -68,23 +91,18 @@ describe('ProductShell', () => {
     }
   });
 
-  it('labels the avatar with the person and the role rather than a bare initial', () => {
+  it('labels the avatar with the person and the role rather than a bare initial', async () => {
     // "A" read aloud tells a screen-reader user nothing.
-    renderShell();
+    await renderShell();
     expect(screen.getByRole('img', { name: 'Aarav, Student' })).toHaveTextContent('A');
   });
 
-  it('lays the mobile bar out from the number of items, not a hardcoded count', () => {
-    // Adding a fourth link must not leave three columns and an overflow.
-    const { container } = render(
-      <ProductShell
-        navigation={[...navigation, { href: '/student#next', label: 'Practice', marker: '✎' }]}
-        roleLabel="Student"
-        userName="Aarav"
-      >
-        <p>content</p>
-      </ProductShell>,
-    );
+  it('lays the mobile bar out from the number of items, not a hardcoded count', async () => {
+    // Adding a third link must not leave two columns and an overflow.
+    const { container } = await renderShell([
+      ...navigation,
+      { href: '/student#next', label: 'Practice', marker: '✎' },
+    ]);
 
     const mobileNav = container.querySelector('.mobile-product-nav');
     expect(mobileNav?.getAttribute('style')).toContain('repeat(3,');

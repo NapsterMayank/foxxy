@@ -4,6 +4,8 @@ import Link from 'next/link';
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import type { AccountRole, PreviewState } from '@/features/auth/auth-fixtures';
+import { useT } from '@/lib/i18n/i18n-provider';
+import type { TranslationKey, Translator } from '@/lib/i18n/translate';
 
 export type AuthFormKind = 'login' | 'signup' | 'verify' | 'forgot-password' | 'reset-password';
 
@@ -13,12 +15,12 @@ interface AuthFormProps {
   role: AccountRole;
 }
 
-const previewMessages: Record<Exclude<PreviewState, 'idle'>, string> = {
-  loading: 'Preview: the request is taking longer than usual.',
-  error: 'Preview: review your details and try again.',
-  'rate-limited': 'Preview: too many attempts. Please wait before trying again.',
-  'dependency-error': 'Preview: this service is temporarily unavailable.',
-  success: 'Preview: your request was accepted.',
+const previewKeys: Record<Exclude<PreviewState, 'idle'>, TranslationKey> = {
+  loading: 'auth.previewLoading',
+  error: 'auth.previewError',
+  'rate-limited': 'auth.previewRateLimited',
+  'dependency-error': 'auth.previewDependency',
+  success: 'auth.previewSuccess',
 };
 
 function Field({
@@ -58,62 +60,73 @@ function Field({
   );
 }
 
-function LoginFields({ role }: { role: AccountRole }) {
+function LoginFields({ role, t }: { role: AccountRole; t: Translator }) {
   return (
     <>
-      <Field autoComplete="username" label="Email or mobile number" name="identifier" />
-      <Field autoComplete="current-password" label="Password" name="password" type="password" />
+      <Field autoComplete="username" label={t('auth.identifierLabel')} name="identifier" />
+      <Field
+        autoComplete="current-password"
+        label={t('auth.passwordLabel')}
+        name="password"
+        type="password"
+      />
       <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
         <label className="inline-flex items-center gap-2 text-muted">
           <input className="h-4 w-4 accent-brand" name="remember" type="checkbox" />
-          Remember me
+          {t('auth.rememberLabel')}
         </label>
         <Link className="font-semibold text-brand hover:underline" href={`/forgot-password?role=${role}`}>
-          Forgot password?
+          {t('auth.forgotLink')}
         </Link>
       </div>
     </>
   );
 }
 
-function SignupFields({ role }: { role: AccountRole }) {
+function SignupFields({ role, t }: { role: AccountRole; t: Translator }) {
   return (
     <>
-      <Field autoComplete="name" label="Full name" name="name" />
-      <Field autoComplete="email" label="Email address" name="email" type="email" />
+      <Field autoComplete="name" label={t('auth.nameLabel')} name="name" />
+      <Field autoComplete="email" label={t('auth.emailLabel')} name="email" type="email" />
       <label className="block text-sm font-semibold text-ink">
-        Account type
+        {t('auth.accountTypeLabel')}
         <select
           className="mt-2 min-h-control w-full rounded-card border border-line bg-surface px-4 py-3 text-base font-normal text-ink outline-none focus:border-brand focus:ring-4 focus:ring-brand/15"
           defaultValue={role}
           name="role"
         >
-          <option value="student">Student</option>
-          <option value="parent">Parent</option>
+          <option value="student">{t('home.student.label')}</option>
+          <option value="parent">{t('home.parent.label')}</option>
         </select>
       </label>
-      <Field autoComplete="new-password" label="Password" minLength={8} name="password" type="password" />
       <Field
         autoComplete="new-password"
-        label="Confirm password"
+        label={t('auth.passwordLabel')}
+        minLength={8}
+        name="password"
+        type="password"
+      />
+      <Field
+        autoComplete="new-password"
+        label={t('auth.confirmPasswordLabel')}
         minLength={8}
         name="confirmPassword"
         type="password"
       />
       <label className="flex items-start gap-3 text-sm leading-6 text-muted">
         <input className="mt-1 h-4 w-4 shrink-0 accent-brand" name="terms" required type="checkbox" />
-        <span>I agree to the Terms and Conditions and Privacy Policy.</span>
+        <span>{t('auth.termsLabel')}</span>
       </label>
     </>
   );
 }
 
-function VerifyFields() {
+function VerifyFields({ t }: { t: Translator }) {
   return (
     <Field
       autoComplete="one-time-code"
       inputMode="numeric"
-      label="Six-digit verification code"
+      label={t('auth.codeLabel')}
       maxLength={6}
       minLength={6}
       name="code"
@@ -123,18 +136,30 @@ function VerifyFields() {
   );
 }
 
-function PasswordFields({ includeCurrentIdentifier = false }: { includeCurrentIdentifier?: boolean }) {
+function PasswordFields({
+  includeCurrentIdentifier = false,
+  t,
+}: {
+  includeCurrentIdentifier?: boolean;
+  t: Translator;
+}) {
   return (
     <>
       {includeCurrentIdentifier ? (
-        <Field autoComplete="email" label="Email address" name="email" type="email" />
+        <Field autoComplete="email" label={t('auth.emailLabel')} name="email" type="email" />
       ) : null}
       {!includeCurrentIdentifier ? (
         <>
-          <Field autoComplete="new-password" label="New password" minLength={8} name="password" type="password" />
           <Field
             autoComplete="new-password"
-            label="Confirm new password"
+            label={t('auth.newPasswordLabel')}
+            minLength={8}
+            name="password"
+            type="password"
+          />
+          <Field
+            autoComplete="new-password"
+            label={t('auth.confirmNewPasswordLabel')}
             minLength={8}
             name="confirmPassword"
             type="password"
@@ -145,15 +170,16 @@ function PasswordFields({ includeCurrentIdentifier = false }: { includeCurrentId
   );
 }
 
-const actionLabels: Record<AuthFormKind, string> = {
-  login: 'Sign in',
-  signup: 'Create account',
-  verify: 'Verify email',
-  'forgot-password': 'Send reset link',
-  'reset-password': 'Save new password',
+const actionKeys: Record<AuthFormKind, TranslationKey> = {
+  login: 'auth.loginAction',
+  signup: 'auth.signupAction',
+  verify: 'auth.verifyAction',
+  'forgot-password': 'auth.forgotAction',
+  'reset-password': 'auth.resetAction',
 };
 
 export function AuthForm({ kind, preview, role }: AuthFormProps) {
+  const t = useT();
   const [localMessage, setLocalMessage] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const isLoading = preview === 'loading';
@@ -165,13 +191,13 @@ export function AuthForm({ kind, preview, role }: AuthFormProps) {
     const confirmation = data.get('confirmPassword');
 
     if (typeof confirmation === 'string' && password !== confirmation) {
-      setPasswordError('Passwords must match.');
+      setPasswordError(t('auth.passwordMismatch'));
       setLocalMessage('');
       return;
     }
 
     setPasswordError('');
-    setLocalMessage('Preview complete. Backend integration is not connected yet.');
+    setLocalMessage(t('auth.previewComplete'));
   }
 
   return (
@@ -181,15 +207,15 @@ export function AuthForm({ kind, preview, role }: AuthFormProps) {
           className="rounded-card border border-line bg-brand-subtle p-4 text-sm leading-6 text-ink"
           role={preview === 'success' || preview === 'loading' ? 'status' : 'alert'}
         >
-          {previewMessages[preview]}
+          {t(previewKeys[preview])}
         </p>
       ) : null}
 
-      {kind === 'login' ? <LoginFields role={role} /> : null}
-      {kind === 'signup' ? <SignupFields role={role} /> : null}
-      {kind === 'verify' ? <VerifyFields /> : null}
-      {kind === 'forgot-password' ? <PasswordFields includeCurrentIdentifier /> : null}
-      {kind === 'reset-password' ? <PasswordFields /> : null}
+      {kind === 'login' ? <LoginFields role={role} t={t} /> : null}
+      {kind === 'signup' ? <SignupFields role={role} t={t} /> : null}
+      {kind === 'verify' ? <VerifyFields t={t} /> : null}
+      {kind === 'forgot-password' ? <PasswordFields includeCurrentIdentifier t={t} /> : null}
+      {kind === 'reset-password' ? <PasswordFields t={t} /> : null}
 
       {passwordError ? (
         <p className="text-sm font-semibold text-brand-strong" role="alert">
@@ -203,16 +229,16 @@ export function AuthForm({ kind, preview, role }: AuthFormProps) {
         disabled={isLoading}
         type="submit"
       >
-        {isLoading ? 'Please wait…' : actionLabels[kind]}
+        {isLoading ? t('auth.waitAction') : t(actionKeys[kind])}
       </button>
 
       {kind === 'verify' ? (
         <button
           className="min-h-control w-full rounded-full px-4 py-2 text-sm font-semibold text-brand hover:bg-brand-subtle focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25"
           type="button"
-          onClick={() => setLocalMessage('Preview complete. A new verification code would be requested here.')}
+          onClick={() => setLocalMessage(t('auth.resendComplete'))}
         >
-          Resend code
+          {t('auth.resendAction')}
         </button>
       ) : null}
 

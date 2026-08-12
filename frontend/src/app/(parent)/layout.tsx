@@ -1,18 +1,20 @@
 import type { ReactNode } from 'react';
 import { ProductShell, type ProductNavigationItem } from '@/components/layout/product-shell';
 import { SessionGate } from '@/components/layout/session-gate';
+import { getServerT } from '@/lib/i18n/server';
 
-const navigation: readonly ProductNavigationItem[] = [
-  { href: '/parent', isCurrent: true, label: 'Overview', marker: '⌂' },
-  { href: '/parent#child-summary', label: 'Child', marker: '◎' },
-  { href: '/parent#updates', label: 'Updates', marker: '•' },
-];
+export default async function ParentLayout({ children }: Readonly<{ children: ReactNode }>) {
+  const t = await getServerT();
+  const navigation: readonly ProductNavigationItem[] = [
+    { href: '/parent', isCurrent: true, label: t('shell.navOverview'), marker: '⌂' },
+    { href: '/parent#child-summary', label: t('shell.navChild'), marker: '◎' },
+    { href: '/parent#updates', label: t('shell.navUpdates'), marker: '•' },
+  ];
 
-export default function ParentLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
     <div data-theme="parent">
       <SessionGate role="parent">
-        <ProductShell navigation={navigation} roleLabel="Parent preview" userName="Ananya">
+        <ProductShell navigation={navigation} roleLabel={t('shell.parentRole')} userName="Ananya">
           {children}
         </ProductShell>
       </SessionGate>

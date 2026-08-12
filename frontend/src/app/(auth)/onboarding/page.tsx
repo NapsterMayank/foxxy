@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { parseAccountRole } from '@/features/auth/auth-fixtures';
 import { AuthShell } from '@/features/auth/auth-shell';
 import { OnboardingForm } from '@/features/onboarding/onboarding-form';
+import { getServerT } from '@/lib/i18n/server';
 
 export const metadata: Metadata = { title: 'Set up your profile' };
 
@@ -12,17 +13,15 @@ export default async function OnboardingPage({
 }) {
   const role = parseAccountRole((await searchParams).role);
   const isParent = role === 'parent';
+  const t = await getServerT();
 
   return (
     <AuthShell
-      description={
-        isParent
-          ? "Use the invitation code created in the product. Do not enter your child's personal details."
-          : 'Choose a few preferences so your learning space starts in the right place.'
-      }
-      eyebrow="Profile setup"
+      description={isParent ? t('onboarding.parentDescription') : t('onboarding.studentDescription')}
+      eyebrow={isParent ? t('onboarding.parentEyebrow') : t('onboarding.studentEyebrow')}
       role={role}
-      title={isParent ? 'Connect with your child' : 'Make learning yours'}
+      t={t}
+      title={isParent ? t('onboarding.parentTitle') : t('onboarding.studentTitle')}
     >
       <OnboardingForm role={role} />
     </AuthShell>

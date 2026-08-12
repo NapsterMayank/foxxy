@@ -1,9 +1,21 @@
-import { render, screen } from '@testing-library/react';
+import {  screen } from '@testing-library/react';
+import { renderClient as render, renderServer } from '@test/setup/render';
+import { createTranslator } from '@/lib/i18n/translate';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AuthForm, type AuthFormKind } from '../auth-form';
 import { AuthScreen } from '../auth-screen';
 import type { PreviewState } from '../auth-fixtures';
+
+/*
+ * `getServerT` reaches for `next/headers`, which only exists inside a request.
+ * The real dictionary is still used; only the cookie read is replaced.
+ */
+vi.mock('@/lib/i18n/server', () => ({
+  getServerT: () => Promise.resolve(createTranslator('en')),
+  getServerLanguage: () => Promise.resolve('en'),
+}));
+
 
 /**
  * The auth forms, across every kind and every preview state — plan §10.3,
@@ -122,20 +134,20 @@ describe('verification', () => {
 });
 
 describe('AuthScreen', () => {
-  it.each(kinds)('gives %s a level-1 heading and a link away from the dead end', (kind) => {
-    render(<AuthScreen kind={kind} preview="idle" role="student" />);
+  it.each(kinds)('gives %s a level-1 heading and a link away from the dead end', async (kind) => {
+    await renderServer(AuthScreen({ kind, preview: 'idle', role: 'student' }));
 
     expect(screen.getByRole('heading', { level: 1 })).toBeVisible();
     expect(screen.getAllByRole('link').length).toBeGreaterThan(0);
   });
 
-  it('keeps the parent role when moving between sign-in and sign-up', () => {
+  it('keeps the parent role when moving between sign-in and sign-up', async () => {
     /*
      * A parent who lands on login and taps "create an account" must not arrive
      * at a student signup. This was a real defect once — see the frontend
      * progress file's bug table.
      */
-    render(<AuthScreen kind="login" preview="idle" role="parent" />);
+    await renderServer(AuthScreen({ kind: 'login', preview: 'idle', role: 'parent' }));
 
     const signup = screen
       .getAllByRole('link')

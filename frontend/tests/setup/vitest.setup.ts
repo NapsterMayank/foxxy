@@ -1,6 +1,31 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
-import { afterEach } from 'vitest';
+import { afterEach, vi } from 'vitest';
+
+/**
+ * A NO-OP APP ROUTER, for every test that does not care about navigation.
+ *
+ * `useRouter` throws "invariant expected app router to be mounted" outside a
+ * Next tree, and shared components legitimately use it — the language switch
+ * calls `router.refresh()` so that server components re-render in the new
+ * language. Without this, adding that switch to a shell breaks every test that
+ * renders the shell, for a reason that has nothing to do with what they assert.
+ *
+ * A test that DOES care declares its own `vi.mock('next/navigation', …)`, which
+ * takes precedence over this one.
+ */
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    refresh: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+  usePathname: () => '/',
+  useSearchParams: () => new URLSearchParams(),
+}));
 
 /**
  * Unmount between tests.

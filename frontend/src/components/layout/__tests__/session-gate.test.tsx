@@ -1,4 +1,5 @@
-import { render, screen } from '@testing-library/react';
+import {  screen } from '@testing-library/react';
+import { renderClient as render } from '@test/setup/render';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { SessionState } from '@/lib/session/session-provider';
 import { SessionGate } from '../session-gate';

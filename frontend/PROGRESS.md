@@ -6,7 +6,7 @@
 
 ## Build-order step 0 and step 6 — 12 August 2026
 
-All five foundation gaps in `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` §11 step 0 are closed, plus step 6 in full. **Tests 10 → 146 unit and 24 end-to-end.**
+Build-order steps 0, 1-5 and 6 are closed. **Tests 10 → 236 unit and 28 end-to-end.**
 
 | Piece | Files | What is load-bearing |
 |---|---|---|
@@ -31,6 +31,7 @@ All five foundation gaps in `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` §11 step 
 | Contrast, WCAG AA, **both themes** | `playwright test` | ✅ lightened `--muted` → both dashboards failed |
 | Visual regression | `playwright test` | ✅ changed the parent `--brand` → screenshot failed |
 | axe, zero serious or critical | `playwright test` | pre-existing |
+| No user-facing string literals (JSX text · `aria-label` · `alt` · `placeholder` · `title`) | `npm run lint` | ✅ probe component with both → 2 errors |
 | Bundle budgets — 180 kB route, 120 kB shared | `npm run check:bundle` | 🟡 arithmetic only, over a synthetic `.next`; never run against a real build |
 | LCP ≤ 2.5s · TBT ≤ 200ms, throttled 4G | `npm run check:lighthouse` | ⬜ never executed |
 
@@ -38,7 +39,24 @@ All five foundation gaps in `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` §11 step 
 
 **Visual baselines are per platform.** The committed ones are `win32`. The first Linux CI run writes its own, and those must be committed from that run's artifact before the gate means anything in CI.
 
-**The language axis of visual regression does not exist yet and is not faked.** Three of §10.7's four axes are real — breakpoints (two Playwright projects), themes (the two route groups), journeys (the two dashboards). There is one dictionary, in English; a "Hindi" run today would screenshot the same English strings and report green for the exact property the axis exists to catch. It lands with step 5.
+**All four visual-regression axes are now real** — breakpoints (two Playwright projects), themes (the two route groups), journeys (the two dashboards) and languages (the cookie the switch writes and the server reads). A Hindi horizontal-overflow check sits beside them, because Hindi runs longer than English and every screen was laid out against the English string.
+
+## Internationalisation — build-order step 5, 12 August 2026
+
+| Piece | Where | What is load-bearing |
+|---|---|---|
+| Dictionaries | `src/lib/i18n/dictionaries/{en,hi}.ts` | English is the SHAPE; `hi: Dictionary` makes a missing Hindi key a COMPILE error rather than a silent English sentence in a Hindi screen. No `as const`, or Hindi would have to repeat the English strings to type-check |
+| Keys | `TranslationKey` in `translate.ts` | A dotted-path union over the dictionary, so `t('auth.loginTitel')` fails the build instead of rendering an empty heading |
+| Server and client | `server.ts` · `i18n-provider.tsx` | Two entry points, ONE translator. Server components cannot use hooks and most pages here are server components; making them client components to reach a hook would ship the whole dictionary to a 4G phone for static text |
+| The switch | `patterns/language-switch.tsx` | Updates the context AND calls `router.refresh()` — server components read the cookie, not the context, so without the refresh the page ends up half translated. Each language is named in itself ("English", "हिन्दी"): somebody who reads only Hindi cannot find a button labelled with an English word for their language |
+| Font | `app/layout.tsx` | Noto Sans Devanagari, `subsets: ['devanagari']`, `preload: false`. The `unicode-range` means a browser fetches it only when a Devanagari glyph is actually rendered — an English reader never downloads it |
+| Lint gate | `architecture/no-literal-jsx-text` | JSX text plus `aria-label`, `alt`, `placeholder`, `title`. Punctuation and digits pass — they carry no language |
+
+**The Hindi is not launch copy.** It is correct, plain and consistent in register, and it has not been reviewed by a native speaker. That review is a launch blocker, listed below with the other content that needs approval.
+
+### The framework trap this uncovered
+
+`LANGUAGE_COOKIE` was exported from `i18n-provider.tsx`, which carries `'use client'`. A value imported from a client module into a SERVER module does not arrive as a string — so `cookies().get(LANGUAGE_COOKIE)` looked up a client reference, found nothing, and every server render fell back to English. The symptom was `<html lang="en">` wrapping Hindi content, with a page-level cookie read (which used the literal) working perfectly a few lines away. The constant now lives in `translate.ts`, which has no directive, and a test asserts the lookup uses the literal name.
 
 ### Two defects the gates found in this session's own code
 
@@ -121,9 +139,9 @@ The optimized production server was queried directly. `/`, all five secondary la
 |---|---|---|
 | Product | `npm run typecheck` | Pass |
 | Product | `npm run lint` | Pass, zero warnings |
-| Product | `npm run gates` | Pass: type-check · lint · contract sync · isolation · **146 tests with §10.5 coverage floors** (12 August) |
+| Product | `npm run gates` | Pass: type-check · lint · contract sync · isolation · **236 tests with §10.5 coverage floors** (12 August) |
 | Product | `npm run build` | Pass: 12 generated routes; preview dashboards static |
-| Product | `npx playwright test` | Pass: **24 tests** across mobile and desktop — session gate, axe, contrast in both themes, visual regression (12 August, against the dev server; CI runs them against `next start`) |
+| Product | `npx playwright test` | Pass: **28 tests** across mobile and desktop — session gate, axe, contrast in both themes, visual regression (12 August, against the dev server; CI runs them against `next start`) |
 | Product | `npm audit --omit=dev` | Pass: 0 vulnerabilities |
 | Marketing | `npm run typecheck` | Pass |
 | Marketing | `npm run lint` | Pass, zero warnings |
@@ -148,7 +166,7 @@ The optimized production server was queried directly. `/`, all five secondary la
 4. Set real `NEXT_PUBLIC_SITE_URL` and `NEXT_PUBLIC_APP_URL` values from `website/.env.example` in build environments.
 5. Replace the labeled code-native artwork/dashboard placeholders with approved brand assets.
 6. Add approved first-party analytics or explicitly choose no analytics at launch; no tracking is present now.
-7. Complete Hindi dictionaries, language switching and user-facing-string lint enforcement.
+7. ✅ ~~Complete Hindi dictionaries, language switching and user-facing-string lint enforcement~~ — done 12 August. **The Hindi still needs a native-speaker review before launch.**
 8. Decide whether CSP is nonce-based in Next.js or owned and tested at Caddy; no static CSP was added because it could block Next.js inline bootstrap scripts.
 9. Upgrade local Node from 22.11 to the declared minimum 22.13 before strict CI/release builds.
 

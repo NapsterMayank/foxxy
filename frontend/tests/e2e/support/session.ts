@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { BrowserContext, Page } from '@playwright/test';
 
 /**
  * Session control for browser tests.
@@ -26,6 +26,19 @@ const USER_IDS: Readonly<Record<BrowserRole, string>> = {
   student: '11111111-1111-4111-8111-111111111111',
   parent: '22222222-2222-4222-8222-222222222222',
 };
+
+/**
+ * Sets the display language for a browser context.
+ *
+ * The SAME cookie the switch writes and the server reads, so a test in Hindi
+ * exercises the real path — including the server render — rather than a
+ * client-side override the deployed app never uses.
+ */
+export async function useLanguage(context: BrowserContext, language: 'en' | 'hi'): Promise<void> {
+  await context.addCookies([
+    { name: 'foxxy_lang', value: language, url: 'http://127.0.0.1:3000' },
+  ]);
+}
 
 /** Answers the bootstrap with a verified account in the given role. */
 export async function signInAs(page: Page, role: BrowserRole): Promise<void> {

@@ -1,6 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
-import { signInAs } from './support/session';
+import { signInAs, useLanguage } from './support/session';
 
 /**
  * ===========================================================================
@@ -11,17 +11,18 @@ import { signInAs } from './support/session';
  * ... the minimum that catches a Hindi string overflowing a button or a
  * parent-theme component that hard-coded purple".
  *
- * THREE OF THE FOUR AXES EXIST HERE.
+ * ALL FOUR AXES EXIST HERE.
  *   breakpoints  the two Playwright projects, 360 px and 1280 px
  *   themes       the two route groups — `data-theme` is set by the layout, so
  *                `/student` IS the purple theme and `/parent` IS the orange one
  *   journeys     the student dashboard and the parent dashboard
+ *   languages    the cookie the switch writes and the server reads
  *
- * THE LANGUAGE AXIS DOES NOT EXIST YET and is not faked. Build-order step 5
- * (i18n scaffold and both dictionaries) has not been done; there is one English
- * dictionary, so a "Hindi" run would screenshot the same English strings and
- * report a green gate for a property nothing checks. Added the day the Hindi
- * dictionary lands — see `frontend/PROGRESS.md`.
+ * THE LANGUAGE AXIS The language one landed with build-order step 5:
+ * both dictionaries are real, so a Hindi run screenshots Hindi strings and the
+ * gate can finally catch what §10.7 says it is for — "a Hindi string
+ * overflowing a button". Hindi runs longer than English, and the shell, the
+ * navigation and every button were laid out against the shorter one.
  *
  * ON BASELINES. Playwright names snapshots per platform, so a baseline taken on
  * Windows is not the one Linux CI compares against — font hinting and
@@ -35,20 +36,65 @@ const journeys = [
   { name: 'parent-dashboard', path: '/parent', role: 'parent' },
 ] as const;
 
+const languages = ['en', 'hi'] as const;
+
 test.describe('visual regression', () => {
   for (const journey of journeys) {
-    test(`${journey.name} looks the way it was last reviewed`, async ({ page }) => {
+    for (const language of languages) {
+      test(`${journey.name} in ${language} looks the way it was last reviewed`, async ({
+        context,
+        page,
+      }) => {
+        await useLanguage(context, language);
+        await signInAs(page, journey.role);
+        await page.goto(journey.path);
+        await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+
+        /*
+         * Full page, not the viewport: a layout that breaks below the fold
+         * breaks for the person scrolling, and this is the only gate that would
+         * see it.
+         */
+        await expect(page).toHaveScreenshot(`${journey.name}-${language}.png`, { fullPage: true });
+      });
+    }
+  }
+});
+
+test.describe('Hindi does not break the layout', () => {
+  for (const journey of journeys) {
+    test(`${journey.name} has no horizontal overflow in Hindi`, async ({ context, page }) => {
+      /*
+       * THE FAILURE §10.7 NAMES. Hindi is longer than English almost everywhere,
+       * and every one of these screens was laid out against the English string.
+       * A button that fits "Submit" may not fit its Hindi equivalent, and the
+       * symptom at 360px is a page that scrolls sideways.
+       */
+      await useLanguage(context, 'hi');
       await signInAs(page, journey.role);
       await page.goto(journey.path);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 
-      /*
-       * Full page, not the viewport: a layout that breaks below the fold breaks
-       * for the person scrolling, and this is the only gate that would see it.
-       */
-      await expect(page).toHaveScreenshot(`${journey.name}.png`, { fullPage: true });
+      const overflows = await page.evaluate(
+        () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      );
+      expect(overflows, `${journey.path} overflows in Hindi`).toBe(false);
     });
   }
+
+  test('the page really is in Hindi, so the check above means something', async ({
+    context,
+    page,
+  }) => {
+    await useLanguage(context, 'hi');
+    await signInAs(page, 'student');
+    await page.goto('/student');
+
+    // `lang` drives screen-reader pronunciation and hyphenation, and it is set
+    // by the server from the same cookie.
+    await expect(page.locator('html')).toHaveAttribute('lang', 'hi');
+    await expect(page.getByRole('heading', { level: 1 })).toContainText('नमस्ते');
+  });
 });
 
 test.describe('contrast, in both themes', () => {

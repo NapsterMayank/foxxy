@@ -1,7 +1,9 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
+import { LanguageSwitch } from '@/components/patterns/language-switch';
 import { OfflineBanner } from '@/components/patterns/offline-banner';
-import { messages } from '@/lib/i18n/messages';
+import { getServerT } from '@/lib/i18n/server';
+import type { Translator } from '@/lib/i18n/translate';
 import { cx } from '@/lib/utils/cx';
 
 export interface ProductNavigationItem {
@@ -40,18 +42,27 @@ function NavigationLink({ href, isCurrent = false, label, marker }: ProductNavig
   );
 }
 
-function Brand() {
+/*
+ * PURE, and takes the translator as a prop. It used to `await getServerT()`
+ * itself — which works in Next and CANNOT BE RENDERED IN A TEST: an async
+ * component nested inside an already-awaited tree is treated as an async CLIENT
+ * component and never resolves. One `await` at the top of the shell, passed
+ * down, keeps every child renderable and reads the cookie once per tree.
+ */
+function Brand({ t }: { t: Translator }) {
   return (
     <Link className="inline-flex items-center gap-2 font-extrabold tracking-tight text-ink" href="/">
-      <span aria-hidden="true" className="grid size-logo place-items-center rounded-md bg-brand text-white">
-        A
+      <span aria-hidden="true" className="grid size-logo place-items-center rounded-md bg-brand text-brand-fg">
+        {t('common.brandPrefix').slice(0, 1)}
       </span>
-      <span>Alfanumrik</span>
+      <span>{t('common.brand')}</span>
     </Link>
   );
 }
 
-export function ProductShell({ children, navigation, roleLabel, userName }: ProductShellProps) {
+export async function ProductShell({ children, navigation, roleLabel, userName }: ProductShellProps) {
+  const t = await getServerT();
+
   return (
     <div className="min-h-screen bg-canvas text-ink">
       {/*
@@ -60,12 +71,14 @@ export function ProductShell({ children, navigation, roleLabel, userName }: Prod
         the person who needs it has already missed, and the audience here is
         students on mobile data where losing the connection is ordinary.
       */}
-      <OfflineBanner message={messages.offline} />
+      <OfflineBanner message={t('offline')} />
 
       <header className="sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
         <div className="mx-auto flex h-16 max-w-shell items-center justify-between px-4 sm:px-6 lg:px-8">
-          <Brand />
+          <Brand t={t} />
           <div className="flex items-center gap-3">
+            {/* Reachable from every screen, not buried in a settings page. */}
+            <LanguageSwitch className="hidden sm:inline-flex" />
             <div className="hidden text-right sm:block">
               <p className="text-sm font-semibold text-ink">{userName}</p>
               <p className="text-xs text-muted">{roleLabel}</p>
@@ -89,10 +102,8 @@ export function ProductShell({ children, navigation, roleLabel, userName }: Prod
             ))}
           </nav>
           <div className="mt-8 rounded-card border border-brand/15 bg-brand-subtle p-4">
-            <p className="text-xs font-bold uppercase tracking-widest text-brand">Preview</p>
-            <p className="mt-2 text-sm leading-6 text-muted">
-              Sample information is shown while the product services are being connected.
-            </p>
+            <p className="text-xs font-bold uppercase tracking-widest text-brand">{t('shell.previewTitle')}</p>
+            <p className="mt-2 text-sm leading-6 text-muted">{t('shell.previewNote')}</p>
           </div>
         </aside>
 

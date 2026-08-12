@@ -8,6 +8,8 @@ import {
 } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
 import { ApiError } from '@/lib/api/errors';
+import { I18nProvider } from '@/lib/i18n/i18n-provider';
+import type { LanguageCode } from '@/lib/i18n/translate';
 import { SessionProvider } from '@/lib/session/session-provider';
 import { notifyUnauthenticated } from '@/lib/session/session-events';
 
@@ -68,12 +70,22 @@ function createQueryClient(): QueryClient {
   });
 }
 
-export function Providers({ children }: Readonly<{ children: ReactNode }>) {
+export function Providers({
+  children,
+  initialLanguage,
+}: Readonly<{ children: ReactNode; initialLanguage: LanguageCode }>) {
   const [queryClient] = useState(createQueryClient);
 
+  /*
+   * ORDER: language OUTSIDE the session. The session gate's own skeleton and
+   * its no-access state are translated, and they render while the bootstrap is
+   * still in flight — so the translator has to exist before the session does.
+   */
   return (
-    <QueryClientProvider client={queryClient}>
-      <SessionProvider>{children}</SessionProvider>
-    </QueryClientProvider>
+    <I18nProvider initialLanguage={initialLanguage}>
+      <QueryClientProvider client={queryClient}>
+        <SessionProvider>{children}</SessionProvider>
+      </QueryClientProvider>
+    </I18nProvider>
   );
 }
