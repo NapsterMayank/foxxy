@@ -81,10 +81,15 @@ function retryAfterFrom(headers: Headers): number | null {
  * the same typed errors as everything else. §5.6's table is only worth having
  * if there is one path to it.
  */
-export async function toApiError(response: Response, method: ApiMethod): Promise<ApiError> {
+export async function toApiError(
+  response: Response,
+  method: ApiMethod,
+  path = '',
+): Promise<ApiError> {
   const base = {
     status: response.status,
     method,
+    path,
     retryAfterSeconds: retryAfterFrom(response.headers),
   };
 
@@ -149,10 +154,11 @@ export async function apiRequest<T>(request: ApiRequest<T>): Promise<T> {
       code: 'UNKNOWN',
       message: 'The network request failed.',
       method,
+      path: request.path,
     });
   }
 
-  if (!response.ok) throw await toApiError(response, method);
+  if (!response.ok) throw await toApiError(response, method, request.path);
 
   // Validated even when there is no body, so an endpoint that starts returning
   // one without saying so does not silently become `null` at every call site.
@@ -179,6 +185,7 @@ export async function apiRequest<T>(request: ApiRequest<T>): Promise<T> {
         .map((issue) => issue.path.join('.') || '(root)')
         .join(', ')}`,
       method,
+      path: request.path,
     });
   }
 

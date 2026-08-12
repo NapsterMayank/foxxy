@@ -65,12 +65,25 @@ export class ApiError extends Error {
   /** The request method, which the 403 fork depends on. */
   readonly method: string;
   readonly retryAfterSeconds: number | null;
+  /**
+   * The path BELOW the version prefix, e.g. `/auth/login`.
+   *
+   * Carried for exactly one reason, and it is not diagnostics: a 401 from
+   * `POST /auth/login` is A CREDENTIAL VERDICT ABOUT A SESSION THAT NEVER
+   * EXISTED, and every other 401 in the product is a session that has ended.
+   * `providers.tsx` routes the second kind into `notifyUnauthenticated()` and
+   * has nothing else to tell them apart by — status and code are identical.
+   * Without this, entering a wrong password clears the query cache and reports
+   * itself as an expired session.
+   */
+  readonly path: string;
 
   constructor(init: {
     status: number;
     code: ErrorCode | 'UNKNOWN';
     message: string;
     method: string;
+    path?: string;
     reason?: 'EMAIL_NOT_VERIFIED' | null;
     retryAfterSeconds?: number | null;
   }) {
@@ -79,6 +92,7 @@ export class ApiError extends Error {
     this.status = init.status;
     this.code = init.code;
     this.method = init.method.toUpperCase();
+    this.path = init.path ?? '';
     this.reason = init.reason ?? null;
     this.retryAfterSeconds = init.retryAfterSeconds ?? null;
   }

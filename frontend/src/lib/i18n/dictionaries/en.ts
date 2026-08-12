@@ -101,7 +101,9 @@ export const en = {
     signupDescription: 'Start with the essentials. Learning preferences come next.',
     verifyEyebrow: 'One quick check',
     verifyTitle: 'Verify your email',
-    verifyDescription: 'Enter the six-digit code sent to your email address.',
+    // The six-digit code this used to describe was never an endpoint. Backend
+    // verification is `GET /auth/verify?token=` — the link in the email.
+    verifyDescription: 'Open the link we emailed you. This page finishes the check.',
     forgotEyebrow: 'Account recovery',
     forgotTitle: 'Reset your password',
     forgotDescription: 'Enter your email and we will send password reset instructions.',
@@ -128,11 +130,41 @@ export const en = {
     forgotAction: 'Send reset link',
     resetAction: 'Save new password',
     waitAction: 'Please wait…',
-    resendAction: 'Resend code',
+    resendAction: 'Send the link again',
 
     passwordMismatch: 'Passwords must match.',
-    previewComplete: 'Preview complete. Backend integration is not connected yet.',
-    resendComplete: 'Preview complete. A new verification code would be requested here.',
+
+    /*
+     * FIELD-LEVEL MESSAGES. Chosen from the Zod issue by `authFieldMessage`,
+     * never taken from `issue.message` — those sentences live in the backend's
+     * contract and are English-only, so rendering them would put English in
+     * front of a Hindi reader through a variable the lint rule cannot see.
+     */
+    errorRequired: 'Fill this in to continue.',
+    errorEmailInvalid: 'Enter a valid email address.',
+    errorPasswordTooShort: 'Use at least 10 characters.',
+    errorPasswordTooLong: 'Use at most 200 characters.',
+
+    /* FORM-LEVEL MESSAGES, one per §5.6 treatment the auth screens can meet. */
+    errorInvalidCredentials: 'That email and password do not match an account.',
+    errorRateLimited: 'Too many attempts. Wait a moment and try again.',
+    errorRateLimitedSeconds: 'Too many attempts. Try again in {seconds} seconds.',
+    errorDegraded: 'Something we rely on is unavailable right now. Try again shortly.',
+    errorBlocked: 'That request was refused. Reload the page and try again.',
+    errorLinkInvalid: 'This link has expired or has already been used.',
+    errorGeneric: 'Something went wrong. Try again.',
+
+    /* VERIFICATION — a link, not a code. */
+    verifyMissingToken: 'This link is incomplete. Open the full link from your email.',
+    verifyPending: 'Checking your link…',
+    verifySuccess: 'Your email is verified. Sign in to continue.',
+    verifyNeeded: 'Your email address is not verified yet.',
+    resendEmailHint: 'We will send the verification link to this address again.',
+    resendSent: 'If that address needs verifying, a new link is on its way.',
+
+    forgotSent: 'If that address has an account, reset instructions are on their way.',
+    resetSuccess: 'Your new password is saved. Sign in with it now.',
+    signupSuccess: 'Account created. Check your email for the verification link.',
 
     changeRole: 'Change role',
     footerNewHere: 'New here?',
@@ -167,7 +199,21 @@ export const en = {
     linkCodeHint: 'Your child generates this code in their account.',
     relationshipLabel: 'Your relationship',
     action: 'Save and continue',
-    previewComplete: 'Preview complete. Your answers are not saved yet.',
+
+    subjectOption: {
+      mathematics: 'Mathematics',
+      science: 'Science',
+    },
+
+    errorSubjectsRequired: 'Choose at least one subject.',
+    errorGradeRequired: 'Choose your grade.',
+    errorDisplayNameRequired: 'Enter the name you want to be called.',
+    errorLinkCodeInvalid: 'A link code is 6 characters.',
+    errorLinkCodeUnknown: 'That code is not valid. Ask your child for a fresh one.',
+    errorConsentRequired: 'Confirm you are the parent or guardian to continue.',
+
+    studentSaved: 'Your profile is set up. Practice is ready when you are.',
+    linkPending: 'Request sent. Your child approves it from their account before you see anything.',
   },
 
   student: {

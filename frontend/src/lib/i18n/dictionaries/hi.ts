@@ -113,7 +113,7 @@ export const hi: Dictionary = {
     signupDescription: 'ज़रूरी जानकारी से शुरू करें। सीखने की पसंद अगले चरण में।',
     verifyEyebrow: 'एक छोटी जाँच',
     verifyTitle: 'अपना ईमेल सत्यापित करें',
-    verifyDescription: 'आपके ईमेल पर भेजा गया छह अंकों का कोड दर्ज करें।',
+    verifyDescription: 'हमने जो लिंक ईमेल किया है उसे खोलें। जाँच यहीं पूरी होगी।',
     forgotEyebrow: 'खाता पुनःप्राप्ति',
     forgotTitle: 'अपना पासवर्ड रीसेट करें',
     forgotDescription: 'अपना ईमेल दर्ज करें, हम पासवर्ड रीसेट करने के निर्देश भेजेंगे।',
@@ -140,11 +140,33 @@ export const hi: Dictionary = {
     forgotAction: 'रीसेट लिंक भेजें',
     resetAction: 'नया पासवर्ड सहेजें',
     waitAction: 'कृपया प्रतीक्षा करें…',
-    resendAction: 'कोड फिर भेजें',
+    resendAction: 'लिंक फिर से भेजें',
 
     passwordMismatch: 'दोनों पासवर्ड एक जैसे होने चाहिए।',
-    previewComplete: 'झलक पूरी हुई। सेवाएँ अभी जुड़ी नहीं हैं।',
-    resendComplete: 'झलक पूरी हुई। यहाँ नया सत्यापन कोड माँगा जाएगा।',
+
+    errorRequired: 'आगे बढ़ने के लिए यह भरें।',
+    errorEmailInvalid: 'सही ईमेल पता दर्ज करें।',
+    errorPasswordTooShort: 'कम से कम 10 अक्षर रखें।',
+    errorPasswordTooLong: 'अधिकतम 200 अक्षर रखें।',
+
+    errorInvalidCredentials: 'यह ईमेल और पासवर्ड किसी खाते से मेल नहीं खाते।',
+    errorRateLimited: 'बहुत बार कोशिश हुई। थोड़ी देर बाद फिर कोशिश करें।',
+    errorRateLimitedSeconds: 'बहुत बार कोशिश हुई। {seconds} सेकंड बाद फिर कोशिश करें।',
+    errorDegraded: 'हमारी एक सेवा अभी उपलब्ध नहीं है। थोड़ी देर बाद कोशिश करें।',
+    errorBlocked: 'यह अनुरोध अस्वीकार हुआ। पेज दोबारा लोड करके कोशिश करें।',
+    errorLinkInvalid: 'यह लिंक समाप्त हो चुका है या पहले ही उपयोग हो चुका है।',
+    errorGeneric: 'कुछ गड़बड़ हुई। फिर कोशिश करें।',
+
+    verifyMissingToken: 'यह लिंक अधूरा है। अपने ईमेल से पूरा लिंक खोलें।',
+    verifyPending: 'आपका लिंक जाँचा जा रहा है…',
+    verifySuccess: 'आपका ईमेल सत्यापित हो गया। जारी रखने के लिए साइन इन करें।',
+    verifyNeeded: 'आपका ईमेल पता अभी सत्यापित नहीं है।',
+    resendEmailHint: 'हम इसी पते पर सत्यापन लिंक दोबारा भेजेंगे।',
+    resendSent: 'यदि उस पते को सत्यापन चाहिए, तो नया लिंक भेज दिया गया है।',
+
+    forgotSent: 'यदि उस पते से खाता जुड़ा है, तो रीसेट निर्देश भेज दिए गए हैं।',
+    resetSuccess: 'आपका नया पासवर्ड सहेज लिया गया। अब उसी से साइन इन करें।',
+    signupSuccess: 'खाता बन गया। सत्यापन लिंक के लिए अपना ईमेल देखें।',
 
     changeRole: 'भूमिका बदलें',
     footerNewHere: 'यहाँ नए हैं?',
@@ -179,7 +201,21 @@ export const hi: Dictionary = {
     linkCodeHint: 'यह कोड आपका बच्चा अपने खाते में बनाता है।',
     relationshipLabel: 'आपका रिश्ता',
     action: 'सहेजें और आगे बढ़ें',
-    previewComplete: 'झलक पूरी हुई। आपके उत्तर अभी सहेजे नहीं गए हैं।',
+
+    subjectOption: {
+      mathematics: 'गणित',
+      science: 'विज्ञान',
+    },
+
+    errorSubjectsRequired: 'कम से कम एक विषय चुनें।',
+    errorGradeRequired: 'अपनी कक्षा चुनें।',
+    errorDisplayNameRequired: 'वह नाम लिखें जिससे आपको बुलाया जाए।',
+    errorLinkCodeInvalid: 'लिंक कोड 6 अक्षरों का होता है।',
+    errorLinkCodeUnknown: 'यह कोड मान्य नहीं है। अपने बच्चे से नया कोड लें।',
+    errorConsentRequired: 'आगे बढ़ने के लिए पुष्टि करें कि आप अभिभावक या संरक्षक हैं।',
+
+    studentSaved: 'आपकी प्रोफ़ाइल तैयार है। अभ्यास शुरू करने के लिए तैयार है।',
+    linkPending: 'अनुरोध भेज दिया गया। आपका बच्चा अपने खाते से मंज़ूरी देगा, तभी जानकारी दिखेगी।',
   },
 
   student: {

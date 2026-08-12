@@ -8,6 +8,7 @@ import {
 } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
 import { ApiError } from '@/lib/api/errors';
+import { authPaths } from '@/lib/api/paths';
 import { I18nProvider } from '@/lib/i18n/i18n-provider';
 import type { LanguageCode } from '@/lib/i18n/translate';
 import { SessionProvider } from '@/lib/session/session-provider';
@@ -36,9 +37,23 @@ import { notifyUnauthenticated } from '@/lib/session/session-events';
  * leaves a dead session looking alive.
  */
 function handleError(error: unknown): void {
-  if (error instanceof ApiError && error.status === 401) {
-    notifyUnauthenticated();
-  }
+  if (!(error instanceof ApiError) || error.status !== 401) return;
+
+  /*
+   * THE ONE EXCEPTION, AND IT IS NOT A SPECIAL CASE FOR CONVENIENCE.
+   *
+   * A wrong password returns 401 UNAUTHENTICATED — the same status and the same
+   * code as an expired cookie, because the backend deliberately gives a failed
+   * login one indistinguishable answer (identity.service.ts, LOGIN_FAILURE_
+   * MESSAGE, so a wrong address and a wrong password cannot be told apart).
+   *
+   * Routing it here would end a session that never began: the cache is cleared
+   * and the person is told they were signed out, on the screen where they are
+   * trying to sign in. The path is the only thing that distinguishes the two.
+   */
+  if (error.path === authPaths.login) return;
+
+  notifyUnauthenticated();
 }
 
 function createQueryClient(): QueryClient {

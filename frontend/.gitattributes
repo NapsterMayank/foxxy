@@ -1,0 +1,14 @@
+# LF everywhere, for the same reason `backend/.gitattributes` says it — and for
+# one more that is specific to this deployable.
+#
+# `src/lib/api/generated/` is a BYTE-FOR-BYTE COPY of `backend/src/shared/`, and
+# `contracts-drift.test.ts` proves it by re-running the generator with
+# `--check`. The backend forces LF; without this file, Git checks the frontend
+# copies out with CRLF on Windows and the comparison fails on line endings
+# alone — every generated file "stale", nothing actually drifted, on a developer
+# machine only. CI never saw it because a Linux checkout gives both sides LF.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary

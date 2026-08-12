@@ -1,13 +1,22 @@
 import Link from 'next/link';
+import { Suspense } from 'react';
 import { AuthForm, type AuthFormKind } from '@/features/auth/auth-form';
-import type { AccountRole, PreviewState } from '@/features/auth/auth-fixtures';
+import type { AccountRole } from '@/features/auth/auth-fixtures';
 import { AuthShell } from '@/features/auth/auth-shell';
+import { VerifyPanel } from '@/features/auth/verify-panel';
 import { getServerT } from '@/lib/i18n/server';
 import type { TranslationKey, Translator } from '@/lib/i18n/translate';
 
+/**
+ * `verify` is a SCREEN but not a FORM. It has no primary input — it reads the
+ * token out of the link that opened it — so it is a kind here and deliberately
+ * not one in `AuthFormKind`, where every member maps to a request built from
+ * controls somebody filled in.
+ */
+export type AuthScreenKind = AuthFormKind | 'verify';
+
 interface AuthScreenProps {
-  kind: AuthFormKind;
-  preview: PreviewState;
+  kind: AuthScreenKind;
   role: AccountRole;
 }
 
@@ -19,7 +28,7 @@ interface AuthScreenProps {
  * typo fails the build instead of rendering an empty heading.
  */
 const copyKeys: Record<
-  AuthFormKind,
+  AuthScreenKind,
   { description: TranslationKey; eyebrow: TranslationKey; title: TranslationKey }
 > = {
   login: {
@@ -59,7 +68,7 @@ const loginTitleByRole: Record<AccountRole, TranslationKey> = {
   parent: 'auth.loginTitleParent',
 };
 
-function Footer({ kind, role, t }: { kind: AuthFormKind; role: AccountRole; t: Translator }) {
+function Footer({ kind, role, t }: { kind: AuthScreenKind; role: AccountRole; t: Translator }) {
   if (kind === 'login') {
     return (
       <>
@@ -81,7 +90,7 @@ function Footer({ kind, role, t }: { kind: AuthFormKind; role: AccountRole; t: T
   );
 }
 
-export async function AuthScreen({ kind, preview, role }: AuthScreenProps) {
+export async function AuthScreen({ kind, role }: AuthScreenProps) {
   const t = await getServerT();
   const keys = copyKeys[kind];
   const title = kind === 'login' ? t(loginTitleByRole[role]) : t(keys.title);
@@ -95,7 +104,17 @@ export async function AuthScreen({ kind, preview, role }: AuthScreenProps) {
       t={t}
       title={title}
     >
-      <AuthForm kind={kind} preview={preview} role={role} />
+      {/*
+        THE SUSPENSE BOUNDARY IS REQUIRED, NOT DECORATIVE. Both children read
+        `useSearchParams` — `?next=` on sign-in, `?token=` on reset and verify —
+        and a client component that does so opts its nearest boundary out of
+        prerendering. Without one, the build fails on the whole route rather
+        than degrading, and the message points at the hook rather than at the
+        page that lacks the boundary.
+      */}
+      <Suspense fallback={null}>
+        {kind === 'verify' ? <VerifyPanel /> : <AuthForm kind={kind} role={role} />}
+      </Suspense>
     </AuthShell>
   );
 }

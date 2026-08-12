@@ -1,157 +1,267 @@
-import {  screen } from '@testing-library/react';
-import { renderClient as render, renderServer } from '@test/setup/render';
-import { createTranslator } from '@/lib/i18n/translate';
-import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
-import { AuthForm, type AuthFormKind } from '../auth-form';
-import { AuthScreen } from '../auth-screen';
-import type { PreviewState } from '../auth-fixtures';
-
-/*
- * `getServerT` reaches for `next/headers`, which only exists inside a request.
- * The real dictionary is still used; only the cookie read is replaced.
- */
-vi.mock('@/lib/i18n/server', () => ({
-  getServerT: () => Promise.resolve(createTranslator('en')),
-  getServerLanguage: () => Promise.resolve('en'),
-}));
-
+import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import { renderClient as render } from '@test/setup/render';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AuthForm, safeNextPath } from '@/features/auth/auth-form';
+import { ERROR_CODES } from '@/lib/api/generated/error-codes';
 
 /**
- * The auth forms, across every kind and every preview state — plan §10.3,
- * which requires loading, error and interaction coverage for each component.
+ * ===========================================================================
+ * AUTH FORMS AGAINST THE LIVE CLIENT — build-order steps 7-8.
  *
- * These screens are still presentational (the client is wired, the forms are
- * not), so what is under test is the SHAPE a real submission will inherit:
- * which fields exist, what a loading state disables, and whether a failure is
- * announced as an alert or as a status. Getting those wrong is a rewrite once
- * the network is attached; getting them right now costs one file.
+ * These replace the `?preview=` suite, which asserted that a fixture string
+ * painted a fixture banner. Every state here comes from a request: a real
+ * schema rejecting real input, or a real status code arriving at the mutation.
+ * ===========================================================================
  */
 
-const kinds: readonly AuthFormKind[] = [
-  'login',
-  'signup',
-  'verify',
-  'forgot-password',
-  'reset-password',
-];
+const replace = vi.fn();
+let search = new URLSearchParams();
 
-describe('every kind renders its own fields and its own action', () => {
-  it.each([
-    ['login', 'Sign in', ['Email or mobile number', 'Password']],
-    ['signup', 'Create account', ['Full name', 'Email address', 'Password', 'Confirm password']],
-    ['verify', 'Verify email', ['Six-digit verification code']],
-    ['forgot-password', 'Send reset link', ['Email address']],
-    ['reset-password', 'Save new password', ['New password', 'Confirm new password']],
-  ] as const)('%s asks for exactly its own fields', (kind, action, labels) => {
-    render(<AuthForm kind={kind} preview="idle" role="student" />);
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ replace, push: vi.fn() }),
+  useSearchParams: () => search,
+  usePathname: () => '/login',
+}));
 
-    expect(screen.getByRole('button', { name: action })).toBeEnabled();
-    for (const label of labels) expect(screen.getByLabelText(label)).toBeRequired();
+const fetchMock = vi.fn();
+
+function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
+    json: () => Promise.resolve(body),
+  } as unknown as Response;
+}
+
+/**
+ * ANCHORED, NOT EXACT AND NOT SUBSTRING.
+ *
+ * `FormField` renders a required marker inside the `<label>`, so the label's
+ * text is "Email address*" and an exact match finds nothing. A substring match
+ * has the opposite problem: "New password" also matches "Confirm new
+ * password". Anchoring at the start is the only form that hits exactly one.
+ */
+function typeInto(label: string, value: string): void {
+  const pattern = new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
+  fireEvent.change(screen.getByLabelText(pattern), { target: { value } });
+}
+
+beforeEach(() => {
+  replace.mockReset();
+  fetchMock.mockReset();
+  search = new URLSearchParams();
+  vi.stubGlobal('fetch', fetchMock);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+describe('client-side validation', () => {
+  /*
+   * THE REASON THIS IS CLIENT-SIDE AT ALL. The backend's error envelope is
+   * `{ error: { code, message } }` — no field is named in it — so a 400 cannot
+   * be mapped onto a control. The generated request schema can, and it is the
+   * backend's own schema, so the rules cannot drift.
+   */
+  it('shows a per-field message and sends nothing', () => {
+    render(<AuthForm kind="login" role="student" />);
+
+    typeInto('Email address', 'not-an-email');
+    typeInto('Password', 'whatever');
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(screen.getByText('Enter a valid email address.')).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('does not ask a password-reset request for a new password', () => {
-    // `forgot-password` mails a link; asking for the new password on that form
-    // trains people to type a password into a page that cannot set one.
-    render(<AuthForm kind="forgot-password" preview="idle" role="student" />);
-    expect(screen.queryByLabelText(/new password/i)).toBeNull();
+  it('rejects a password the contract would reject, with the contract’s own rule', () => {
+    render(<AuthForm kind="signup" role="student" />);
+
+    typeInto('Email address', 'learner@example.com');
+    typeInto('Password', 'short');
+    typeInto('Confirm password', 'short');
+    fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+    // 10, from `passwordSchema` — not the 8 the presentational form claimed.
+    expect(screen.getByText('Use at least 10 characters.')).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('catches a confirmation mismatch before the schema sees anything', () => {
+    render(<AuthForm kind="signup" role="student" />);
+
+    typeInto('Email address', 'learner@example.com');
+    typeInto('Password', 'a-long-enough-password');
+    typeInto('Confirm password', 'a-different-password');
+    fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+    expect(screen.getByText('Passwords must match.')).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
-describe('the preview states map onto the right announcement', () => {
-  it.each([
-    ['loading', 'status'],
-    ['success', 'status'],
-    ['error', 'alert'],
-    ['rate-limited', 'alert'],
-    ['dependency-error', 'alert'],
-  ] as const)('%s is announced as a %s', (preview, role) => {
-    /*
-     * `alert` interrupts a screen reader; `status` does not. A failure the user
-     * must act on is an alert; "your request was accepted" is not. Getting this
-     * backwards either buries an error or shouts over someone mid-sentence.
-     */
-    render(<AuthForm kind="login" preview={preview as PreviewState} role="student" />);
-    expect(screen.getByRole(role)).toHaveTextContent(/Preview:/);
+describe('sign-in', () => {
+  const profile = {
+    id: '11111111-1111-4111-8111-111111111111',
+    email: 'learner@example.com',
+    role: 'student',
+    emailVerifiedAt: '2026-08-01T00:00:00.000Z',
+    createdAt: '2026-07-01T00:00:00.000Z',
+  };
+
+  it('honours ?next= after a successful sign-in', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { user: profile }));
+    search = new URLSearchParams('next=%2Fpractice%2Fsession');
+
+    render(<AuthForm kind="login" role="student" />);
+    typeInto('Email address', 'learner@example.com');
+    typeInto('Password', 'a-long-enough-password');
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }));
+
+    await waitFor(() => {
+      expect(replace).toHaveBeenCalledWith('/practice/session');
+    });
   });
 
-  it('disables the submit button and marks the form busy while loading', () => {
-    render(<AuthForm kind="login" preview="loading" role="student" />);
+  it('falls back to the role home when there is no ?next=', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { user: { ...profile, role: 'parent' } }));
 
-    expect(screen.getByRole('button', { name: 'Please wait…' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Please wait…' }).closest('form')).toHaveAttribute(
-      'aria-busy',
-      'true',
+    render(<AuthForm kind="login" role="parent" />);
+    typeInto('Email address', 'parent@example.com');
+    typeInto('Password', 'a-long-enough-password');
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }));
+
+    await waitFor(() => {
+      expect(replace).toHaveBeenCalledWith('/parent');
+    });
+  });
+
+  /*
+   * A 401 ON THE SIGN-IN REQUEST IS A VERDICT ON WHAT WAS TYPED, and §5.6's
+   * `session-expired` treatment — correct everywhere else — would tell someone
+   * standing on the login page that they had been signed out.
+   */
+  it('reads a 401 as wrong credentials, not as an expired session', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(401, { error: { code: 'UNAUTHENTICATED', message: 'Login failed.' } }),
     );
+
+    render(<AuthForm kind="login" role="student" />);
+    typeInto('Email address', 'learner@example.com');
+    typeInto('Password', 'a-long-enough-password');
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(
+      await screen.findByText('That email and password do not match an account.'),
+    ).toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalled();
   });
 
-  it('shows nothing at all when idle', () => {
-    render(<AuthForm kind="login" preview="idle" role="student" />);
-    expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.queryByRole('status')).toBeNull();
+  it('offers the verification recovery when the address is unverified', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(403, {
+        error: { code: 'FORBIDDEN', message: 'Verify your email.', reason: 'EMAIL_NOT_VERIFIED' },
+      }),
+    );
+
+    render(<AuthForm kind="login" role="student" />);
+    typeInto('Email address', 'learner@example.com');
+    typeInto('Password', 'a-long-enough-password');
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByText('Your email address is not verified yet.')).toBeInTheDocument();
+  });
+
+  it('shows the wait when the backend rate-limits, with its own number', async () => {
+    fetchMock.mockResolvedValue(
+      // The WIRE value, `RATE_LIMIT_EXCEEDED` — not the key `RATE_LIMIT` it is
+      // reached by. A code the client does not recognise becomes `UNKNOWN` and
+      // falls to the generic message, so getting this wrong in a test is
+      // indistinguishable from getting the treatment wrong in the product.
+      jsonResponse(
+        429,
+        { error: { code: ERROR_CODES.RATE_LIMIT, message: 'Slow down.' } },
+        { 'retry-after': '45' },
+      ),
+    );
+
+    render(<AuthForm kind="login" role="student" />);
+    typeInto('Email address', 'learner@example.com');
+    typeInto('Password', 'a-long-enough-password');
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByText('Too many attempts. Try again in 45 seconds.')).toBeInTheDocument();
   });
 });
 
-describe('password confirmation', () => {
-  it('refuses a mismatch with an alert and does not report success', async () => {
-    render(<AuthForm kind="reset-password" preview="idle" role="student" />);
+describe('the recovery screens say the same thing either way', () => {
+  it('reports a sent reset without confirming the address exists', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { status: 'ok' }));
 
-    const [password, confirmation] = screen.getAllByLabelText(/password/i);
-    await userEvent.type(password as HTMLElement, 'vermillion-otter-49');
-    await userEvent.type(confirmation as HTMLElement, 'vermillion-otter-50');
-    await userEvent.click(screen.getByRole('button', { name: 'Save new password' }));
+    render(<AuthForm kind="forgot-password" role="student" />);
+    typeInto('Email address', 'nobody@example.com');
+    fireEvent.submit(screen.getByRole('button', { name: 'Send reset link' }));
 
-    expect(screen.getByRole('alert')).toHaveTextContent('Passwords must match.');
+    expect(
+      await screen.findByText('If that address has an account, reset instructions are on their way.'),
+    ).toBeInTheDocument();
   });
 
-  it('clears the mismatch once the two agree', async () => {
-    render(<AuthForm kind="reset-password" preview="idle" role="student" />);
+  it('takes the reset token from the URL, never from a control', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { status: 'ok' }));
+    search = new URLSearchParams('token=opaque-reset-token');
 
-    const [password, confirmation] = screen.getAllByLabelText(/password/i);
-    await userEvent.type(password as HTMLElement, 'vermillion-otter-49');
-    await userEvent.type(confirmation as HTMLElement, 'wrong');
-    await userEvent.click(screen.getByRole('button', { name: 'Save new password' }));
-    expect(screen.getByRole('alert')).toBeVisible();
+    render(<AuthForm kind="reset-password" role="student" />);
+    typeInto('New password', 'a-long-enough-password');
+    typeInto('Confirm new password', 'a-long-enough-password');
+    fireEvent.submit(screen.getByRole('button', { name: 'Save new password' }));
 
-    await userEvent.clear(confirmation as HTMLElement);
-    await userEvent.type(confirmation as HTMLElement, 'vermillion-otter-49');
-    await userEvent.click(screen.getByRole('button', { name: 'Save new password' }));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({
+      token: 'opaque-reset-token',
+      password: 'a-long-enough-password',
+    });
+  });
 
-    expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.getByRole('status')).toHaveTextContent(/not connected yet/);
+  it('explains a reset link that has already been used', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(404, { error: { code: 'NOT_FOUND', message: 'No such token.' } }),
+    );
+    search = new URLSearchParams('token=spent-token');
+
+    render(<AuthForm kind="reset-password" role="student" />);
+    typeInto('New password', 'a-long-enough-password');
+    typeInto('Confirm new password', 'a-long-enough-password');
+    fireEvent.submit(screen.getByRole('button', { name: 'Save new password' }));
+
+    expect(
+      await screen.findByText('This link has expired or has already been used.'),
+    ).toBeInTheDocument();
   });
 });
 
-describe('verification', () => {
-  it('offers a resend that reports back', async () => {
-    // The affordance §5.6 requires for `EMAIL_NOT_VERIFIED`: an unverified
-    // address is not a login failure, it is one click from being fixed.
-    render(<AuthForm kind="verify" preview="idle" role="student" />);
-
-    await userEvent.click(screen.getByRole('button', { name: 'Resend code' }));
-    expect(screen.getByRole('status')).toHaveTextContent(/verification code/i);
-  });
-});
-
-describe('AuthScreen', () => {
-  it.each(kinds)('gives %s a level-1 heading and a link away from the dead end', async (kind) => {
-    await renderServer(AuthScreen({ kind, preview: 'idle', role: 'student' }));
-
-    expect(screen.getByRole('heading', { level: 1 })).toBeVisible();
-    expect(screen.getAllByRole('link').length).toBeGreaterThan(0);
+/**
+ * `?next=` ARRIVES IN A URL ANYONE CAN SEND TO ANYONE.
+ *
+ * The protocol-relative case is the one a "starts with /" check waves through,
+ * and it is a full origin change — which is an open redirect on the one screen
+ * where the person has just typed their password.
+ */
+describe('safeNextPath', () => {
+  it('accepts a same-document path', () => {
+    expect(safeNextPath('/parent/child/123')).toBe('/parent/child/123');
   });
 
-  it('keeps the parent role when moving between sign-in and sign-up', async () => {
-    /*
-     * A parent who lands on login and taps "create an account" must not arrive
-     * at a student signup. This was a real defect once — see the frontend
-     * progress file's bug table.
-     */
-    await renderServer(AuthScreen({ kind: 'login', preview: 'idle', role: 'parent' }));
-
-    const signup = screen
-      .getAllByRole('link')
-      .find((link) => link.getAttribute('href')?.startsWith('/signup'));
-    expect(signup?.getAttribute('href')).toContain('role=parent');
+  it('refuses another origin, however it is spelled', () => {
+    expect(safeNextPath('//evil.example/login')).toBeNull();
+    expect(safeNextPath('https://evil.example/login')).toBeNull();
+    expect(safeNextPath('javascript:alert(1)')).toBeNull();
+    expect(safeNextPath(null)).toBeNull();
   });
 });
