@@ -1,0 +1,55 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+dist-ops/
+.next/
+*.tsbuildinfo
+
+# backup and restore-drill working directories (docker/backup writes here when
+# run outside a container; the container writes to a named volume)
+backups/
+.restore-drill/
+
+# environment
+.env
+.env.*
+!.env.example
+# `!.env.example` does NOT match `.env.prod.example` — a negation is matched
+# against the whole basename, not a suffix. `docker/.env.prod.example` was
+# therefore ignored while `ci.yml`'s infra job did
+# `cp .env.prod.example .env.prod` before validating the compose file, so the
+# ONLY gate that proves compose.prod.yml parses could never run on a clean
+# checkout. Every `*.example` is documentation by definition and is scanned for
+# credential-shaped values by `tools/scan-secrets.mjs`, so the safe rule is to
+# un-ignore all of them rather than to enumerate one more name and be wrong
+# again the next time a file is added. See D-249.
+!*.env.example
+!.env.*.example
+
+# test artefacts
+coverage/
+.vitest/
+
+# logs
+*.log
+npm-debug.log*
+logs/
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# local docker volumes (named volumes live in docker, but just in case)
+docker/data/
+
+# corpus extraction staging (large, licensed content)
+.corpus-extract/
+
+# workspace
+frontend/node_modules/
+frontend/.next/

@@ -1,0 +1,41 @@
+# -----------------------------------------------------------------------------
+# MARKETING — {$BASE_DOMAIN} and www.
+#
+# The only indexable surface. 06-FRONTEND-SEPARATION-PLAN.md: "Only
+# example.com owns indexable pages, canonical URLs, sitemap, and social
+# metadata."
+#
+# INFRASTRUCTURE-OWNED. A marketing deploy replaces the `website` CONTAINER; it
+# does not touch this file. See docker/caddy/Caddyfile.
+# -----------------------------------------------------------------------------
+
+www.{$BASE_DOMAIN} {
+	redir https://{$BASE_DOMAIN}{uri} permanent
+}
+
+{$BASE_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	reverse_proxy website:3000 {
+		transport http {
+			dial_timeout 5s
+			# ORDINARY ROUTE BUDGET. A marketing page that takes longer than 15
+			# seconds to render is already broken; holding the connection past
+			# that only converts a slow page into an exhausted proxy.
+			read_timeout 15s
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

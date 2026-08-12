@@ -1,0 +1,737 @@
+# =============================================================================
+# PRODUCTION STACK — Alfanumrik / Foxxy
+#
+# Run from the `docker/` directory:
+#     docker compose -f compose.prod.yml --env-file .env.prod config     # validate
+#     docker compose -f compose.prod.yml --env-file .env.prod up -d
+#
+# THIS FILE IS INFRASTRUCTURE-OWNED. `.github/CODEOWNERS` requires an
+# infrastructure review, and no application pipeline runs `docker compose up`
+# against the whole file — they call `docker/deploy-app.sh <app>`, which refuses
+# every service except the three application containers.
+#
+# =============================================================================
+# WHAT IS DELIBERATELY NOT HERE, AND WHY.
+#
+# The DEVELOPMENT stack (`backend/docker/compose.yml`) is untouched and stays
+# untouched. It holds an imported corpus — 137 chapters, 4,686 chunks, 2,741
+# questions — in the named volumes `foxxy_postgres_data` / `foxxy_valkey_data`.
+# Every volume below carries a DIFFERENT name (`foxxy_prod_*`), and this file
+# uses the project name `foxxy-prod`, so nothing here can bind, overwrite or
+# recreate a development container. That is not a convention; the names simply
+# do not collide.
+#
+# =============================================================================
+# TWO NETWORKS.
+#
+#   edge      caddy plus the three application containers. Internet-facing.
+#   internal  postgres, valkey, backup. `internal: true` — NO route to or from
+#             the internet, and no published ports. The database is reachable
+#             only from a container that is on this network by name.
+#
+# Postgres and Valkey publish NOTHING to the host. The most common way a
+# self-hosted database is compromised is a `ports: 5432:5432` left in from
+# development; there is no such line below, and the runbook's psql access is
+# `docker compose exec`, which needs no exposed port.
+#
+# =============================================================================
+# RESOURCE LIMITS ARE ON EVERY SERVICE, AND THEY ARE NOT DECORATION.
+#
+# 06-FRONTEND-SEPARATION-PLAN.md: "Apply CPU and memory limits to marketing/CMS
+# containers so they cannot exhaust resources reserved for the product", and
+# the verification step "Confirm exhausting marketing container limits leaves
+# product login and health endpoints responsive."
+#
+# Marketing gets the smallest budget in the stack. It is the surface with the
+# most frequent, least-reviewed deployments, and the one whose failure should
+# cost the least.
+#
+# The reservations are as important as the limits: a limit stops a container
+# taking everything, a reservation stops it being starved by one that does.
+# =============================================================================
+
+name: foxxy-prod
+
+# --- YAML anchors: repeated blocks declared once -----------------------------
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '5'
+
+# =============================================================================
+# THE CREDENTIAL BLOCK IS THE PART THAT DECIDES WHETHER PRODUCTION BOOTS AT ALL.
+#
+# `src/app/container.ts` REFUSES TO CONSTRUCT in production when a key is
+# absent — for `embed`, for `llm` and for all three Razorpay credentials —
+# because each of those has a fake adapter that is interchangeable to the type
+# system and silently wrong at runtime. That refusal is correct. What it needs
+# is for this file to actually PASS the variables: until D-250 this block ended
+# at `RESEND_API_KEY`, so `backend-api` and `backend-worker` threw inside
+# `createContainer`, exited, and were restarted forever by
+# `restart: unless-stopped`. Two containers in a crash loop read as a crash, not
+# as a missing environment variable, and the message naming the variable scrolls
+# past once every few seconds inside a restart storm.
+#
+# `${VAR:?message}` RATHER THAN `${VAR:-}` FOR EVERY REQUIRED CREDENTIAL.
+#
+# `:-` supplies an empty string, which reaches the container, fails the zod
+# `min(1)` or the composition root's null check, and produces exactly the crash
+# loop described above. `:?` makes compose ITSELF refuse: `docker compose up`
+# and `docker compose config` both stop, name the variable and create nothing.
+# That is the pre-flight — it runs before an image is pulled, and it cannot be
+# skipped, because interpolation happens for every compose invocation including
+# `deploy-app.sh`'s `up -d --no-deps`.
+#
+# The trade is deliberate and worth stating: a `.env.prod` missing a Razorpay
+# key now blocks a MARKETING deploy too, because interpolation is whole-file.
+# In production every one of these is set; a deployment where one is not is a
+# deployment that must not be shipping anything.
+#
+# The SEMANTIC checks that interpolation cannot do — a malformed
+# RAZORPAY_PLAN_IDS pair, a credential that is present but blank — are the
+# `preflight` service below.
+# =============================================================================
+x-backend-env: &backend-env
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL: postgres://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — generate one with `openssl rand -base64 32`}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+  DATABASE_SSL: ${DATABASE_SSL:-false}
+  # TLS VERIFICATION, PASSED EXPLICITLY RATHER THAN LEFT TO THE SCHEMA DEFAULT —
+  # D-238, D-256.
+  #
+  # `DATABASE_SSL` defaults to `false` here because postgres is a container on
+  # an `internal: true` network with no published port and no route out, so
+  # there is no path a listener could sit on. That is a statement about THIS
+  # topology, not about the code, and the moment an operator moves the database
+  # to a managed provider they set `DATABASE_SSL=true` — at which point these two
+  # decide whether TLS is authenticated or merely encrypted.
+  #
+  # Both are `:-` (absent when unset), so verification is ON by default and the
+  # only way to get the old `rejectUnauthorized: false` behaviour is to type the
+  # word INSECURE into `.env.prod`, where a reviewer reads it. The correct answer
+  # for a managed Postgres is DATABASE_SSL_CA, never DATABASE_SSL_INSECURE; the
+  # schema refuses both together.
+  DATABASE_SSL_CA:
+  DATABASE_SSL_INSECURE:
+  REDIS_URL: redis://valkey:6379
+  # WHERE THE MIGRATION JOURNAL IS, ABSOLUTE — D-231, D-256.
+  #
+  # The schema default is `./drizzle/migrations`, which is correct only while the
+  # process's working directory is `/app`. That is true of every command in this
+  # file today and it is a deployment fact, not a code fact: a `working_dir:`
+  # added to one service later would make the readiness check report "no
+  # migrations found" — a health endpoint lying about schema state. The Dockerfile
+  # copies `drizzle` to `/app/drizzle`, so the absolute path cannot drift with cwd.
+  DRIZZLE_MIGRATIONS_DIR: ${DRIZZLE_MIGRATIONS_DIR:-/app/drizzle/migrations}
+
+  # THE PER-PROCESS CONNECTION CEILING — D-228.
+  #
+  # Passed rather than exempted, and it did not used to be. `DATABASE_POOL_MAX`
+  # was parsed and READ BY NOTHING, so `env-contract-check.ts` exempted it on
+  # the grounds that it was "used only by migrations and scripts, not the app".
+  # Both halves of that expired: the default moved 10 -> 40, and it is now the
+  # enforced ceiling this process may hold across all four bulkhead pools
+  # (`resolvePoolSizes` scales the set down proportionally to fit it).
+  #
+  # THE TOTAL ACROSS REPLICAS IS THIS OPERATOR'S SUM and cannot be enforced
+  # from inside one process. `api` and `worker` share this block and take
+  # different role profiles from it — api 40, worker 20 at the default — so:
+  #
+  #     api_replicas x 40 + worker_replicas x 20
+  #       + headroom for psql and for a rolling deploy's OVERLAP
+  #       <= postgres `max_connections` (100 by default)
+  #
+  # One of each is 60 of 100; a rolling api deploy briefly makes that 100.
+  # Raising replica counts without raising `max_connections` presents as
+  # `FATAL: sorry, too many clients already` in every pool at once, plus a
+  # `psql` that cannot connect to diagnose it.
+  DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-40}
+  APP_URL: https://app.${BASE_DOMAIN:?BASE_DOMAIN is required — every URL and every CORS origin derives from it}
+  API_URL: https://api.${BASE_DOMAIN:?BASE_DOMAIN is required}
+  # D-082 — two lists, and write must be a subset of read or the app refuses to
+  # boot. Neither includes the marketing origin: the marketing site never calls
+  # the product API (06-FRONTEND-SEPARATION-PLAN.md).
+  CORS_READ_ORIGINS: https://app.${BASE_DOMAIN:?BASE_DOMAIN is required}
+  CORS_WRITE_ORIGINS: https://app.${BASE_DOMAIN:?BASE_DOMAIN is required}
+  SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-foxxy_session}
+  DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-11111111-1111-4111-8111-111111111111}
+
+  # WHOSE `X-Forwarded-For` THE API BELIEVES — D-227, D-256.
+  #
+  # EXACTLY ONE proxy sits in front of `backend-api` in this stack: `caddy`, and
+  # nothing else on the `edge` network can reach the API's port. So the number is
+  # 1, and it is a fact about this compose file rather than a tuning knob.
+  #
+  # Left unset, the schema's default is `trustProxy: false` — safe, and wrong
+  # here. `request.ip` would then be CADDY'S container address for every request,
+  # so signup 3/h, login 5/15min and forgot-password 3/h would all key on one
+  # shared bucket: the first few users of the hour exhaust it and everyone else
+  # is refused, while an attacker is rate-limited alongside them rather than
+  # separately. That is a limiter that is present, green, and metering the wrong
+  # thing.
+  #
+  # `TRUSTED_PROXY_CIDRS` would be preferable in general — it identifies the
+  # proxy rather than counting hops — but Docker assigns the caddy container its
+  # address from a bridge subnet that is not stable across a `docker compose
+  # down`/`up`, and a CIDR that stops matching fails OPEN back to the socket
+  # address with no error. A hop count cannot go stale that way. The schema
+  # refuses both at once, so only one appears here.
+  TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
+
+  # --- AI credentials. Boot refusals: container.ts §embed, §llm --------------
+  VOYAGE_API_KEY: ${VOYAGE_API_KEY:?VOYAGE_API_KEY is required in production — without it the deterministic embedding fake is used and every retrieval returns confident, wrong chunks with no error}
+  LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required in production — without it the scripted fake answers every student with the same canned sentence, cited, over SSE}
+  # OPTIONAL, and optional in the schema too: absent means "the adapter's own
+  # default". Passed through so a model swap is a variable rather than a deploy
+  # of new code (config.schema.ts §LLM_MODEL).
+  #
+  # ⚠️ THE BARE `KEY:` FORM IS LOAD-BEARING FOR EVERY OPTIONAL VARIABLE, and is
+  # not the same thing as `${LLM_MODEL:-}`. Measured with `docker compose config`
+  # and confirmed by running a container:
+  #
+  #     LLM_MODEL: ${LLM_MODEL:-}   ->  LLM_MODEL="" IS SET in the container
+  #     LLM_MODEL:                  ->  passed through if set, ABSENT if not
+  #
+  # These variables are `z.string().min(1).optional()`. Optional means ABSENT,
+  # and an empty string is not absent — it is a present value that fails
+  # `min(1)`. So `:-` on an optional variable turns "the operator did not set
+  # this" into a boot-blocking schema violation, which is the D-250 crash loop
+  # rebuilt out of the fix for it. The old `VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}`
+  # in this very block had that shape.
+  LLM_MODEL:
+  LLM_BASE_URL:
+
+  # --- Payments. Boot refusal: container.ts §payments ------------------------
+  # All three, together, and the refusal names which one is missing. The webhook
+  # secret is a SEPARATE secret from the API secret, set per endpoint in the
+  # Razorpay dashboard.
+  RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:?RAZORPAY_KEY_ID is required in production — without the Razorpay credentials the fake gateway grants entitlements against payments that never happened}
+  RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:?RAZORPAY_KEY_SECRET is required in production}
+  RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:?RAZORPAY_WEBHOOK_SECRET is required in production — and it is a DIFFERENT secret from RAZORPAY_KEY_SECRET, set per endpoint in the Razorpay dashboard}
+  # NOT one of container.ts's boot refusals, by its own explicit reasoning: an
+  # empty map is a loud failure at checkout rather than a silent fake. It is
+  # still required HERE, because "loud at checkout" means loud to a paying
+  # customer. The `preflight` service additionally validates its SHAPE and names
+  # the offending pair (D-253).
+  RAZORPAY_PLAN_IDS: ${RAZORPAY_PLAN_IDS:?RAZORPAY_PLAN_IDS is required — `monthly:plan_x,yearly:plan_y`. Unset, the plan map is empty and every checkout fails on a plan code it cannot resolve}
+
+  # --- Outbound mail (SMTP — Google Workspace) -------------------------------
+  # RECONCILED, AND NOW HARD-REQUIRED (`:?`) — D-226, D-254.
+  #
+  # These were `${VAR:-}` soft pass-throughs while the SMTP adapter was still
+  # being written under src/platform/mail, because guessing a name and marking it
+  # required would restart-loop production on a variable that does not exist —
+  # the D-250 defect rebuilt from the other direction. The adapter has landed
+  # (`platform/mail/smtp-mail.ts`) and `config.schema.ts` settled the names, so
+  # the guess is gone and the placeholder is retired.
+  #
+  # ⚠️ THE NAME THAT WAS WRONG: this block passed `SMTP_USERNAME`. The schema
+  # declares `SMTP_USER`. Compose would have set an unread variable and left the
+  # real one absent — `config.mail.smtpUser` null, SMTP auth impossible, every
+  # verification email and password reset undeliverable, and every probe green.
+  # Nobody would have found it by reading either file; `npm run ops:env-contract`
+  # found it by comparing them (D-255), which is the entire argument for that gate.
+  #
+  # `:?` rather than `:-` because an empty string is a PRESENT value that fails
+  # `z.string().min(1)`, and mail has no fake to fall back to that would be
+  # loud — the console adapter prints links to stdout and resolves successfully.
+  # It is the same class of silent failure as the payments fake.
+  SMTP_HOST: ${SMTP_HOST:?SMTP_HOST is required in production — without SMTP the console mail adapter prints verification and password-reset links to stdout, delivers nothing, and reports success. The whole signup funnel dies silently}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER:?SMTP_USER is required in production — the Google Workspace account the app authenticates as}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:?SMTP_PASSWORD is required in production — a Google Workspace APP PASSWORD, not the account password}
+  SMTP_FROM: ${SMTP_FROM:?SMTP_FROM is required in production — the visible From address. Separate from SMTP_USER because Workspace allows sending as an alias, and a receiving spam filter treats the two differently}
+
+  # --- Identity: the identifier-hash salt (D-221 / D-223) --------------------
+  #
+  # `sessions.ip_hash` and every IP-keyed rate-limit cache key are SHA-256
+  # digests. There are 2^32 IPv4 addresses, so an UNSALTED digest over that
+  # space is a rainbow table anybody can build in minutes — the column is
+  # pseudonymised in name only — and the identical digest appearing in both
+  # Valkey and Postgres joins a cache dump to a database dump exactly.
+  #
+  # `:-` AND NOT `:?`, deliberately, and it is the one soft default in this
+  # block that is about deployment risk rather than about a schema default.
+  # Marking it required would be correct on the merits and would RESTART-LOOP
+  # this stack on the deploy that added it, because no existing .env.prod
+  # carries it — D-250 precisely, a fix that causes the outage it was meant to
+  # prevent. Unset, the app logs `identity.ip_hash_salt_unconfigured` at WARN
+  # every boot and uses a build constant that is in the source and is not
+  # secret. Set this, confirm the warn is gone, THEN promote it to `:?`.
+  #
+  # The schema treats an empty string as absent and refuses anything under 32
+  # characters, so a half-filled value cannot pass as configured.
+  #   generate with:  openssl rand -hex 32
+  IDENTITY_IP_HASH_SALT: ${IDENTITY_IP_HASH_SALT:-}
+
+services:
+  # ===========================================================================
+  # DATA
+  # ===========================================================================
+
+  # One-shot. The backup volume is created root-owned by Docker; postgres runs
+  # as uid 999 and its `archive_command` writes into it on every WAL segment.
+  # Without this the archive fails silently-ish — postgres retries forever,
+  # WAL accumulates in pg_wal, and the disk fills. Ordering is enforced by
+  # `service_completed_successfully` below, not by hope.
+  backup-init:
+    image: alpine:3.20
+    container_name: foxxy-prod-backup-init
+    command: ['sh', '-c', 'mkdir -p /backup/wal /backup/base && chown -R 999:999 /backup']
+    volumes:
+      - backup_data:/backup
+    networks: [internal]
+    restart: 'no'
+    logging: *default-logging
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: foxxy-prod-postgres
+    restart: unless-stopped
+    depends_on:
+      backup-init:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Deterministic collation, identical to development, so ORDER BY does not
+      # change meaning between the machine a query was tested on and the one it
+      # runs on.
+      POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
+    command:
+      - postgres
+      # --- Continuous WAL archiving (04-RESILIENCE-PLAN.md §7) --------------
+      # `archive_mode=on` requires wal_level >= replica. The archive target is
+      # the SECOND volume: a backup on the same volume as the data it protects
+      # is not a backup, it is a copy that dies in the same incident.
+      #
+      # The `test ! -f` guard is mandatory, not defensive style: postgres may
+      # re-archive a segment after a crash, and an archive_command that
+      # overwrites can destroy a segment the restore chain needs.
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=test ! -f /backup/wal/%f && cp %p /backup/wal/%f
+      # Force a segment closed every 5 minutes even on a quiet database, so the
+      # recovery point objective is bounded by TIME and not by write volume. A
+      # low-traffic night must not mean an unarchived hour.
+      - -c
+      - archive_timeout=300
+      - -c
+      - max_wal_senders=3
+      - -c
+      - wal_keep_size=512MB
+      # §4 — no query runs forever. The application also sets this per pool;
+      # this is the backstop for psql sessions and for anything that connects
+      # without going through platform/db.
+      - -c
+      - statement_timeout=60s
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # THE SECOND VOLUME. Separate lifecycle, separate name, and the one thing
+      # that must be replicated off this host — see docs/runbooks/backup-restore.md.
+      - backup_data:/backup
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '2.0', memory: 2G }
+        reservations: { cpus: '0.5', memory: 1G }
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: foxxy-prod-valkey
+    restart: unless-stopped
+    # `appendonly yes` because the rate-limit counters and the session cache
+    # are cheap to lose but expensive to lose SILENTLY: an empty cache after a
+    # restart resets every rate-limit window at once.
+    command: ['valkey-server', '--appendonly', 'yes', '--save', '60', '1', '--maxmemory', '384mb', '--maxmemory-policy', 'allkeys-lru']
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks: [internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 512M }
+        reservations: { cpus: '0.1', memory: 128M }
+
+  # ===========================================================================
+  # BACKEND — one image, three commands
+  # ===========================================================================
+
+  # MIGRATIONS ARE A SEPARATE, EXPLICIT STEP. Never on boot.
+  #
+  # Under `profiles: [migrate]` it does NOT start with `up -d`; it runs only
+  # when named:
+  #     docker compose -f compose.prod.yml --profile migrate run --rm migrate
+  #
+  # Why not an entrypoint on the api container: with two api replicas, boot
+  # migration means two concurrent migrators racing on the same lock, and a
+  # failed migration becomes a crash-loop that also takes the service down. As
+  # a discrete step, a failed migration leaves the OLD version running and
+  # serving traffic, which is the whole point of the deploy order in
+  # docs/runbooks/deploy-rollback.md.
+  migrate:
+    image: ${BACKEND_IMAGE:-foxxy/backend:latest}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: foxxy-prod-migrate
+    profiles: ['migrate']
+    command: ['node', 'dist-ops/scripts/migrate.js']
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+    restart: 'no'
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 512M }
+
+  # THE PRE-FLIGHT. One-shot, no I/O, runs before anything that serves traffic.
+  #
+  # Compose interpolation (`${VAR:?}` in the env block above) already catches an
+  # ABSENT variable. This catches the cases interpolation cannot see, because to
+  # compose a value is just a string:
+  #
+  #   - a variable that is present but blank or whitespace
+  #   - a RAZORPAY_PLAN_IDS whose pairs are malformed, or which is missing a
+  #     purchasable plan code — today that silently becomes an empty map and the
+  #     first person to notice is a customer at checkout (D-253)
+  #   - anything the shared zod schema rejects, reported for EVERY variable at
+  #     once rather than one restart-loop iteration at a time
+  #
+  # It runs the SAME IMAGE and the SAME parser as the API, so it cannot pass on
+  # a configuration the API would reject — a pre-flight that reimplements the
+  # check it is standing in for is a pre-flight that can disagree with it.
+  #
+  # `service_completed_successfully` on api, worker and alerts means a failure
+  # here leaves them NOT STARTED, with one legible error, instead of three
+  # containers restart-looping. It touches no network and no database, so it
+  # does not wait on postgres and cannot be the thing that delays a recovery.
+  preflight:
+    image: ${BACKEND_IMAGE:-foxxy/backend:latest}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: foxxy-prod-preflight
+    command:
+      - node
+      - dist-ops/scripts/ops/preflight-env.js
+      # THE RAW STRING, as an argument. `process.env` is read in exactly one
+      # place in the codebase and that is enforced by lint, so the script gets
+      # the environment from the frozen `config` object — which exposes the
+      # PARSED plan map, and the parse is precisely what silently discards a
+      # malformed pair. Naming the offending entry needs the text. Interpolated
+      # from the same variable the env block above sets, so the two cannot
+      # disagree; a plan id is an identifier, not a credential, so a command
+      # line is an acceptable place for it (D-253).
+      - --razorpay-plan-ids=${RAZORPAY_PLAN_IDS:?RAZORPAY_PLAN_IDS is required}
+    environment: *backend-env
+    networks: [internal]
+    restart: 'no'
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 256M }
+
+  backend-api:
+    image: ${BACKEND_IMAGE:-foxxy/backend:latest}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: foxxy-prod-api
+    restart: unless-stopped
+    command: ['node', 'dist/main.js']
+    environment:
+      <<: *backend-env
+      PORT: '4000'
+      HOST: 0.0.0.0
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    # §12 — SIGTERM, readiness 503, 15s drain, then close. Docker's default
+    # stop grace is 10s, which would SIGKILL the process in the middle of its
+    # own drain and drop exactly the requests the drain exists to protect.
+    stop_grace_period: 30s
+    networks: [edge, internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '2.0', memory: 1G }
+        reservations: { cpus: '0.5', memory: 384M }
+
+  backend-worker:
+    image: ${BACKEND_IMAGE:-foxxy/backend:latest}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: foxxy-prod-worker
+    restart: unless-stopped
+    command: ['node', 'dist/worker-main.js']
+    environment: *backend-env
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    # §12 — the worker gets longer: it finishes its CURRENT job (up to 30s) and
+    # claims no new ones. SHUTDOWN_WORKER_TIMEOUT_MS defaults to 30000, so the
+    # grace period must exceed it or the process is killed mid-job and the job
+    # is reclaimed by the reaper — correct, but slower and noisier than a clean
+    # finish.
+    stop_grace_period: 45s
+    # §3.2 — the worker has no HTTP surface, so its liveness is a ROW:
+    # worker_heartbeats.last_beat_at. Checked by the alert evaluator, not by
+    # Docker, because Docker restarting a worker that is merely slow would
+    # abandon the job it is slow on.
+    networks: [internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 768M }
+        reservations: { cpus: '0.25', memory: 256M }
+
+  # THE THING THAT PAGES A HUMAN. 04-RESILIENCE-PLAN.md §5.
+  #
+  # Metrics land in `metrics_events` and, until this container existed, nothing
+  # read them. A circuit breaker that opens silently is a silent outage; the
+  # table made the outage RECORDED, not NOTICED.
+  #
+  # It is a separate container rather than a job inside the worker on purpose:
+  # "the worker is dead" is one of the conditions it must be able to report,
+  # and a watchdog that dies with the thing it watches reports nothing.
+  backend-alerts:
+    image: ${BACKEND_IMAGE:-foxxy/backend:latest}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: foxxy-prod-alerts
+    restart: unless-stopped
+    command:
+      - node
+      - dist-ops/scripts/ops/alert-evaluator-main.js
+      - --loop
+      - --interval-seconds=60
+      - --on-call-user-id=${ONCALL_USER_ID:?ONCALL_USER_ID is required — it must be a real users.id, the in-app alert row carries a foreign key to it}
+      - --on-call-email=${ONCALL_EMAIL:?ONCALL_EMAIL is required — an evaluator with no recipient is indistinguishable from a system that is never unhealthy}
+      # DEFAULTS TO `smtp`, NOT `console` (D-251). The previous default made the
+      # quiet outcome the automatic one: an operator who set nothing got an
+      # evaluator writing pages to stdout, which nothing reads at 3am. The loud
+      # outcome is now automatic instead — if SMTP is not wired, this container
+      # fails to start and its absence is itself the signal.
+      - --mail=${ALERT_MAIL_TRANSPORT:-smtp}
+      # THE BACKUP RULE'S ONLY SIGNAL SOURCE. Without both this flag and the
+      # read-only mount below, `producibleSignals()` omits `backup_age_hours`,
+      # the `backup_stale` rule can never fire, and "there has never been a
+      # backup" is reported exactly as "backups are fine" (D-251).
+      - --backup-dir=${ALERT_BACKUP_DIR:-/backup}
+    environment: *backend-env
+    volumes:
+      # READ-ONLY. The evaluator only ever stats file mtimes; it must never be
+      # able to write, rotate or delete a backup it is judging the age of.
+      - backup_data:/backup:ro
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    stop_grace_period: 15s
+    networks: [internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 384M }
+        reservations: { cpus: '0.1', memory: 128M }
+
+  # ===========================================================================
+  # FRONTENDS
+  # ===========================================================================
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-foxxy/frontend:latest}
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://api.${BASE_DOMAIN}
+        NEXT_PUBLIC_APP_URL: https://app.${BASE_DOMAIN}
+        NEXT_PUBLIC_MARKETING_URL: https://${BASE_DOMAIN}
+    container_name: foxxy-prod-frontend
+    restart: unless-stopped
+    # NOT on `internal`. The product frontend talks to the backend from the
+    # BROWSER, cross-origin with credentials (06-FRONTEND-SEPARATION-PLAN.md).
+    # It has no reason to reach postgres or valkey, so it cannot.
+    networks: [edge]
+    stop_grace_period: 20s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 768M }
+        reservations: { cpus: '0.25', memory: 256M }
+
+  website:
+    image: ${WEBSITE_IMAGE:-foxxy/website:latest}
+    build:
+      context: ../website
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_APP_URL: https://app.${BASE_DOMAIN}
+        NEXT_PUBLIC_MARKETING_URL: https://${BASE_DOMAIN}
+    container_name: foxxy-prod-website
+    restart: unless-stopped
+    # THE SMALLEST BUDGET IN THE STACK, and on `edge` only. Marketing has no
+    # database, no cache, no product credentials and no route to either. If it
+    # is compromised or simply loops, the blast radius is one container that
+    # serves static pages.
+    networks: [edge]
+    stop_grace_period: 15s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 384M }
+        reservations: { cpus: '0.1', memory: 128M }
+
+  # ===========================================================================
+  # EDGE
+  # ===========================================================================
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: foxxy-prod-caddy
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp' # HTTP/3
+    environment:
+      BASE_DOMAIN: ${BASE_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      # READ-ONLY, and that is layer 1 of "no application pipeline can write
+      # the proxy configuration". Caddy cannot rewrite its own config even if
+      # something inside the container tries.
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/conf.d:/etc/caddy/conf.d:ro
+      # Certificates and ACME account keys. Losing this volume means re-issuing
+      # every certificate and hitting Let's Encrypt rate limits at the worst
+      # possible moment, so it is named and it is backed up.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend-api
+      - frontend
+      - website
+    networks: [edge]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 512M }
+        reservations: { cpus: '0.25', memory: 128M }
+
+  # ===========================================================================
+  # BACKUP — §7. "A backup that has never been restored is not a backup."
+  # ===========================================================================
+  #
+  # Continuous WAL archiving is done by POSTGRES (archive_command above). This
+  # container adds the other half: a nightly base backup, plus retention.
+  # Together they are point-in-time recovery.
+  #
+  # It runs as uid 999 (postgres) so everything it writes is readable by the
+  # archive_command's output, and it holds the database password — which is why
+  # it is on `internal` and has no port and no edge access.
+  #
+  # It does NOT run the restore DRILL. The drill needs to start a second
+  # postgres, which needs the Docker socket, and mounting the Docker socket into
+  # a long-running container is a root-equivalent grant that is not worth it for
+  # a monthly task. The drill is `docker/backup/restore-drill.sh`, run from the
+  # host — see docs/runbooks/backup-restore.md.
+  backup:
+    image: pgvector/pgvector:pg16
+    container_name: foxxy-prod-backup
+    restart: unless-stopped
+    user: '999:999'
+    entrypoint: ['/bin/bash', '/opt/backup/backup-loop.sh']
+    environment:
+      PGHOST: postgres
+      PGPORT: '5432'
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      BACKUP_DIR: /backup
+      # 02:30 UTC = 08:00 Asia/Kolkata. Deliberately not midnight: the hour
+      # every cron in the world fires is the hour a shared host is slowest.
+      BACKUP_AT_UTC: ${BACKUP_AT_UTC:-02:30}
+      RETAIN_DAYS: ${BACKUP_RETAIN_DAYS:-14}
+    volumes:
+      - backup_data:/backup
+      - ./backup:/opt/backup:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 512M }
+        reservations: { cpus: '0.1', memory: 128M }
+
+networks:
+  edge:
+    name: foxxy_prod_edge
+  internal:
+    name: foxxy_prod_internal
+    # No route to the internet and no published ports. The database is
+    # reachable only by container name, from a container on this network.
+    internal: true
+
+volumes:
+  # Every name is prefixed `foxxy_prod_` and therefore CANNOT collide with the
+  # development volumes (`foxxy_postgres_data`, `foxxy_valkey_data`) that hold
+  # the imported corpus.
+  postgres_data:
+    name: foxxy_prod_postgres_data
+  # THE SECOND VOLUME (§7). WAL archive + nightly base backups. Separate from
+  # the data volume so that losing the data volume — the actual failure this
+  # protects against — does not lose the backups with it. Replicate this one
+  # off-host; see docs/runbooks/backup-restore.md, step 8.
+  backup_data:
+    name: foxxy_prod_backup_data
+  valkey_data:
+    name: foxxy_prod_valkey_data
+  caddy_data:
+    name: foxxy_prod_caddy_data
+  caddy_config:
+    name: foxxy_prod_caddy_config

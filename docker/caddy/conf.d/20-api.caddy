@@ -1,0 +1,119 @@
+# -----------------------------------------------------------------------------
+# BACKEND — api.{$BASE_DOMAIN}
+#
+# TWO PROXY POLICIES ON ONE HOSTNAME, and the split is the most operationally
+# important thing in this directory.
+#
+# =============================================================================
+# WHY THE SSE ROUTE NEEDS ITS OWN POLICY.
+#
+# A reverse proxy's defaults are written for request/response: read the whole
+# upstream response, optionally compress it, then write it to the client. Every
+# one of those defaults is wrong for a token stream:
+#
+#   BUFFERING     the proxy holds bytes until it has "enough". Foxy's first
+#                 token arrives in ~1s and is then held until the answer is
+#                 finished — the user sees a spinner for the whole generation
+#                 and then the entire answer at once. It looks exactly like a
+#                 slow model.
+#   COMPRESSION   gzip has its own internal buffer, which re-introduces the
+#                 same delay even when the proxy is flushing.
+#   READ TIMEOUT  15-60s is generous for a page and fatal for a stream. A long
+#                 answer is severed mid-sentence with no error the client can
+#                 distinguish from the model stopping.
+#
+# The failure mode of getting this wrong is the reason it is called out: every
+# symptom points at the language model, and the language model is fine.
+#
+# `flush_interval -1` is Caddy's "flush immediately, never buffer". The
+# 300-second upstream read timeout is well above the 120-second minimum the
+# separation plan requires and above §4's 60-second total stream budget, so the
+# APPLICATION's timeout is always the one that fires — which is the right place
+# for it, because the application can send a typed error and the proxy cannot.
+#
+# =============================================================================
+# WHAT IS DELIBERATELY *NOT* RELAXED.
+#
+# The `handle` blocks are ordered: the SSE matcher first, everything else after.
+# Ordinary API routes keep a 30-second upstream read timeout and keep
+# compression. Login, practice submission and the parent dashboard are
+# request/response and must fail fast; a global relaxation to suit one route is
+# how a hung database query ends up holding proxy connections for five minutes.
+#
+# THE MATCHER IS DELIBERATELY WIDER THAN THE STREAM ROUTE. It covers every
+# `/api/v1/foxy/*` path, not one exact URL, because the `foxy` module is being
+# built now and pinning an exact path here would produce a config that is
+# correct on the day it is written and silently wrong afterwards — with the
+# failure appearing as buffered streaming, which nobody attributes to a proxy.
+# Non-streaming Foxy routes pay only a longer ceiling they never reach.
+#
+# VERIFY IT, do not assume it: docs/runbooks/deploy-rollback.md step "SSE smoke
+# check" streams a >60s response through this proxy and asserts the chunks
+# arrive incrementally.
+#
+# INFRASTRUCTURE-OWNED. See docker/caddy/Caddyfile.
+# -----------------------------------------------------------------------------
+
+api.{$BASE_DOMAIN} {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Robots-Tag "noindex, nofollow, noarchive"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# --- health: no compression, no log noise, tight budget -------------------
+	handle /health/* {
+		reverse_proxy backend-api:4000 {
+			transport http {
+				dial_timeout 2s
+				read_timeout 5s
+			}
+		}
+	}
+
+	# --- STREAMING (Foxy) ----------------------------------------------------
+	@sse path /api/v1/foxy/*
+	handle @sse {
+		reverse_proxy backend-api:4000 {
+			# Buffering OFF. Every byte the backend writes goes to the client
+			# immediately.
+			flush_interval -1
+
+			transport http {
+				dial_timeout 5s
+				# >= 120s per 06-FRONTEND-SEPARATION-PLAN.md. 300s so the
+				# APPLICATION's 60s stream budget (§4) always fires first.
+				read_timeout 300s
+				write_timeout 300s
+				# The first BYTE may take a while (retrieval + first token), but
+				# the response HEADERS must not: 30s here turns a wedged backend
+				# into a fast failure instead of a five-minute hang.
+				response_header_timeout 30s
+			}
+		}
+		# NOTE the absence of `encode` in this block. It is not an omission.
+		# Compression buffers, and a buffered stream is an unbuffered stream
+		# that does not work.
+	}
+
+	# --- ORDINARY API ROUTES -------------------------------------------------
+	handle {
+		encode zstd gzip
+
+		reverse_proxy backend-api:4000 {
+			transport http {
+				dial_timeout 5s
+				# 30s: above §4's 10s statement timeout plus overhead, below
+				# anything a human will wait for.
+				read_timeout 30s
+			}
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

@@ -1,0 +1,41 @@
+# -----------------------------------------------------------------------------
+# PRODUCT — app.{$BASE_DOMAIN}
+#
+# Authenticated student and parent application. Never indexed: the separation
+# plan requires BOTH a metadata directive (frontend/next.config.ts sets the
+# X-Robots-Tag response header) and this one, because a header set by the
+# application disappears the moment a route is served from a cache or an error
+# page, and a search engine only has to see it once.
+#
+# INFRASTRUCTURE-OWNED. See docker/caddy/Caddyfile.
+# -----------------------------------------------------------------------------
+
+app.{$BASE_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Robots-Tag "noindex, nofollow, noarchive"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	reverse_proxy frontend:3000 {
+		transport http {
+			dial_timeout 5s
+			# ORDINARY ROUTE BUDGET. The product frontend renders and returns; it
+			# does not stream. Foxy's stream is served by the BACKEND, on
+			# api.{$BASE_DOMAIN} — see 20-api.caddy. Nothing on this hostname
+			# needs a relaxed timeout, and giving it one would hide a hung SSR
+			# render behind a spinner for five minutes.
+			read_timeout 30s
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

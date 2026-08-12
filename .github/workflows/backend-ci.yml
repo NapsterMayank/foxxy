@@ -1,0 +1,330 @@
+# =============================================================================
+# BACKEND CI — type-check, lint, test against a REAL Postgres, build, and the
+# migration round-trip.
+#
+# `workflow_call` only. It is invoked by `ci.yml` when `backend/**` (or shared
+# infrastructure) changed, so a documentation-only change never starts it. See
+# the header of ci.yml for why the path scoping lives there rather than here.
+# =============================================================================
+
+name: backend-ci
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: type-check · lint · test · build · migrations
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      # A REAL Postgres, with pgvector, at the same major version as production
+      # (docker/compose.prod.yml). Not a stand-in: `rag_chunks.embedding` is
+      # `vector(1024)`, `search_vector` is a generated tsvector column, and the
+      # `distractor_misconceptions` CHECK relies on `CASE` short-circuiting
+      # (D-039). None of that exists on a fake.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: foxxy
+          POSTGRES_PASSWORD: foxxy_dev_password
+          POSTGRES_DB: foxxy
+        options: >-
+          --health-cmd "pg_isready -U foxxy -d foxxy"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+        ports:
+          - 5432:5432
+
+      valkey:
+        image: valkey/valkey:8-alpine
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+        ports:
+          - 6379:6379
+
+    env:
+      # The service container publishes 5432 on the runner. D-009's 5433 is a
+      # local-machine workaround for a native Postgres holding the default port;
+      # there is no such conflict here, and hardcoding 5433 would be copying a
+      # workaround into an environment that does not have the problem.
+      DATABASE_URL: postgres://foxxy:foxxy_dev_password@localhost:5432/foxxy
+      REDIS_URL: redis://localhost:6379
+      NODE_ENV: test
+      APP_URL: http://localhost:3000
+      API_URL: http://localhost:4000
+      CORS_READ_ORIGINS: http://localhost:3000
+      CORS_WRITE_ORIGINS: http://localhost:3000
+      SESSION_COOKIE_NAME: foxxy_session
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: install
+        run: npm ci
+
+      # --- gates, in the order that fails fastest --------------------------
+      - name: type-check
+        run: npm run type-check
+
+      - name: lint
+        run: npm run lint
+
+      # --- THE ENVIRONMENT CONTRACT ---------------------------------------
+      #
+      # Compares the variables `backend/src` REQUIRES in production against the
+      # variables `docker/compose.prod.yml` PASSES, and against both example
+      # files. It runs here, third, because it needs no database and because the
+      # failure it prevents is expensive and completely invisible in review:
+      # the required list lives in TypeScript, the supplied list lives in YAML,
+      # and until this existed nothing related them.
+      #
+      # It has already caught two live defects. compose.prod.yml passed neither
+      # the Razorpay credentials nor the plan ids, so `createContainer` threw and
+      # `backend-api` and `backend-worker` restart-looped forever — which reads
+      # as a crash, not as a missing variable (D-250). And the SMTP block passed
+      # `SMTP_USERNAME` while the schema declared `SMTP_USER`: compose would have
+      # set an unread variable, left the real one absent, and killed every
+      # verification email and password reset behind green probes (D-255).
+      #
+      # It self-tests. Every extraction asserts a plausible minimum on what it
+      # matched and fails if it found nothing, because a check whose pattern has
+      # stopped matching reports a pass — the exact failure that left an ESLint
+      # rule and this workflow's own shell-syntax loop green while enforcing
+      # nothing.
+      - name: environment contract (src vs compose.prod.yml vs both .env.example)
+        run: npm run ops:env-contract
+
+      # --- THE PRE-FLIGHT MUST ACTUALLY FIRE ------------------------------
+      #
+      # Runs `scripts/ops/preflight-env.ts` — the same script the one-shot
+      # `preflight` container runs before api, worker and alerts — against a
+      # production-shaped environment FOUR times: once complete, then three
+      # times with a specific defect injected. A pass on the complete case and a
+      # failure NAMING THE RIGHT VARIABLE on each broken one.
+      #
+      # WHY THE NEGATIVE CASES ARE THE POINT. A gate is only worth its green
+      # when it has been seen red. Two gates in this repository were found
+      # passing while enforcing nothing — an ESLint rule whose files pattern
+      # matched no file, and the shell-syntax loop in ci.yml, which iterated
+      # over an empty `git ls-files` and reported success on a script containing
+      # a deliberate syntax error. Both looked exactly like this step does when
+      # it works. Asserting the failure is the only difference between a check
+      # and a decoration.
+      #
+      # The values below are OBVIOUS NON-CREDENTIALS. The pre-flight does no I/O
+      # and contacts no vendor — it reads the frozen config object and exits —
+      # so nothing here is ever presented to Razorpay, Anthropic, Voyage or an
+      # SMTP relay. `tools/scan-secrets.mjs` runs on this file like any other.
+      - name: the pre-flight fires (complete passes, each defect fails by name)
+        env:
+          NODE_ENV: production
+          DATABASE_URL: postgres://ci:ci@localhost:5432/ci
+          REDIS_URL: redis://localhost:6379
+          APP_URL: https://app.example.com
+          API_URL: https://api.example.com
+          CORS_READ_ORIGINS: https://app.example.com
+          CORS_WRITE_ORIGINS: https://app.example.com
+          SESSION_COOKIE_NAME: foxxy_session
+          VOYAGE_API_KEY: not-a-real-key-ci-only
+          LLM_API_KEY: not-a-real-key-ci-only
+          RAZORPAY_KEY_ID: not-a-real-key-ci-only
+          RAZORPAY_KEY_SECRET: not-a-real-key-ci-only
+          RAZORPAY_WEBHOOK_SECRET: not-a-real-key-ci-only
+          RAZORPAY_PLAN_IDS: monthly:plan_ci_monthly,yearly:plan_ci_yearly
+          SMTP_HOST: smtp.example.com
+          SMTP_USER: no-reply@example.com
+          SMTP_PASSWORD: not-a-real-password-ci-only
+          SMTP_FROM: no-reply@example.com
+        run: |
+          set -uo pipefail
+
+          preflight() {
+            npx tsx scripts/ops/preflight-env.ts "--razorpay-plan-ids=${RAZORPAY_PLAN_IDS}" 2>&1
+          }
+
+          # --- the complete configuration must PASS -------------------------
+          if ! out="$(preflight)"; then
+            echo "$out"
+            echo "FAIL: a fully-configured production environment did not pass the pre-flight."
+            echo "A pre-flight that cannot be satisfied is a pre-flight that gets switched off."
+            exit 1
+          fi
+          echo "ok   complete configuration: $out"
+
+          # --- each defect must FAIL, and must NAME the variable -------------
+          # $1 label · $2 the string the failure must contain · $3 the
+          # --razorpay-plan-ids argument · $4.. environment overrides.
+          #
+          # The plan-ids ARGUMENT is a positional parameter rather than a
+          # `VAR=x func` prefix: a variable assignment prefixed to a FUNCTION
+          # call persists in the calling shell afterwards, so the third case
+          # would silently corrupt any case added after it.
+          expect_fail() {
+            label="$1"; expected="$2"; plan_arg="$3"; shift 3
+            if out="$(env "$@" npx tsx scripts/ops/preflight-env.ts "--razorpay-plan-ids=${plan_arg}" 2>&1)"; then
+              echo "$out"
+              echo "FAIL: ${label} — the pre-flight PASSED a configuration it must reject."
+              exit 1
+            fi
+            if ! printf '%s' "$out" | grep -q -- "$expected"; then
+              echo "$out"
+              echo "FAIL: ${label} — the pre-flight failed, but never mentioned '${expected}'."
+              echo "An error that does not name the variable leaves the operator guessing,"
+              echo "which is the restart loop this whole mechanism replaced."
+              exit 1
+            fi
+            echo "ok   ${label}: named '${expected}' and exited non-zero"
+          }
+
+          # 1. a missing payment credential — the D-250 defect itself
+          expect_fail "RAZORPAY_KEY_SECRET unset" "RAZORPAY_KEY_SECRET" \
+            "$RAZORPAY_PLAN_IDS" --unset=RAZORPAY_KEY_SECRET
+
+          # 2. a missing SMTP setting — the D-226 silent-signup-death defect
+          expect_fail "SMTP_USER unset" "SMTP_USER" \
+            "$RAZORPAY_PLAN_IDS" --unset=SMTP_USER
+
+          # 3. a malformed plan pair — '=' where a ':' belongs. The config parser
+          #    DROPS it and returns success, so without this the first symptom is
+          #    a paying customer's checkout failing (D-253).
+          expect_fail "malformed RAZORPAY_PLAN_IDS pair" "malformed entry 'monthly=plan_ci_monthly'" \
+            'monthly=plan_ci_monthly,yearly:plan_ci_yearly' \
+            RAZORPAY_PLAN_IDS='monthly=plan_ci_monthly,yearly:plan_ci_yearly'
+
+          echo "pre-flight proven: 1 pass, 3 named failures"
+
+      # --- MIGRATIONS: an explicit step, never implicit on boot ------------
+      #
+      # Applied here, as a discrete step, exactly as production applies them
+      # (`docker compose --profile migrate run --rm migrate`). No application
+      # process migrates on start-up: with two replicas that is two concurrent
+      # migrators racing on one lock, and a failed migration becomes a
+      # crash-loop that also takes the service down.
+      - name: apply migrations
+        run: npm run db:migrate
+
+      # D-109: `db:migrate` printing "Migrations applied." does not mean it
+      # applied anything — Drizzle skips a migration whose journal timestamp
+      # precedes the last applied ledger row, and the development database
+      # silently ran a whole session on the wrong schema because of it. CHECK
+      # THE CATALOGUE, NOT THE EXIT CODE.
+      - name: the migration actually produced tables
+        run: |
+          set -euo pipefail
+          node -e "
+            const pg = require('pg');
+            const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+            client.connect()
+              .then(() => client.query(\"select count(*)::int as n from information_schema.tables where table_schema='public' and table_type='BASE TABLE'\"))
+              .then((r) => {
+                const n = r.rows[0].n;
+                console.log('tables in public: ' + n);
+                if (n < 10) { console.error('FAIL: db:migrate exited 0 but produced ' + n + ' tables (D-109)'); process.exit(1); }
+              })
+              .then(() => client.end())
+              .catch((e) => { console.error(e.message); process.exit(1); });
+          "
+
+      # --- MIGRATION ROUND-TRIP -------------------------------------------
+      #
+      # Forward, backward to an EMPTY public schema, forward again, and the
+      # catalogue diffed against the first apply. Against a scratch database, so
+      # the destructive half cannot reach the one the previous step migrated.
+      - name: migration round-trip (forward · rollback · forward)
+        env:
+          DATABASE_URL: postgres://foxxy:foxxy_dev_password@localhost:5432/round_trip
+        run: |
+          set -euo pipefail
+          PGPASSWORD=foxxy_dev_password psql -h localhost -U foxxy -d foxxy \
+            -c 'drop database if exists round_trip' -c 'create database round_trip'
+          npm run db:round-trip
+
+      # --- THE ROUND-TRIP'S DATA GUARD MUST ACTUALLY REFUSE ----------------
+      #
+      # `db:round-trip` DROPS EVERY TABLE. Its only safeguard is a check that
+      # the database is empty, and until D-249 that check inspected four
+      # hardcoded names — chapters, rag_chunks, questions, users. Every table
+      # added since was invisible to it: a database holding jobs, metrics,
+      # notifications, subscriptions, payments or the append-only audit_log
+      # passed cleanly and was then dropped. A guard that fails OPEN on
+      # everything nobody remembered to list is D-075 in a new costume.
+      #
+      # THE ASSERTION IS DELIBERATELY BUILT ON A TABLE THE OLD LIST DID NOT
+      # NAME. `audit_log` holds one row and all four of the old names are left
+      # EMPTY — so this database is exactly the shape the previous guard waved
+      # through, and the step fails if the script ever waves it through again.
+      # Verifying the old four would prove nothing that was ever broken.
+      - name: the round-trip data guard refuses a populated database
+        env:
+          DATABASE_URL: postgres://foxxy:foxxy_dev_password@localhost:5432/round_trip_guard
+        run: |
+          set -uo pipefail
+          export PGPASSWORD=foxxy_dev_password
+          psql -h localhost -U foxxy -d foxxy \
+            -c 'drop database if exists round_trip_guard' -c 'create database round_trip_guard'
+
+          # Migrate it, then leave exactly one row, in a table the old list
+          # never covered.
+          npm run db:round-trip > /dev/null
+          psql -h localhost -U foxxy -d round_trip_guard \
+            -c 'delete from tenants' \
+            -c "insert into audit_log (action, resource_type) values ('ci.guard_proof','proof')"
+
+          echo "state: audit_log=1 row; chapters/rag_chunks/questions/users all EMPTY"
+          if out="$(npm run db:round-trip 2>&1)"; then
+            echo "$out"
+            echo "FAIL: the round-trip guard ACCEPTED a database holding data and would have"
+            echo "dropped every table in it. This is the D-249 defect."
+            exit 1
+          fi
+          if ! printf '%s' "$out" | grep -q 'audit_log'; then
+            echo "$out"
+            echo "FAIL: the guard refused, but never named audit_log. An operator has to be told"
+            echo "WHICH table holds data, or the refusal reads as a broken script."
+            exit 1
+          fi
+          echo "ok   guard refused and named audit_log"
+          psql -h localhost -U foxxy -d foxxy -c 'drop database if exists round_trip_guard'
+
+      # --- TESTS ------------------------------------------------------------
+      # Vitest starts its own testcontainer (tests/helpers/global-postgres.ts),
+      # which is available on this runner and is what the suite is written
+      # against. The service container above is for the migration steps and for
+      # anything that needs a database with a REAL ledger history — a fresh
+      # testcontainer has an empty one and therefore cannot reproduce D-109.
+      - name: test
+        run: npm test
+
+      - name: build
+        run: npm run build
+
+      # The operational entry points — migrations and the alert evaluator — are
+      # compiled too, because the production image runs them with `--omit=dev`
+      # and therefore without tsx. A build break here means an ops tool that
+      # cannot run on the deployed artefact.
+      - name: build ops entry points
+        run: npm run build:ops
+
+      - name: the alert rules are satisfiable by the shipped collectors
+        # A rule watching a signal nothing emits can never fire, and a rule that
+        # never fires looks exactly like a system that is never unhealthy. The
+        # assertion runs inside the evaluator at start-up; this is the same
+        # check, in CI, before anyone deploys it.
+        run: npx vitest run tests/ops/alert-rules.test.ts
