@@ -24,7 +24,7 @@ Last updated: **10 August 2026**
 | Backend modules | **11 of 11 built AND WIRED** (identity, learner, content, notify, practice, parent, retrieval, foxy, **billing**, **knowledge**, **signals**). Every one is constructed in `buildModules`, and `src/app/__tests__/routes.test.ts` asserts the list exhaustively and pins each module's pool. **Eight register routes; three deliberately do not** — `retrieval` (D-122), `knowledge` and `signals`, none of which has an HTTP surface, with a comment at the foot of `registerRoutes` saying so because "built but never registered" reads exactly like an oversight (D-175). `billing`'s registration is **AWAITED**, the only one besides identity's: its webhook needs an encapsulated Fastify scope for a raw-body parser, and a dropped `await` 404s every genuine delivery in production only. The `payments` port lives on the container, guarded, with a **production boot refusal** (D-176) |
 | Mail | **SMTP adapter BUILT, 11 August.** There was previously no real adapter at all - production defaulted to a console stub with no environment gate, printing verification and password-reset links to stdout and delivering nothing. `createContainer` now refuses to boot in production without SMTP settings (D-226) |
 | Backend processes | **2** — `api` and `worker`. The worker exists and runs one real job |
-| Frontend | **WIRED AND GATED, 12 August.** It makes real network calls for the first time. All five of step 0's foundation gaps are closed — session strategy, the error-code table, the Foxy streaming client (all 7 cases in plan §7 are tests) and the token scales — plus build-order step 6, the typed client and providers. Backend contracts are GENERATED into `src/lib/api/generated/` with a drift test, because `frontend/Dockerfile` copies `frontend/` alone and a direct cross-package import cannot exist in the image. **Tests 10 → 236 unit and 28 end-to-end.** Eleven CI gates exist and six have been deliberately broken and observed to fail; the two that cannot be (bundle budgets against a real build, Lighthouse) are blocked on item 33 and on CI ever running |
+| Frontend | **WIRED AND GATED, 12 August.** It makes real network calls for the first time. All five of step 0's foundation gaps are closed — session strategy, the error-code table, the Foxy streaming client (all 7 cases in plan §7 are tests) and the token scales — plus build-order step 6, the typed client and providers. Backend contracts are GENERATED into `src/lib/api/generated/` with a drift test, because `frontend/Dockerfile` copies `frontend/` alone and a direct cross-package import cannot exist in the image. **Tests 10 → 236 unit and 28 end-to-end.** TWELVE CI gates exist and EIGHT have been deliberately broken and observed to fail; the two that cannot be (bundle budgets against a real build, Lighthouse) are blocked on item 33 and on CI ever running |
 | Marketing site | **scaffolded** - 32 files under `website/`, committed. Per `06-FRONTEND-SEPARATION-PLAN.md` |
 | Tests | **3,173 backend passing**, 185 files, plus **236 frontend unit and 28 end-to-end** (was 10 — see §5). Three audit waves have added 656 between them. **Every guard, threshold and validation in the codebase has been broken deliberately and confirmed to turn a named test red** - see D-214 |
 | Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice` + `0003_parent` + **`0004_billing`** + **`0005_foxy`**. Every one has a rollback test, because the round-trip is asserted over the DISCOVERED set rather than per file (D-126) — neither `0004` nor `0005` needed an edit to that test. **Neither has been applied to the development database**, deliberately, for the same reason `0002` has not: see open item 16. ✅ **`0004_billing`'s journal `when` is FIXED** — it was 1786374108357, below `0003_parent`'s 1786700000000, which is the exact D-109 hazard: drizzle selects by `when` and not by `idx`, so on any database already past `0003` it printed "Migrations applied." and applied nothing. **Reproduced on a scratch database before the fix** (`subscriptions` and `payment_events` absent, `0005` applied over the hole, exit code zero), corrected to **1786750000000**, and re-verified both from empty and from a ledger primed to `0003`. The rule is now enforced by `tests/integration/migration-journal-order.test.ts`, which was itself proved to fire by reverting the value. The round-trip test could not have caught this and never could: it applies by `idx` and never reads `when` (D-173, D-174) |
@@ -87,13 +87,44 @@ Ordered by what breaks if ignored, not by size.
 2. **Item 33 — `next build` fails on this machine. The bundler is NOT the cause — tested 12 August.** `kill EPERM` at worker teardown, Next 16.3 + Windows. `next build --webpack` (the 16.x spelling of `--no-turbopack`) fails **identically**, so the flag theory is dead. What the webpack run adds is a narrower window: it reaches "Collecting build traces" and completes it, then dies — later than the Turbopack run, which never gets that far. So compile, TypeScript, static generation and tracing ALL succeed, and the crash is in worker teardown after every artifact-producing phase. `.next/` is populated; `.next/standalone/` is never written, which is what the Dockerfile consumes. **Next avenue: the build-worker pool, not the bundler** — `experimental.webpackBuildWorker`/worker count, or run the build inside the Linux container the image uses anyway and stop treating a Windows-host build as the target.
 3. **Item 26 — read before touching the parent digest.** `recoveries` counts `answer_changed = true AND is_correct = true`, which immutable answers (D-281) made unsatisfiable. The metric will read zero. **That is the fix landing, not a regression** — the old numbers came from client testimony nothing verified.
 
+### Where the frontend is, and where to start — 12 August 2026
+
+**Build-order steps 0, 1-5 and 6 are closed.** The product makes real, typed,
+credentialed API calls; every shared component a screen needs exists; every
+user-facing string is translated and lint-enforced; twelve CI gates exist and
+eight have been deliberately broken and observed to fail.
+
+**THE NEXT FRONTEND TASK IS STEPS 7-8: wire the auth and onboarding screens to
+the live client.** Everything they need is already built and tested:
+
+| What the screens need | Where it already is |
+|---|---|
+| The typed client | `src/lib/api/client.ts` — `apiRequest({ path, method, body, schema })` |
+| Request/response shapes | `src/lib/api/generated/contracts/identity.contract.ts` |
+| Error handling | `treatmentFor()` in `src/lib/api/errors.ts` — nine treatments, all tested |
+| Form field wiring | `patterns/form-field.tsx` — label, hint and error ids by construction |
+| Session state | `useSession()`; a successful login must invalidate `sessionKeys.currentUser` |
+| Copy | `lib/i18n/dictionaries/{en,hi}.ts` — every auth string already has a key |
+
+The screens themselves are still PRESENTATIONAL: `AuthForm` and `OnboardingForm`
+prevent default, set a local "preview complete" message, and call nothing. The
+work is replacing that with mutations, mapping a 400's field errors onto
+`FormField`, and honouring `?next=` after sign-in.
+
+**Two things to read before starting.** `EMAIL_NOT_VERIFIED` arrives as a 403
+carrying a `reason`, not as a login failure — §5.6 requires a resend affordance,
+and `auth.resendAction` is already in both dictionaries. And a 403 on a POST is
+NOT a logout: the backend returns 403 before 401 on state-changing requests
+because the CSRF verdict must not depend on who the caller claims to be.
+
 ### Unblocked and ready
 
 | | Days |
 |---|---|
+| **Frontend steps 7-8** — auth and onboarding onto the live client | 5 |
 | **A socket-level smoke test** - the only untested boundary in the backend | 1 |
 | A Postman collection generated from the route definitions | 0.5 |
-| `components/ui` primitives and `patterns`, then the auth screens onto the live client | 6 |
+| Frontend steps 9-13 — the Foxy chat UI on `useFoxyStream`, then practice, progress, parent, billing | 22 |
 | Remaining open items in section 7 | 3 |
 
 ### The wire boundary is the one thing three audits could not reach
@@ -493,7 +524,7 @@ Build order from `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` section 11. **Steps 0
 
 | Step | Item | Days |
 |---|---|---|
-| ✅ 0 | **Foundation gaps — ALL FIVE DONE.** Auth/session strategy · error-code table · streaming client · token values · **CI gates**. Eleven gates exist; **six have been deliberately broken and observed to fail**, two cannot be proven until a build completes and CI runs, three are pre-existing. See D-340 | — |
+| ✅ 0 | **Foundation gaps — ALL FIVE DONE.** Auth/session strategy · error-code table · streaming client · token values · **CI gates**. Twelve gates exist; **eight have been deliberately broken and observed to fail**, two cannot be proven until a build completes and CI runs, three are pre-existing. See D-340 | — |
 | ✅ 1-4 | Tooling · tokens (scales CLOSED, lint enforces it) · **`components/ui` — Button, Input/Textarea/Select, Card, Badge, Skeleton, Dialog** · **`components/patterns` — LoadingState, EmptyState, ErrorState, PageHeader, StatCard, FormField, ConfirmDialog, EvidenceLabel, OfflineBanner** · `ProductShell` with both navigations and the offline banner. **92 component tests, every variant covered** | — |
 | ✅ 5 | **i18n — both dictionaries, the switch, the Devanagari font, the user-facing-string lint rule.** Every user-facing string in the product now comes from a dictionary; a literal in JSX or in `aria-label`/`alt`/`placeholder`/`title` fails lint. **The visual-regression language axis is live**, so §10.7's four axes are all real | — |
 | ✅ 6 | **API client · query keys · providers · session context** — one typed client, contracts generated from the backend, 401 clears the cache | — |
@@ -712,7 +743,7 @@ Each was reported by the agent that found it and left deliberately, because it s
 | 27 | **`content.listChapters` takes one subject**, so `getTodaysMission` still issues one query per subject. The latency is fixed; the query count is a `content` API shape | backend | 0.5 d |
 | 28 | **`readWorkerLiveness` is fixed but `/health/deps` still does not use it.** It no longer throws and is the correct per-worker, status-filtered query. The collector was rewired; the health endpoint was not | architect | 0.5 d |
 | 29 | **`container.authz` fails loudly rather than correctly.** `LinkStatusReader` is synchronous and every real link status is an async read, so a correct reader is not expressible at that seam. It now throws a named error instead of silently denying every parent-child relationship. The durable fix is an async reader, or deleting the member | architect | 1 d |
-| 30 | ✅ **CLOSED — 12 August.** All five foundation gaps are built and tested, CI gates included. Eleven gates exist and **six have been deliberately broken and observed to fail**; two (bundle budgets against a real build, Lighthouse) cannot be proven until item 33 and a CI run are resolved. See §5 and D-340 | frontend | — |
+| 30 | ✅ **CLOSED — 12 August.** All five foundation gaps are built and tested, CI gates included. Twelve gates exist and **eight have been deliberately broken and observed to fail**; two (bundle budgets against a real build, Lighthouse) cannot be proven until item 33 and a CI run are resolved. See §5 and D-340 | frontend | — |
 | 31 | **The frontend lint rules are bypassed by their own idiom.** `staticClassName()` only unwraps a bare literal, so `className={cx('bg-purple-600')}` is not flagged - and `cx()` is how every conditional and variant style is written. **`architecture/spacing-scale-only` (12 August) shares the same helper and therefore the same hole**, which matters more for it: a missed brand literal renders the wrong colour, a missed off-scale spacing utility renders NO spacing at all, because the scale is closed | frontend | 0.25 d |
 | 32 | ✅ **CLOSED — 12 August.** `@vitest/coverage-v8` installed and §10.5's floors enforced PER AREA (pure functions 95, hooks 85, components 80, primitives 90) rather than as one global number a half-tested codebase can satisfy. Proven by deleting a test file: `components/ui` dropped to 71% and the gate failed | frontend | — |
 | 33 | **`next build` fails on this machine**, at worker teardown (`kill EPERM`, Next 16.3 + Windows). **The bundler is ruled out — 12 August:** `--webpack` fails identically, and gets FURTHER (it completes "Collecting build traces"; the Turbopack run never reaches it). So every artifact-producing phase succeeds and the crash is in the worker pool afterwards. `.next/` is written, `.next/standalone/` is not, and that is what the Dockerfile consumes. Next avenue is the build-worker pool or building inside the Linux image | architect | ? |

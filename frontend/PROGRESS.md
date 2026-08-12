@@ -175,7 +175,7 @@ The optimized production server was queried directly. `/`, all five secondary la
 1. ✅ ~~Freeze the identity/session and shared response contracts~~ — generated from the backend, with a drift test.
 2. ✅ ~~Add one credentialed API client and wire current-user behavior~~ — done; the auth FORMS still need wiring to it.
 3. ✅ ~~Protect role layouts with session/role handling~~ — `SessionGate` on both route groups. Preview fixtures still need replacing screen by screen.
-4. ✅ ~~Close the CI gates (§10.7)~~ — eleven exist, six proven by deliberate breakage; bundle budgets and Lighthouse remain unproven until a build completes and CI runs. Original note kept for the record: **Close the CI gates (§10.7).** Bundle budgets, Lighthouse, axe, contrast, visual regression, coverage floors — and prove each one fails on a deliberate violation before trusting it. `@vitest/coverage-v8` is still not installed, so the floors cannot even be measured. **The build environment must set `NEXT_PUBLIC_API_URL`** — `lib/config/env.ts` throws without it, which is deliberate and will fail a CI build that does not.
+4. ✅ ~~Close the CI gates (§10.7)~~ — **twelve exist, eight proven by deliberate breakage.** Bundle budgets (arithmetic only) and Lighthouse (never executed) stay unproven until `next build` completes on a machine here and CI runs at all. **The build environment must set `NEXT_PUBLIC_API_URL`** — `lib/config/env.ts` throws without it, deliberately, and will fail a CI build that forgets it.
 5. `components/ui` primitives and `components/patterns`, then the auth screens onto the live client.
 6. Implement the marketing CMS/editor preview and independent deployment pipeline.
 7. Complete i18n, legal content, approved assets and launch-content review.
