@@ -1,0 +1,28 @@
+# Everything the image must not carry. Kept tight because a build context is
+# uploaded to the daemon in full before the first instruction runs — a stray
+# node_modules or a coverage directory costs seconds on every build.
+node_modules
+dist
+coverage
+.vitest
+*.tsbuildinfo
+
+# NEVER. A .env in a build context is a secret in an image layer, and layers
+# are distributed.
+.env
+.env.*
+!.env.example
+
+# Test and evaluation material: not needed at runtime, and `eval/` pulls in the
+# corpus harness.
+tests
+eval
+src/**/__tests__
+src/**/*.test.ts
+
+# Local docker state and the corpus staging area (licensed content, 66 MB).
+docker
+.corpus-extract
+
+*.md
+!README.md

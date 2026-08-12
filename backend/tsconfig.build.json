@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "sourceMap": true
+  },
+  // tsc emits the import specifiers verbatim, and TypeScript deliberately
+  // never rewrites paths. tsc-alias does both jobs after the fact:
+  //  - resolves the `@/*` alias to a relative path
+  //  - appends `.js` to extensionless relative imports, which plain `node`
+  //    requires for ESM (the source stays extensionless so drizzle-kit, which
+  //    transpiles to CJS, can load the schema).
+  "tsc-alias": {
+    "resolveFullPaths": true,
+    "verbose": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "coverage", "src/**/__tests__/**", "src/**/*.test.ts"]
+}

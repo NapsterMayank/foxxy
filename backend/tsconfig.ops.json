@@ -1,0 +1,31 @@
+{
+  // The OPERATIONAL build: the entry points an operator runs against a live
+  // system — `db:migrate` and the alert evaluator.
+  //
+  // WHY A SECOND CONFIG RATHER THAN WIDENING tsconfig.build.json.
+  //
+  // `tsconfig.build.json` has `rootDir: src`, which is what keeps `dist/main.js`
+  // at the top of `dist` instead of `dist/src/main.js`. Widening rootDir to "."
+  // to pick up `scripts/` would move every runtime path in the image, in a
+  // change that reads as "also compile the scripts".
+  //
+  // WHY COMPILE THEM AT ALL, when `npm run db:migrate` uses tsx in development.
+  //
+  // tsx is a devDependency. The production image installs `--omit=dev`, so an
+  // ops tool that needs tsx is an ops tool that cannot run on the deployed
+  // artefact — which is precisely the box you need it on at 2am. Compiling
+  // them means the migration step and the alert evaluator run the same bytes
+  // that are serving traffic.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist-ops",
+    "sourceMap": true
+  },
+  "tsc-alias": {
+    "resolveFullPaths": true,
+    "verbose": false
+  },
+  "include": ["src/**/*.ts", "scripts/ops/**/*.ts", "scripts/migrate.ts"],
+  "exclude": ["node_modules", "dist", "dist-ops", "coverage", "src/**/__tests__/**", "src/**/*.test.ts"]
+}

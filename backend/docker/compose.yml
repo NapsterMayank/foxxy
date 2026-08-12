@@ -1,0 +1,47 @@
+name: foxxy
+
+services:
+  postgres:
+    # pgvector/pgvector ships Postgres 16 with the `vector` extension already
+    # compiled in. `citext` is part of contrib and is present in this image.
+    image: pgvector/pgvector:pg16
+    container_name: foxxy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-foxxy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-foxxy_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-foxxy}
+      # Deterministic collation so ORDER BY behaves identically everywhere.
+      POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
+    ports:
+      - '${POSTGRES_PORT:-5433}:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-foxxy} -d ${POSTGRES_DB:-foxxy}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: foxxy-valkey
+    restart: unless-stopped
+    command: ['valkey-server', '--appendonly', 'yes', '--save', '60', '1']
+    ports:
+      - '${VALKEY_PORT:-6379}:6379'
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  postgres_data:
+    name: foxxy_postgres_data
+  valkey_data:
+    name: foxxy_valkey_data

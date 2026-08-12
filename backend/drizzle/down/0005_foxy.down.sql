@@ -1,0 +1,33 @@
+-- Rollback for drizzle/migrations/0005_foxy.sql
+--
+-- Drizzle does not generate down migrations, so each one is written by hand and
+-- lives here under the same number. Plan §4, rule 4: every migration must run
+-- forward AND backward against a copy of the schema in CI.
+--
+-- ===========================================================================
+-- THIS IS THE MOST DESTRUCTIVE ROLLBACK IN THE REPOSITORY. SAY SO OUT LOUD.
+--
+-- `weekly_digests` (0003) can be rebuilt from practice rows by a deterministic
+-- composer. NOTHING HERE CAN BE REBUILT. A conversation between a child and a
+-- tutor is not derived from anything — it happened once — and the traces are
+-- the only record of why each answer was what it was.
+--
+-- Running this is therefore a decision about DELETING STUDENT DATA, not a
+-- schema step. Take a dump first. The statements below are correct and they
+-- will do exactly what they say.
+-- ===========================================================================
+--
+-- ORDER IS FORCED BY THE FOREIGN KEYS, and stated explicitly rather than left
+-- to CASCADE:
+--
+--   retrieval_traces -> chat_messages -> chat_sessions
+--
+-- `drop table ... cascade` would work in one statement and is deliberately not
+-- used. CASCADE drops whatever happens to reference the table, which on the day
+-- somebody adds a fourth foxy table would silently take it too — and a rollback
+-- that removes more than it created is the failure a rollback exists to avoid.
+DROP TABLE IF EXISTS "retrieval_traces";
+--> statement-breakpoint
+DROP TABLE IF EXISTS "chat_messages";
+--> statement-breakpoint
+DROP TABLE IF EXISTS "chat_sessions";

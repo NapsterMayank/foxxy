@@ -1,0 +1,42 @@
+-- Rollback for drizzle/migrations/0006_notify_preferences.sql
+--
+-- Drizzle does not generate down migrations, so each one is written by hand and
+-- lives here under the same number. Plan §4, rule 4: every migration must run
+-- forward AND backward against a copy of the schema in CI.
+--
+-- ===========================================================================
+-- WHAT THIS DESTROYS, STATED PLAINLY.
+--
+-- `notification_preferences` holds WHAT USERS DECIDED — every opt-out anybody
+-- has ever set. It is not derived from anything and cannot be rebuilt: an
+-- opt-out is a fact about a person's wishes, not a projection of their
+-- activity. Dropping the table does not merely lose data, it silently
+-- RE-ENROLS every one of those people, because the default is no opt-outs.
+--
+-- That is the exact failure D-260 exists to prevent, arrived at deliberately
+-- rather than by cache eviction. If this rollback is being run against a
+-- database with real users in it, take a dump of this table first — it is three
+-- columns and it is the only copy.
+--
+-- The write-through store keeps a cache mirror, but it is a MIRROR: it is
+-- lossy by design (that is the whole of D-260) and must not be treated as the
+-- backup.
+-- ===========================================================================
+--
+-- ORDER. The index is restored to its pre-migration shape FIRST, so that at no
+-- point does the table sit with no index on the read path at all. Then the
+-- table goes.
+--
+-- The two-column index is what 0000_baseline created and is what this rollback
+-- must leave behind — a rollback that restores a DIFFERENT index than the one
+-- it replaced would leave the database in a state no migration describes, which
+-- is worse than either the before or the after.
+DROP INDEX IF EXISTS "notifications_recipient_created_idx";
+--> statement-breakpoint
+CREATE INDEX "notifications_recipient_created_idx" ON "notifications" USING btree ("recipient_user_id","created_at" DESC NULLS LAST);
+--> statement-breakpoint
+-- No CASCADE. Nothing references this table, and `drop table ... cascade` would
+-- silently take whatever did on the day somebody added a foreign key to it —
+-- a rollback that removes more than it created is the failure a rollback exists
+-- to avoid.
+DROP TABLE IF EXISTS "notification_preferences";
