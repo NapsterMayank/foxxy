@@ -251,19 +251,33 @@ x-backend-env: &backend-env
   # pseudonymised in name only — and the identical digest appearing in both
   # Valkey and Postgres joins a cache dump to a database dump exactly.
   #
-  # `:-` AND NOT `:?`, deliberately, and it is the one soft default in this
-  # block that is about deployment risk rather than about a schema default.
-  # Marking it required would be correct on the merits and would RESTART-LOOP
-  # this stack on the deploy that added it, because no existing .env.prod
-  # carries it — D-250 precisely, a fix that causes the outage it was meant to
-  # prevent. Unset, the app logs `identity.ip_hash_salt_unconfigured` at WARN
-  # every boot and uses a build constant that is in the source and is not
-  # secret. Set this, confirm the warn is gone, THEN promote it to `:?`.
+  # NOT `:?`, deliberately, and it is the one optional entry in this block that
+  # is about deployment risk rather than about a schema default. Marking it
+  # required would be correct on the merits and would RESTART-LOOP this stack on
+  # the deploy that added it, because no existing .env.prod carries it — D-250
+  # precisely, a fix that causes the outage it was meant to prevent. Unset, the
+  # app logs `identity.ip_hash_salt_unconfigured` at WARN every boot and uses a
+  # build constant that is in the source and is not secret. Set this, confirm
+  # the warn is gone, THEN promote it to `:?`.
   #
-  # The schema treats an empty string as absent and refuses anything under 32
-  # characters, so a half-filled value cannot pass as configured.
+  # THE BARE `KEY:` FORM, NOT `${KEY:-}`. The two look interchangeable and are
+  # not: `${KEY:-}` renders an EMPTY STRING when the variable is unset, and an
+  # empty string is a value that REACHES THE CONTAINER, whereas the bare form
+  # leaves an unset variable unset. `check-rendered-env.mjs` fails the build on
+  # any environment value that renders blank, for the D-256 reason — for most
+  # variables here a blank is `z.string().min(1)` and a boot refusal — and this
+  # entry was the one place in the file still using the interpolated form.
+  #
+  # The schema is not what saved it: `IDENTITY_IP_HASH_SALT` is one of the few
+  # entries that preprocesses a blank to `undefined` (config.schema.ts, pinned
+  # by ip-hash-salt-wiring.test.ts), so the blank was harmless AT RUNTIME and
+  # red IN CI. That combination is the worst one to leave — a gate failing while
+  # nothing is wrong teaches everyone to skip the job that fails.
+  #
+  # The schema refuses anything under 32 characters, so a half-filled value
+  # cannot pass as configured.
   #   generate with:  openssl rand -hex 32
-  IDENTITY_IP_HASH_SALT: ${IDENTITY_IP_HASH_SALT:-}
+  IDENTITY_IP_HASH_SALT:
 
 services:
   # ===========================================================================
