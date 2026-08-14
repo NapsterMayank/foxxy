@@ -1,45 +1,47 @@
 # Context — resume here
 
-**Last session:** 12 August 2026. Frontend build-order steps 0-8 closed, and the
-build blocker (open item 33) turned out to be the Windows host, not Next.
-Read `PROGRESS.md` §2 for the full picture; this file is the 30-second version.
+**Last session:** 14 August 2026. Frontend build-order **step 9 is closed** — the
+Foxy chat UI is built, wired and tested. Read `PROGRESS.md` §5 for the detail;
+this file is the 30-second version.
 
 ## Current task
 
-**Next: build-order step 9 — the Foxy chat UI on `useFoxyStream`.** The hook and
-its seven §7 cases are already done and tested; only the UI is missing. Steps
-10-13 (practice, progress, parent, billing) follow; both dashboards still render
-fixtures.
+**Next: build-order steps 10-11 — practice and progress.** Both student
+dashboards still render fixtures. Step 12 (parent) and 13 (billing) follow.
+`GET /foxy/sessions` is written and unused — there is no session list screen yet.
 
 ## Key decisions from this session
 
-- **Build in the container, not on Windows.** `docker build -f frontend/Dockerfile`
-  produces `.next/standalone`; `docker run -p 3000:3000` then serves it for
-  Playwright and Lighthouse. Nothing in the app was ever broken.
-- **Field errors come from the generated request schemas.** The wire envelope is
-  `{ error: { code, message } }` and drops `details`, so no field is named on a
-  400 — validating with the backend's own copied schema is the only route to
-  §5.6's "map onto the form", and the rules cannot drift.
-- **A 401 from `POST /auth/login` is a credential verdict, not an expired
-  session.** `ApiError` carries the request path so `providers.tsx` can tell them
-  apart; without it a wrong password cleared the query cache.
+- **A completed turn marks the transcript stale WITHOUT refetching it**
+  (`refetchType: 'none'`). Stored history and live messages are concatenated,
+  never merged, and deduplication is impossible — a user message has no server
+  id, ever. Freezing the history instead is refused by two lint rules, both
+  right (D-351).
+- **The open conversation lives in the URL**, `?session=<id>`, written with
+  `router.replace`. §7 asks that a refresh show the same history; with the id in
+  `useState` a refresh strands the turns on the server (D-352).
+- **The action buttons and their labels come from the server**, never from the
+  generated `FOXY_ACTIONS`. A test asserts an action this build has never heard
+  of still renders (D-353 covers the third find — a failed *start* was reporting
+  an interrupted *answer*).
 
 ## Next steps
 
-1. Step 9 — the Foxy chat UI.
-2. Items 41-43: the bundle gate reads a manifest Next 16.3 no longer emits; LCP
-   is ~370 ms over budget on two auth screens; four dashboard baselines are stale
-   and need a human before re-recording.
-3. Still blocked on the owner: `LLM_API_KEY`, **GitHub Actions billing** (every
-   run is `startup_failure`, account-level), and confirming the Foxy caps.
+1. Steps 10-11 — practice, then progress.
+2. **Run the browser suite against `/student/foxy`.** It has never seen this
+   screen: port 3000 is held by `backend-api-1` and `playwright.config.ts`
+   hardcodes `baseURL` to it. No visual baseline exists for the route yet.
+3. Still blocked on the owner: `LLM_API_KEY`, `VOYAGE_API_KEY`, **GitHub Actions
+   billing** (every run is `startup_failure`, account-level), Foxy caps.
 
 ## Gotchas that cost time
 
-- Piping a long build or test run through `tail` throws away the error that
-  matters. Write the full log to a file, then grep it.
-- Never export a value from a `'use client'` module and read it on the server —
-  it does not arrive as a string. That silently broke the language cookie read.
-- An async server component nested inside another cannot be rendered in a test.
-  One `await` per tree; pass the translator down.
-- `frontend/.gitattributes` now forces LF. Without it the generated contracts
-  check out as CRLF on Windows and the drift test calls every file stale.
+- The Foxy contract declares its RESPONSES as interfaces, not Zod schemas —
+  nothing on the server parses them. `apiRequest` needs a schema, so they live in
+  `features/foxy/api/foxy-responses.ts` pinned with `satisfies z.ZodType<...>`.
+- A lint rule refusing both spellings of an idea (ref, and state-plus-effect)
+  usually means the idea is in the wrong file. It was — see D-351.
+- `next build` still only works in the container. `docker build -f
+  frontend/Dockerfile`, then `docker run`.
+- `frontend;C` in the repository root is an empty stray directory from a
+  mistyped command. Untracked; delete it.

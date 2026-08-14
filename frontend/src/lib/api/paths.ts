@@ -36,3 +36,20 @@ export const learnerPaths = {
 export const linkPaths = {
   submit: '/links/submit',
 } as const;
+
+/**
+ * Foxy — build-order step 9.
+ *
+ * `messages` IS NOT CALLED BY `apiRequest`. It is the SSE endpoint and the
+ * streaming client reads its body rather than parsing one, so it builds its own
+ * URL from `apiBaseUrl`. It is listed here anyway because the deployment proxy
+ * matches on this path (open item 24, D-142) and a path that only exists inside
+ * a template literal in one hook is a path nobody finds when narrowing that
+ * matcher.
+ */
+export const foxyPaths = {
+  sessions: '/foxy/sessions',
+  session: (sessionId: string) => `/foxy/sessions/${encodeURIComponent(sessionId)}`,
+  messages: (sessionId: string) => `/foxy/sessions/${encodeURIComponent(sessionId)}/messages`,
+  capabilities: '/foxy/capabilities',
+} as const;

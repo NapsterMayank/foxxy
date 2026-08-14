@@ -7,6 +7,7 @@ export default async function StudentLayout({ children }: Readonly<{ children: R
   const t = await getServerT();
   const navigation: readonly ProductNavigationItem[] = [
     { href: '/student', isCurrent: true, label: t('shell.navLearn'), marker: '⌂' },
+    { href: '/student/foxy', label: t('shell.navFoxy'), marker: '✦' },
     { href: '/student#progress', label: t('shell.navProgress'), marker: '↗' },
     { href: '/student#next-up', label: t('shell.navPractice'), marker: '✎' },
   ];

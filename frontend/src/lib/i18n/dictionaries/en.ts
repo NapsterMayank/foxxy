@@ -88,6 +88,7 @@ export const en = {
     navOverview: 'Overview',
     navChild: 'Child',
     navUpdates: 'Updates',
+    navFoxy: 'Ask Foxy',
   },
 
   auth: {
@@ -234,6 +235,81 @@ export const en = {
   progress: {
     eyebrow: 'Learning evidence',
     sampleLabel: 'Sample progress',
+  },
+
+  /**
+   * Foxy — build-order step 9.
+   *
+   * `Foxy` IS NOT TRANSLATED anywhere below. It is the tutor's name, and §8's
+   * rule about proper nouns applies to it exactly as it applies to NCERT: a
+   * child who learns to press "Foxy" in English must find the same word in
+   * Hindi.
+   *
+   * THE SIX ACTION LABELS ARE ABSENT FROM THIS FILE, deliberately. They arrive
+   * from `GET /foxy/capabilities` already bilingual, because the label and the
+   * prompt it triggers live side by side on the server — see the note on
+   * `FOXY_ACTIONS`. A copy here would be a seventh place for them to drift, and
+   * the drift would make a button do something other than what it says.
+   */
+  foxy: {
+    eyebrow: 'Ask Foxy',
+    title: 'Foxy, your textbook tutor',
+    description: 'Foxy answers from your NCERT textbook and shows you where each answer came from.',
+
+    startTitle: 'What would you like to do?',
+    startDescription: 'Pick a subject and how you want to work. You can start again at any time.',
+    modeLabel: 'How would you like to work?',
+    modeOption: {
+      doubt: 'Ask me anything',
+      explain: 'Walk me through a topic',
+      practice: 'Quiz me',
+    },
+    subjectLabel: 'Subject',
+    startAction: 'Start',
+    startAgainAction: 'Start a new conversation',
+
+    transcriptLabel: 'Conversation with Foxy',
+    youLabel: 'You',
+    foxyLabel: 'Foxy',
+    streamingLabel: 'Foxy is answering',
+    /*
+     * An abstention is a SUCCESSFUL ANSWER and this wording has to carry that.
+     * "Foxy could not answer" reads as a fault; "not in this textbook" is the
+     * true statement, and it is the one that builds the trust the abstention
+     * exists for.
+     */
+    abstainedLabel: 'Not found in your textbook',
+    citationsTitle: 'From your textbook',
+    citationChapter: 'Chapter {number}: {title}',
+    citationUnknownChapter: 'Your textbook',
+    truncatedNotice: 'This answer was longer than Foxy can show. Ask again for a shorter one.',
+
+    composerLabel: 'Your question',
+    composerPlaceholder: 'Type your question',
+    composerRemaining: '{remaining} characters left',
+    sendAction: 'Send',
+    stopAction: 'Stop',
+    retryAction: 'Try again',
+
+    actionsTitle: 'Or ask Foxy to',
+
+    emptyTitle: 'Ask your first question',
+    emptyDescription: 'Type a question, or pick one of the buttons below to get started.',
+    loadingTranscript: 'Loading your conversation',
+
+    usageRemaining: '{remaining} of {limit} messages left today',
+    usageExhausted: 'You have used all of today’s messages. Foxy will be back tomorrow.',
+
+    errorTitle: 'Foxy could not answer',
+    errorGeneric: 'Something interrupted the answer. Try asking again.',
+    errorPartial: 'The answer stopped part way through. What arrived is still above.',
+    errorRateLimited: 'That was quick. Wait a moment before asking again.',
+    errorRateLimitedSeconds: 'That was quick. Try again in {seconds} seconds.',
+    errorDegraded: 'Foxy is busy right now. Try again in a moment.',
+    errorBlocked: 'That question could not be sent. Try rewording it.',
+    errorNotFound: 'This conversation is no longer available. Start a new one.',
+    errorStartFailed: 'The conversation could not be started. Try again.',
+    errorCapabilities: 'Foxy could not load. Try again.',
   },
 
   childSummary: {

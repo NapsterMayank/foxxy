@@ -4,7 +4,7 @@
 
 **Update rule:** this file is updated at the end of every working session, before stopping. If it disagrees with the code, the code wins and this file was not updated — fix it immediately. A stale progress file is worse than none, because it is trusted.
 
-Last updated: **10 August 2026**
+Last updated: **14 August 2026**
 
 ---
 
@@ -24,9 +24,9 @@ Last updated: **10 August 2026**
 | Backend modules | **11 of 11 built AND WIRED** (identity, learner, content, notify, practice, parent, retrieval, foxy, **billing**, **knowledge**, **signals**). Every one is constructed in `buildModules`, and `src/app/__tests__/routes.test.ts` asserts the list exhaustively and pins each module's pool. **Eight register routes; three deliberately do not** — `retrieval` (D-122), `knowledge` and `signals`, none of which has an HTTP surface, with a comment at the foot of `registerRoutes` saying so because "built but never registered" reads exactly like an oversight (D-175). `billing`'s registration is **AWAITED**, the only one besides identity's: its webhook needs an encapsulated Fastify scope for a raw-body parser, and a dropped `await` 404s every genuine delivery in production only. The `payments` port lives on the container, guarded, with a **production boot refusal** (D-176) |
 | Mail | **SMTP adapter BUILT, 11 August.** There was previously no real adapter at all - production defaulted to a console stub with no environment gate, printing verification and password-reset links to stdout and delivering nothing. `createContainer` now refuses to boot in production without SMTP settings (D-226) |
 | Backend processes | **2** — `api` and `worker`. The worker exists and runs one real job |
-| Frontend | **WIRED AND GATED, 12 August.** It makes real network calls for the first time. All five of step 0's foundation gaps are closed — session strategy, the error-code table, the Foxy streaming client (all 7 cases in plan §7 are tests) and the token scales — plus build-order step 6, the typed client and providers. Backend contracts are GENERATED into `src/lib/api/generated/` with a drift test, because `frontend/Dockerfile` copies `frontend/` alone and a direct cross-package import cannot exist in the image. **Tests 10 → 236 unit and 28 end-to-end.** TWELVE CI gates exist and EIGHT have been deliberately broken and observed to fail; the two that cannot be (bundle budgets against a real build, Lighthouse) are blocked on item 33 and on CI ever running |
+| Frontend | **WIRED AND GATED, 12 August.** It makes real network calls for the first time. All five of step 0's foundation gaps are closed — session strategy, the error-code table, the Foxy streaming client (all 7 cases in plan §7 are tests) and the token scales — plus build-order step 6, the typed client and providers. Backend contracts are GENERATED into `src/lib/api/generated/` with a drift test, because `frontend/Dockerfile` copies `frontend/` alone and a direct cross-package import cannot exist in the image. **Tests 10 → 309 unit and 28 end-to-end.** Build-order steps 0-9 are closed: the auth and onboarding screens are live, and **the Foxy chat UI ships 14 August**. TWELVE CI gates exist and EIGHT have been deliberately broken and observed to fail; the two that cannot be (bundle budgets against a real build, Lighthouse) are blocked on item 33 and on CI ever running |
 | Marketing site | **scaffolded** - 32 files under `website/`, committed. Per `06-FRONTEND-SEPARATION-PLAN.md` |
-| Tests | **3,173 backend passing**, 185 files, plus **236 frontend unit and 28 end-to-end** (was 10 — see §5). Three audit waves have added 656 between them. **Every guard, threshold and validation in the codebase has been broken deliberately and confirmed to turn a named test red** - see D-214 |
+| Tests | **3,173 backend passing**, 185 files, plus **309 frontend unit and 28 end-to-end** (was 10 — see §5). Three audit waves have added 656 between them. **Every guard, threshold and validation in the codebase has been broken deliberately and confirmed to turn a named test red** - see D-214 |
 | Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice` + `0003_parent` + **`0004_billing`** + **`0005_foxy`**. Every one has a rollback test, because the round-trip is asserted over the DISCOVERED set rather than per file (D-126) — neither `0004` nor `0005` needed an edit to that test. **Neither has been applied to the development database**, deliberately, for the same reason `0002` has not: see open item 16. ✅ **`0004_billing`'s journal `when` is FIXED** — it was 1786374108357, below `0003_parent`'s 1786700000000, which is the exact D-109 hazard: drizzle selects by `when` and not by `idx`, so on any database already past `0003` it printed "Migrations applied." and applied nothing. **Reproduced on a scratch database before the fix** (`subscriptions` and `payment_events` absent, `0005` applied over the hole, exit code zero), corrected to **1786750000000**, and re-verified both from empty and from a ledger primed to `0003`. The rule is now enforced by `tests/integration/migration-journal-order.test.ts`, which was itself proved to fire by reverting the value. The round-trip test could not have caught this and never could: it applies by `idx` and never reads `when` (D-173, D-174) |
 | Gates | type-check · lint · build · test — all green. `platform/authz` stays **100%**; `billing/domain` 98.5% statements / 96.2% branches / 100% functions, `billing.service` 99.2% / 95.1% / 90%, `platform/payments` 100% statements. `parent/domain` 100%, `parent.service` 94.0%, `retrieval` 99.1%, `practice/domain` 100%. **`modules/foxy` 96.3% statements / 90.4% branches / 94.6% functions**, with `foxy/domain` at 100%/99.0%/100% and `platform/llm` at 98.5% — the real LLM adapter is fully covered and never called |
 | Deployment | **BUILT, 10 August.** `docker/compose.prod.yml` — postgres+pgvector · valkey · api · worker · alert evaluator · frontend · website · Caddy · backup. Three multi-stage non-root Dockerfiles, resource limits on EVERY service, an `internal: true` data network with no published ports, and volume names (`foxxy_prod_*`) that cannot collide with the development ones holding the corpus (D-140). Validated with `docker compose config` |
@@ -114,8 +114,40 @@ credentialed API calls; every shared component a screen needs exists; every
 user-facing string is translated and lint-enforced; twelve CI gates exist and
 eight have been deliberately broken and observed to fail.
 
-**THE NEXT FRONTEND TASK IS STEPS 7-8: wire the auth and onboarding screens to
-the live client.** Everything they need is already built and tested:
+**Superseded 12-14 August: steps 7-8 and step 9 are all closed.** The table below
+is kept because it is still the map of where each piece lives.
+
+### Step 9 — the Foxy chat UI, closed 14 August 2026
+
+**The screen is built, and every §7 case it owns is a test.** `useFoxyStream`
+already held the seven streaming cases; what landed here is the UI, the four
+non-streaming wire calls, and the parts of §7 that are a screen's job rather
+than a hook's — the partial answer staying visible with retry BESIDE it rather
+than replacing it, an abstention rendered as an answer with no retry at all, and
+a pre-stream rejection leaving no empty bubble behind.
+
+| Piece | Where | The decision worth knowing |
+|---|---|---|
+| Response schemas | `features/foxy/api/foxy-responses.ts` | The Foxy contract declares its responses as INTERFACES, not Zod schemas — nothing on the server parses them. `apiRequest` validates every response, so the schemas are written here and pinned with `satisfies z.ZodType<...>`: not a second definition, a runtime check OF the generated one, and a backend field change fails `typecheck` at that line |
+| Wire calls | `features/foxy/api/foxy-requests.ts` | FOUR of the five endpoints. `POST /sessions/:id/messages` is absent on purpose — a `sendMessage` here would be a second, buffered way to take a turn, and the buffered one looks correct in every `app.inject` test |
+| Transcript | `hooks/use-foxy-conversation.ts`, `lib/transcript.ts` | Stored history and live messages are CONCATENATED, never merged. They cannot overlap because a completed turn marks the transcript stale without refetching it (D-351) |
+| Action buttons | `components/action-bar.tsx` | The list AND its bilingual labels come from `GET /foxy/capabilities`. `FOXY_ACTIONS` exists in the generated constants and this component deliberately does not read it — a client with its own copy renders a button the server does not implement, and that fails when a child presses it. A test asserts an action this build has never heard of still renders |
+| The daily cap | `foxy-chat.tsx`, `lib/foxy-messages.ts` | Stated from `usage.remaining` BEFORE a turn is attempted, never inferred from an error. The backend raises the allowance refusal and a pace limit as the same `RateLimitError`, so guessing between them on the size of `retryAfterSeconds` would read a student the wrong ending at the boundary |
+| Live region | `components/message-list.tsx` | `role="log"` + `aria-busy` on the STREAMING BUBBLE, not on the log. A polite region that changes per token frame reads a stuttering word salad; `aria-busy` holds the announcement until the turn settles. Busy on the log instead would suppress the student's own message going in |
+
+**What it does not do yet:** there is no session list, so `GET /foxy/sessions` is
+written and unused — a conversation is reachable by its URL or by starting a new
+one. The chapter anchor (`chapterId`) is not offered either; the contract has it
+optional and no screen chooses a chapter yet.
+
+**Verified in the container, not on the host** — `docker build -f
+frontend/Dockerfile` succeeds and `/student/foxy` returns 200 and renders in both
+languages. **The Playwright pass did NOT run**: port 3000 is held by
+`backend-api-1`, and `playwright.config.ts` hardcodes `baseURL` to it. Stop that
+container (or give the config an env override) before the browser suite can see
+this screen — and note that no visual baseline exists for the route yet.
+
+**The earlier map, still accurate.** Everything the screens need:
 
 | What the screens need | Where it already is |
 |---|---|
@@ -141,10 +173,9 @@ because the CSRF verdict must not depend on who the caller claims to be.
 
 | | Days |
 |---|---|
-| **Frontend steps 7-8** — auth and onboarding onto the live client | 5 |
-| **A socket-level smoke test** - the only untested boundary in the backend | 1 |
+| **A socket-level smoke test** - the only untested boundary in the backend. **Now the most valuable single day in the repository**: the Foxy chat UI ships against a harness that cannot tell incremental from buffered | 1 |
 | A Postman collection generated from the route definitions | 0.5 |
-| Frontend steps 9-13 — the Foxy chat UI on `useFoxyStream`, then practice, progress, parent, billing | 22 |
+| Frontend steps 10-13 — practice, progress, parent, billing | 17 |
 | Remaining open items in section 7 | 3 |
 
 ### The wire boundary is the one thing three audits could not reach
@@ -549,7 +580,7 @@ Build order from `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` section 11. **Steps 0
 | ✅ 5 | **i18n — both dictionaries, the switch, the Devanagari font, the user-facing-string lint rule.** Every user-facing string in the product now comes from a dictionary; a literal in JSX or in `aria-label`/`alt`/`placeholder`/`title` fails lint. **The visual-regression language axis is live**, so §10.7's four axes are all real | — |
 | ✅ 6 | **API client · query keys · providers · session context** — one typed client, contracts generated from the backend, 401 clears the cache | — |
 | ✅ 7-8 | **`auth` · `onboarding` — wired to the live client, 12 August 2026.** Signup, login, verify, resend, forgot, reset, student onboarding and the parent link-code claim. Field errors come from the GENERATED request schemas, because the wire envelope names no field; a 401 on `POST /auth/login` is a credential verdict and not an expired session; `?next=` is checked for an open redirect. **Six contract mismatches found and fixed** — `identifier` vs `email`, an 8-character password rule against a 10-character contract, a six-digit verify code for an endpoint that takes a link token, two subjects with no content behind them, a parent name nothing stores, and an unguarded `?next=` | — |
-| 🟡 9 | **`foxy`** — **`useFoxyStream` and the SSE parser are DONE, all 7 cases in plan §7 tested.** The chat UI is not built | 5 |
+| ✅ 9 | **`foxy` — the chat UI is BUILT AND WIRED, 14 August 2026.** Start panel (mode × subject, and NO grade — it comes from the profile), transcript, streaming bubble, citations, the six served action buttons, composer, usage line, retry. The wire layer is four calls; the fifth — the SSE turn — stays inside `useFoxyStream`, deliberately, so no buffered second way to take a turn can exist. **87 foxy tests**, and the whole suite is 252 → **309**. Three defects and one wrong assumption found on the way — D-351, D-352, D-353 | — |
 | ⬜ 10-11 | `practice` · `progress` | 8 |
 | ⬜ 12 | `parent-dashboard` | 6 |
 | ⬜ 13 | `billing` | 3 |

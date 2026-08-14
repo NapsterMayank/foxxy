@@ -9,6 +9,7 @@ import type {
   FoxyCitationDto,
   FoxyStreamFrameDto,
 } from '@/lib/api/generated/contracts/foxy.contract';
+import { foxyPaths } from '@/lib/api/paths';
 import { foxyKeys } from '@/lib/api/query-keys';
 import { apiBaseUrl, apiVersionPrefix } from '@/lib/config/env';
 import { readFrames } from '../lib/sse';
@@ -316,7 +317,7 @@ export function useFoxyStream(sessionId: string): FoxyStreamState {
 
       try {
         const response = await fetch(
-          `${apiBaseUrl}${apiVersionPrefix}/foxy/sessions/${encodeURIComponent(sessionId)}/messages`,
+          `${apiBaseUrl}${apiVersionPrefix}${foxyPaths.messages(sessionId)}`,
           {
             method: 'POST',
             credentials: 'include',
@@ -391,8 +392,21 @@ export function useFoxyStream(sessionId: string): FoxyStreamState {
            * Invalidating rather than hand-writing the message into the cache
            * keeps ONE definition of what a stored turn looks like — the
            * server's — and a refresh shows exactly what a reload would.
+           *
+           * `refetchType: 'none'` MARKS IT STALE WITHOUT REFETCHING IT, and
+           * that is load-bearing. The screen renders the stored transcript and
+           * these live messages as one list; an immediate refetch would return
+           * the very turn still held here, and the finished answer would appear
+           * twice with no key able to tell the copies apart — a user message
+           * carries no server id, ever, and matching on text would collapse a
+           * student who asked the same question twice. Stale-not-refetched
+           * gives the property that was actually wanted: the next MOUNT reads
+           * the server's version, and the mounted screen is left alone.
            */
-          void queryClient.invalidateQueries({ queryKey: foxyKeys.session(sessionId) });
+          void queryClient.invalidateQueries({
+            queryKey: foxyKeys.session(sessionId),
+            refetchType: 'none',
+          });
         }
       }
     },

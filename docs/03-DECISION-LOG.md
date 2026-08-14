@@ -6669,3 +6669,48 @@ for one platform only. The frontend image had therefore never built anywhere, an
 resolve, and verify both directions — `npm ci` completes in the image, and
 `npm ci --dry-run` still resolves on Windows. Any future dependency change needs the same
 treatment; a lockfile written by a Windows `npm install` is not portable.
+
+### D-351 · A completed Foxy turn marks the transcript stale without refetching it
+
+The Foxy screen renders two sources as one list: the stored transcript from
+`GET /foxy/sessions/:id`, and the live messages `useFoxyStream` holds. The hook
+invalidated the transcript query on completion — correct in intent, so a reload shows what
+the server stored — and the refetch returned the very turn still held in memory. Every
+finished answer would have appeared twice.
+
+Deduplication is not available as a fallback: a user message carries NO server id at all,
+ever, and matching on text collapses a student who asked the same question twice. Freezing
+the transcript at first load is the obvious alternative and is refused by two lint rules
+that are both right — `react-hooks/refs` (a ref read during render) and
+`react-hooks/set-state-in-effect` (the cascading render the effect spelling costs).
+
+**Decision:** `invalidateQueries({ refetchType: 'none' })`. The cache is marked stale and
+the mounted screen is left alone, so the two halves cannot overlap and the next MOUNT
+reads the server's version — which is the property the invalidation was for. A rule
+refusing both spellings of an idea usually means the idea is in the wrong file; the
+duplication was created in the stream hook and is fixed there.
+
+### D-352 · The open Foxy conversation lives in the URL, not in component state
+
+§7 point 5 asks that "a page refresh shows the same history". The stored transcript alone
+cannot deliver it: with the session id in `useState`, a refresh loses which conversation to
+load and returns the student to the start panel with their turns sitting on the server,
+unreachable.
+
+**Decision:** `/student/foxy?session=<id>`, written with `router.replace` on creation.
+`replace` and not `push`, because the start panel and the conversation are one screen in
+two states — a back press should leave Foxy rather than land on a panel that opens a second
+session nobody asked for. The parameter is also what makes the conversation survive the two
+tabs a phone user ends up with.
+
+### D-353 · "The conversation could not be started" is not "the answer stopped"
+
+`foxyErrorMessage` mapped every generic treatment to one sentence, and the Foxy screen has
+TWO requests that fail generically: the turn, and `POST /foxy/sessions`. A failed start
+rendered "Something interrupted the answer. Try asking again." — telling a student
+something did not finish when nothing had started.
+
+**Decision:** an optional `fallback` translation key, named by the caller. It applies ONLY
+where the treatment has no specific copy of its own, so a rate limit or a refusal still
+reads correctly from either screen. Found by the integration test for the start-failure
+path, which is the one place the two requests are visible together.

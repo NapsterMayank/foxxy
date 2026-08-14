@@ -100,6 +100,7 @@ export const hi: Dictionary = {
     navOverview: 'सारांश',
     navChild: 'बच्चा',
     navUpdates: 'नई जानकारी',
+    navFoxy: 'Foxy से पूछें',
   },
 
   auth: {
@@ -235,6 +236,62 @@ export const hi: Dictionary = {
   progress: {
     eyebrow: 'सीखने के प्रमाण',
     sampleLabel: 'नमूना प्रगति',
+  },
+
+  /** Foxy — `Foxy`, NCERT और विषयों के नाम अनुवादित नहीं हैं (§8)। */
+  foxy: {
+    eyebrow: 'Foxy से पूछें',
+    title: 'Foxy, आपकी किताब का शिक्षक',
+    description: 'Foxy आपकी NCERT किताब से उत्तर देता है और बताता है कि उत्तर कहाँ से आया।',
+
+    startTitle: 'आप क्या करना चाहेंगे?',
+    startDescription: 'विषय चुनें और तय करें कि कैसे पढ़ना है। आप कभी भी नई शुरुआत कर सकते हैं।',
+    modeLabel: 'आप कैसे पढ़ना चाहेंगे?',
+    modeOption: {
+      doubt: 'मुझसे कुछ भी पूछें',
+      explain: 'एक विषय समझाएँ',
+      practice: 'मुझसे सवाल पूछें',
+    },
+    subjectLabel: 'विषय',
+    startAction: 'शुरू करें',
+    startAgainAction: 'नई बातचीत शुरू करें',
+
+    transcriptLabel: 'Foxy के साथ बातचीत',
+    youLabel: 'आप',
+    foxyLabel: 'Foxy',
+    streamingLabel: 'Foxy उत्तर दे रहा है',
+    abstainedLabel: 'यह आपकी किताब में नहीं मिला',
+    citationsTitle: 'आपकी किताब से',
+    citationChapter: 'अध्याय {number}: {title}',
+    citationUnknownChapter: 'आपकी किताब',
+    truncatedNotice: 'यह उत्तर दिखाने के लिए बहुत लंबा था। छोटे उत्तर के लिए फिर से पूछें।',
+
+    composerLabel: 'आपका सवाल',
+    composerPlaceholder: 'अपना सवाल लिखें',
+    composerRemaining: '{remaining} अक्षर बाकी',
+    sendAction: 'भेजें',
+    stopAction: 'रोकें',
+    retryAction: 'फिर से कोशिश करें',
+
+    actionsTitle: 'या Foxy से कहें',
+
+    emptyTitle: 'अपना पहला सवाल पूछें',
+    emptyDescription: 'सवाल लिखें, या शुरू करने के लिए नीचे दिए बटनों में से कोई चुनें।',
+    loadingTranscript: 'आपकी बातचीत खुल रही है',
+
+    usageRemaining: 'आज {limit} में से {remaining} संदेश बाकी',
+    usageExhausted: 'आज के सारे संदेश इस्तेमाल हो गए। Foxy कल फिर उपलब्ध होगा।',
+
+    errorTitle: 'Foxy उत्तर नहीं दे सका',
+    errorGeneric: 'उत्तर बीच में रुक गया। फिर से पूछें।',
+    errorPartial: 'उत्तर बीच में रुक गया। जितना आया, वह ऊपर मौजूद है।',
+    errorRateLimited: 'बहुत तेज़ी हो गई। थोड़ा रुककर फिर पूछें।',
+    errorRateLimitedSeconds: 'बहुत तेज़ी हो गई। {seconds} सेकंड बाद फिर कोशिश करें।',
+    errorDegraded: 'Foxy अभी व्यस्त है। थोड़ी देर में फिर कोशिश करें।',
+    errorBlocked: 'यह सवाल भेजा नहीं जा सका। इसे दूसरे शब्दों में लिखें।',
+    errorNotFound: 'यह बातचीत अब उपलब्ध नहीं है। नई बातचीत शुरू करें।',
+    errorStartFailed: 'बातचीत शुरू नहीं हो सकी। फिर से कोशिश करें।',
+    errorCapabilities: 'Foxy खुल नहीं सका। फिर से कोशिश करें।',
   },
 
   childSummary: {
