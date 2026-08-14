@@ -6714,3 +6714,75 @@ something did not finish when nothing had started.
 where the treatment has no specific copy of its own, so a rate limit or a refusal still
 reads correctly from either screen. Found by the integration test for the start-failure
 path, which is the one place the two requests are visible together.
+
+### D-354 · The evidence label takes the wire code, and is translated
+
+`EvidenceLabel` took `LearningEvidence` — a hand-written union of English strings in
+`src/types/` — and rendered the value directly. Two faults, and the second one shipped.
+
+§12 forbids "a hand-written type for data the backend already defines", and
+`EVIDENCE_LABELS` is generated from the same constant the database CHECK is built from.
+Two vocabularies for one closed set is one drift from a screen that cannot render a label
+the server sends.
+
+**And the label was never translated.** The English sentence WAS the value, so a Hindi
+reader saw "Strong evidence" on their own progress and on their child's — on the screens
+§8 cares most about, and invisible to anyone working in English.
+
+**Decision:** the component takes `EvidenceLabel` from the generated constants, maps it to
+a dictionary key through a `Record<EvidenceCode, TranslationKey>` (a missing entry is a
+type error), and `src/types/learning-evidence.ts` is deleted. Both fixture callers move to
+codes. The four visual baselines this changes were already stale (open item 43).
+
+### D-355 · Weakest-first is stated, because the generated order is not an ordering
+
+The chapter step bar fills to a chapter's evidence rank. `EVIDENCE_LABELS` is generated and
+its order is the DECLARATION order of a closed set — `strong` first — which is not an
+ordering of strength. A bar built straight from it fills backwards: "Not assessed yet"
+lights every segment and "Strong evidence" lights one.
+
+**Decision:** `EVIDENCE_ASCENDING` in `features/progress/lib`, derived by sorting the
+generated union through a `Record<EvidenceCode, number>` so a fifth label added upstream is
+a type error rather than a silent rank zero. The bar stays `aria-hidden`: the LABEL is the
+information, and §9.1 forbids the percentage a filled bar is one refactor from becoming.
+
+### D-356 · Ownership of a wire call follows the caller, not the URL prefix
+
+`getPracticeProgress` and `getPracticeHistory` were written in `features/practice/api`
+because their paths are `/practice/…`. The progress feature then imported them and
+`architecture/no-cross-feature-imports` refused — and the first instinct was to argue with
+the gate in a comment explaining why this case was fine.
+
+It was not fine. Practice's own screen calls mission, session, answer and submit; it never
+reads progress or history. Both readers of those two endpoints are the progress screen.
+
+**Decision:** the two functions move to `features/progress/api`. Everything genuinely
+shared already was — paths in `lib/api/paths`, schemas generated, cache keys in
+`lib/api/query-keys`, which is how practice's submit mutation invalidates what the progress
+feature queries without either importing the other.
+
+### D-357 · Practice renders "4 of 6", never "67%"
+
+`SubmissionResult` carries `scorePercent` and the summary deliberately does not read it. A
+session score and a mastery percentage are indistinguishable to a child — both are a number
+out of a hundred describing them — and §9.1 forbids the second. "4 of 6 correct" is a fact
+about six questions and cannot be read as a verdict. A test asserts the string `%` never
+reaches either screen.
+
+The same section covers the client-supplied timer. `timeSpentMs` is clamped into the
+contract's range rather than sent raw: a backwards device clock (NTP, a timezone change)
+gives a negative and a tab left open over lunch gives hours, and either one 400s an answer
+the student would then lose over a number they never saw. The clamp is safe because the
+server does not trust the figure anyway — `submitSession` bounds the claimed total by its
+own wall clock before averaging.
+
+### D-358 · The hint ladder is contracted, unrouted and unpopulated
+
+`practice.contract.ts` defines `hintQuerySchema` and `hintResponseSchema`;
+`practice.routes.ts` registers nothing that serves them. The content is absent too —
+`hint_level_1..3` are NULL on all 3,791 source questions (open item 13).
+
+**Decision:** no hint affordance on the practice screen, and the gap is recorded at
+`practicePaths` rather than stubbed. A hint button today would 404 to fetch content that
+does not exist; a disabled one would advertise a feature with no delivery date. The
+contract half is not deleted — it is the right shape for when generation lands.

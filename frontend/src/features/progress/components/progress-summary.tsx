@@ -1,10 +1,11 @@
 import { EvidenceLabel } from '@/components/patterns/evidence-label';
 import { getServerT } from '@/lib/i18n/server';
-import { learningEvidenceLabels, type LearningEvidence } from '@/types/learning-evidence';
+import type { EvidenceLabel as EvidenceCode } from '@/lib/api/generated/constants/practice';
+import { EVIDENCE_ASCENDING, evidenceRank } from '@/features/progress/lib/evidence-order';
 
 export interface SubjectProgressItem {
   detail: string;
-  evidence: LearningEvidence;
+  evidence: EvidenceCode;
   subject: string;
 }
 
@@ -32,7 +33,7 @@ export async function ProgressSummary({ items, title }: ProgressSummaryProps) {
 
       <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {items.map((item) => {
-          const activeStep = learningEvidenceLabels.indexOf(item.evidence);
+          const activeStep = evidenceRank(item.evidence);
 
           return (
             <article className="rounded-card border border-line p-4" key={item.subject}>
@@ -47,7 +48,7 @@ export async function ProgressSummary({ items, title }: ProgressSummaryProps) {
               </div>
               <p className="mt-2 text-sm leading-6 text-muted">{item.detail}</p>
               <div aria-hidden="true" className="mt-4 flex gap-2">
-                {learningEvidenceLabels.map((step, index) => (
+                {EVIDENCE_ASCENDING.map((step, index) => (
                   <span
                     className={index <= activeStep ? 'h-2 flex-1 rounded-full bg-brand' : 'h-2 flex-1 rounded-full bg-line'}
                     key={step}

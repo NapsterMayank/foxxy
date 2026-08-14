@@ -238,6 +238,14 @@ export const hi: Dictionary = {
     sampleLabel: 'नमूना प्रगति',
   },
 
+  /** चार प्रमाण-लेबल — §9.1। कोई प्रतिशत नहीं, केवल शब्द। */
+  evidence: {
+    strong: 'पक्का प्रमाण',
+    developing: 'बन रहा है',
+    needsAnotherSession: 'एक और सत्र चाहिए',
+    notAssessed: 'अभी आकलन नहीं हुआ',
+  },
+
   /** Foxy — `Foxy`, NCERT और विषयों के नाम अनुवादित नहीं हैं (§8)। */
   foxy: {
     eyebrow: 'Foxy से पूछें',
@@ -292,6 +300,96 @@ export const hi: Dictionary = {
     errorNotFound: 'यह बातचीत अब उपलब्ध नहीं है। नई बातचीत शुरू करें।',
     errorStartFailed: 'बातचीत शुरू नहीं हो सकी। फिर से कोशिश करें।',
     errorCapabilities: 'Foxy खुल नहीं सका। फिर से कोशिश करें।',
+  },
+
+  practice: {
+    eyebrow: 'अभ्यास',
+    title: 'आज का अभ्यास',
+    description: 'आप जो पढ़ रहे हैं, उसमें से चुने गए कुछ सवाल।',
+
+    missionEyebrow: 'आपके लिए चुना गया',
+    missionNoneTitle: 'अभी आपके लिए कुछ तैयार नहीं है',
+    missionNoneDescription:
+      'अपने विषयों में से कोई अध्याय शुरू करें, फिर अभ्यास यहाँ दिखेगा।',
+    missionQuestionCount: '{count} सवाल',
+    startAction: 'अभ्यास शुरू करें',
+    startAgainAction: 'कुछ और अभ्यास करें',
+
+    questionProgress: 'सवाल {total} में से {current}',
+    optionsLabel: 'एक उत्तर चुनें',
+    answerAction: 'मेरा उत्तर जाँचें',
+    nextAction: 'अगला सवाल',
+    finishAction: 'पूरा करें और नतीजा देखें',
+    loadingSession: 'आपके सवाल तैयार हो रहे हैं',
+
+    feedbackCorrect: 'यह सही है।',
+    feedbackIncorrect: 'इस बार नहीं। कारण यह रहा।',
+    correctAnswerLabel: 'सही उत्तर:',
+    explanationTitle: 'क्यों',
+
+    summaryTitle: 'सत्र पूरा हुआ',
+    summaryScore: '{total} में से {correct} सही',
+    summaryXp: '{xp} XP',
+    summaryXpWithheld: '{withheld} XP नहीं जुड़े — आज की सीमा पूरी हो चुकी है।',
+    summaryEvidenceTitle: 'इससे क्या पता चलता है',
+    summaryNextReview: 'यह अध्याय {date} को फिर आएगा।',
+    summaryDoneAction: 'मेरे डैशबोर्ड पर लौटें',
+
+    invalidTitle: 'यह प्रयास गिना नहीं गया',
+    invalidTooFast:
+      'उत्तर पढ़ने से भी तेज़ आए। आराम से, अध्याय फिर से करें।',
+    invalidSameAnswer:
+      'हर सवाल में एक ही विकल्प चुना गया। हर सवाल देखकर फिर कोशिश करें।',
+    invalidGeneric:
+      'इस प्रयास को गिना नहीं जा सका। अध्याय फिर से करें।',
+
+    errorTitle: 'अभ्यास खुल नहीं सका',
+    errorGeneric: 'कुछ गड़बड़ हुई। फिर कोशिश करें।',
+    errorStartFailed:
+      'अभ्यास सत्र शुरू नहीं हो सका। फिर कोशिश करें।',
+    errorAnswerFailed:
+      'यह उत्तर दर्ज नहीं हुआ। फिर कोशिश करें।',
+    errorConflict:
+      'यह पहले ही दर्ज हो चुका है। स्क्रीन पर जहाँ हैं, वहीं से आगे बढ़ें।',
+    errorAnswerConflict:
+      'इस सवाल का उत्तर पहले ही दर्ज है, और उत्तर बदले नहीं जा सकते।',
+    errorSubmitConflict: 'यह सत्र पहले ही पूरा हो चुका है।',
+    errorSessionGone:
+      'यह अभ्यास सत्र अब उपलब्ध नहीं है। नया सत्र शुरू करें।',
+    errorRateLimited: 'बहुत तेज़ी हो गई। थोड़ा रुककर फिर कोशिश करें।',
+    errorRateLimitedSeconds: 'बहुत तेज़ी हो गई। {seconds} सेकंड बाद फिर कोशिश करें।',
+    errorDegraded:
+      'हमारी एक सेवा अभी उपलब्ध नहीं है। थोड़ी देर बाद कोशिश करें।',
+    retryAction: 'फिर कोशिश करें',
+  },
+
+  progressScreen: {
+    eyebrow: 'आपकी प्रगति',
+    title: 'आपके अभ्यास से क्या पता चलता है',
+    description:
+      'आपके अपने सत्रों से मिले प्रमाण। कोई अंक नहीं, और किसी से तुलना नहीं।',
+
+    totalXpLabel: 'कुल XP',
+    xpTodayLabel: 'आज का XP',
+    sessionsLabel: 'पूरे हुए सत्र',
+
+    chaptersTitle: 'अध्याय दर अध्याय',
+    attemptsLabel: '{count} सत्र',
+    lastPractisedLabel: 'पिछला अभ्यास {date}',
+    neverPractisedLabel: 'अभी अभ्यास नहीं हुआ',
+    nextReviewLabel: 'दोहराव {date} को',
+
+    historyTitle: 'हाल के सत्र',
+    historyScore: '{xp} XP',
+    historyPending: 'पूरा नहीं हुआ',
+    historyInvalid: 'गिना नहीं गया',
+
+    emptyTitle: 'अभी कोई अभ्यास नहीं',
+    emptyDescription:
+      'एक अभ्यास सत्र पूरा करें, फिर आपके प्रमाण यहाँ दिखेंगे।',
+    loading: 'आपकी प्रगति खुल रही है',
+    errorTitle: 'प्रगति खुल नहीं सकी',
+    retryAction: 'फिर कोशिश करें',
   },
 
   childSummary: {

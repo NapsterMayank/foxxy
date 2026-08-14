@@ -10,17 +10,17 @@ export const metadata: Metadata = {
 const sampleProgress: readonly SubjectProgressItem[] = [
   {
     subject: 'Mathematics',
-    evidence: 'Strong evidence',
+    evidence: 'strong',
     detail: 'Fractions are looking confident across recent practice.',
   },
   {
     subject: 'Science',
-    evidence: 'Developing',
+    evidence: 'developing',
     detail: 'You can explain the parts of a plant with clear examples.',
   },
   {
     subject: 'English',
-    evidence: 'Needs another session',
+    evidence: 'needs_another_session',
     detail: 'Try one more exercise on identifying the main idea.',
   },
 ];

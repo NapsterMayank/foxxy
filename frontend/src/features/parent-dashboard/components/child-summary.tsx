@@ -1,12 +1,12 @@
 import { EvidenceLabel } from '@/components/patterns/evidence-label';
 import { getServerT } from '@/lib/i18n/server';
-import type { LearningEvidence } from '@/types/learning-evidence';
+import type { EvidenceLabel as EvidenceCode } from '@/lib/api/generated/constants/practice';
 
 export interface ChildLearningSummary {
   childName: string;
   classLabel: string;
   focusArea: string;
-  latestEvidence: LearningEvidence;
+  latestEvidence: EvidenceCode;
   latestEvidenceDetail: string;
   recentActivity: string;
 }

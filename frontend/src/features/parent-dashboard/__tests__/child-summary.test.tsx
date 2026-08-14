@@ -23,7 +23,7 @@ describe('ChildSummary', () => {
           childName: 'Aarav',
           classLabel: 'Class 7',
           recentActivity: 'Practised fractions',
-          latestEvidence: 'Developing',
+          latestEvidence: 'developing',
           latestEvidenceDetail: 'Recent answers are becoming more consistent.',
           focusArea: 'Reading main ideas',
         },

@@ -1,9 +1,9 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import { renderClient } from '@test/setup/render';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import type { LearningEvidence } from '@/types/learning-evidence';
 import { ConfirmDialog } from '../confirm-dialog';
 import { EvidenceLabel } from '../evidence-label';
 import { FormField } from '../form-field';
@@ -139,22 +139,33 @@ describe('StatCard', () => {
   });
 });
 
+/*
+ * `renderClient` AND NOT `render` FOR THIS BLOCK. `EvidenceLabel` takes the wire
+ * code and translates it, so it needs the provider — which is the point: the
+ * label used to BE an English string, and a Hindi reader saw English on their
+ * child's progress.
+ */
 describe('EvidenceLabel', () => {
   it.each([
-    ['Strong evidence', 'success'],
-    ['Developing', 'brand'],
-    ['Needs another session', 'info'],
-    ['Not assessed yet', 'neutral'],
-  ] as const)('renders %s with the %s tone', (evidence, tone) => {
-    render(<EvidenceLabel evidence={evidence as LearningEvidence} />);
-    expect(screen.getByText(evidence)).toHaveAttribute('data-tone', tone);
+    ['strong', 'Strong evidence', 'success'],
+    ['developing', 'Developing', 'brand'],
+    ['needs_another_session', 'Needs another session', 'info'],
+    ['not_assessed', 'Not assessed yet', 'neutral'],
+  ] as const)('renders %s with the %s tone', (code, words, tone) => {
+    renderClient(<EvidenceLabel evidence={code} />);
+    expect(screen.getByText(words)).toHaveAttribute('data-tone', tone);
   });
 
   it('never renders "needs another session" as a failure', () => {
     // §9.1: no harsh red. Red says "you failed"; the sentence says "do this
     // again", which is the actual meaning.
-    render(<EvidenceLabel evidence="Needs another session" />);
+    renderClient(<EvidenceLabel evidence="needs_another_session" />);
     expect(screen.getByText('Needs another session')).not.toHaveAttribute('data-tone', 'danger');
+  });
+
+  it('says it in Hindi when the reader reads Hindi', () => {
+    renderClient(<EvidenceLabel evidence="strong" />, { language: 'hi' });
+    expect(screen.getByText('पक्का प्रमाण')).toBeInTheDocument();
   });
 });
 

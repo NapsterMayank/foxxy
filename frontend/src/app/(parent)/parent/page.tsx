@@ -10,7 +10,7 @@ const sampleChild: ChildLearningSummary = {
   childName: 'Aarav Sharma',
   classLabel: 'Class 7 · Sample learner',
   recentActivity: 'Practised fractions on four days this week',
-  latestEvidence: 'Strong evidence',
+  latestEvidence: 'strong',
   latestEvidenceDetail: 'Equivalent fractions are consistent across recent practice.',
   focusArea: 'Main ideas in English reading',
 };

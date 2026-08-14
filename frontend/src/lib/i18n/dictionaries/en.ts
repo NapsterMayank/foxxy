@@ -238,6 +238,24 @@ export const en = {
   },
 
   /**
+   * The four evidence labels — plan §9.1.
+   *
+   * A CLOSED SET FROM THE BACKEND (`EVIDENCE_LABELS`), worded here. They used
+   * to BE English strings in the type system, so a Hindi reader saw English on
+   * their own progress; the code now comes from the wire and the words from
+   * here.
+   *
+   * NONE OF THEM IS A NUMBER, and none of them can become one: §9.1 forbids
+   * mastery percentages, and `EvidenceLabel` has no prop that could carry one.
+   */
+  evidence: {
+    strong: 'Strong evidence',
+    developing: 'Developing',
+    needsAnotherSession: 'Needs another session',
+    notAssessed: 'Not assessed yet',
+  },
+
+  /**
    * Foxy — build-order step 9.
    *
    * `Foxy` IS NOT TRANSLATED anywhere below. It is the tutor's name, and §8's
@@ -310,6 +328,111 @@ export const en = {
     errorNotFound: 'This conversation is no longer available. Start a new one.',
     errorStartFailed: 'The conversation could not be started. Try again.',
     errorCapabilities: 'Foxy could not load. Try again.',
+  },
+
+  /**
+   * Practice — build-order step 10.
+   *
+   * NO PERCENTAGE ANYWHERE. `SubmissionResult` carries `scorePercent` and this
+   * screen renders `correctCount` of `questionCount` instead: a session score
+   * and a mastery percentage look identical to a child, and §9.1 forbids the
+   * second. "4 of 6" is a fact about six questions; "67%" is a verdict.
+   */
+  practice: {
+    eyebrow: 'Practice',
+    title: 'Today’s practice',
+    description: 'A short set of questions, chosen from what you have been learning.',
+
+    missionEyebrow: 'Chosen for you',
+    missionNoneTitle: 'Nothing is waiting for you yet',
+    missionNoneDescription: 'Pick up a chapter from your subjects and practice will appear here.',
+    missionQuestionCount: '{count} questions',
+    startAction: 'Start practice',
+    startAgainAction: 'Practise something else',
+
+    questionProgress: 'Question {current} of {total}',
+    optionsLabel: 'Choose one answer',
+    answerAction: 'Check my answer',
+    nextAction: 'Next question',
+    finishAction: 'Finish and see my result',
+    loadingSession: 'Getting your questions ready',
+
+    feedbackCorrect: 'That is right.',
+    /*
+     * NOT "wrong", and not red — §9.1. The sentence names what happens next,
+     * because the explanation underneath it is the point of the moment.
+     */
+    feedbackIncorrect: 'Not this time. Here is why.',
+    correctAnswerLabel: 'The answer is:',
+    explanationTitle: 'Why',
+
+    summaryTitle: 'Session complete',
+    summaryScore: '{correct} of {total} correct',
+    summaryXp: '{xp} XP',
+    summaryXpWithheld: '{withheld} XP was not added — today’s cap is full.',
+    summaryEvidenceTitle: 'What this shows',
+    summaryNextReview: 'This chapter comes back around on {date}.',
+    summaryDoneAction: 'Back to my dashboard',
+
+    /*
+     * AN INVALID ATTEMPT IS NOT AN ACCUSATION. XP is withheld and the sentence
+     * says what to do differently; nothing here calls a child a cheat, and the
+     * backend's reason CODE is never rendered.
+     */
+    invalidTitle: 'This attempt did not count',
+    invalidTooFast:
+      'The answers came in faster than they can be read. Take your time and try the chapter again.',
+    invalidSameAnswer:
+      'Every question got the same option. Try again when you can give each one a look.',
+    invalidGeneric: 'Something about this attempt could not be counted. Try the chapter again.',
+
+    errorTitle: 'Practice could not load',
+    errorGeneric: 'Something went wrong. Try again.',
+    errorStartFailed: 'The practice session could not be started. Try again.',
+    errorAnswerFailed: 'That answer was not recorded. Try again.',
+    errorConflict: 'That was already recorded. Carry on from where the screen is now.',
+    errorAnswerConflict: 'This question already has an answer, and answers cannot be changed.',
+    errorSubmitConflict: 'This session was already finished.',
+    errorSessionGone: 'This practice session is no longer available. Start a new one.',
+    errorRateLimited: 'That was quick. Wait a moment and try again.',
+    errorRateLimitedSeconds: 'That was quick. Try again in {seconds} seconds.',
+    errorDegraded: 'Something we rely on is unavailable right now. Try again shortly.',
+    retryAction: 'Try again',
+  },
+
+  /**
+   * Progress — build-order step 11.
+   *
+   * XP IS A NUMBER AND EVIDENCE IS A WORD, and that split is the whole screen.
+   * XP counts what was done; evidence describes what it shows. §9.1 allows the
+   * first and forbids the second from ever becoming a percentage.
+   */
+  progressScreen: {
+    eyebrow: 'Your progress',
+    title: 'What your practice shows',
+    description:
+      'Evidence from your own sessions. No scores out of ten, and nothing compared with anybody else.',
+
+    totalXpLabel: 'XP earned',
+    xpTodayLabel: 'XP today',
+    sessionsLabel: 'Sessions finished',
+
+    chaptersTitle: 'Chapter by chapter',
+    attemptsLabel: '{count} sessions',
+    lastPractisedLabel: 'Last practised {date}',
+    neverPractisedLabel: 'Not practised yet',
+    nextReviewLabel: 'Review due {date}',
+
+    historyTitle: 'Recent sessions',
+    historyScore: '{xp} XP',
+    historyPending: 'Not finished',
+    historyInvalid: 'Did not count',
+
+    emptyTitle: 'No practice yet',
+    emptyDescription: 'Finish one practice session and your evidence will appear here.',
+    loading: 'Loading your progress',
+    errorTitle: 'Progress could not load',
+    retryAction: 'Try again',
   },
 
   childSummary: {

@@ -47,6 +47,26 @@ export const linkPaths = {
  * a template literal in one hook is a path nobody finds when narrowing that
  * matcher.
  */
+/**
+ * Practice — build-order step 10.
+ *
+ * SEVEN ROUTES AND NO HINT ROUTE. `practice.contract.ts` defines
+ * `hintQuerySchema` and `hintResponseSchema`, and `practice.routes.ts` registers
+ * nothing that serves them — the hint ladder is contracted and unrouted. It is
+ * also unpopulated (`hint_level_1..3` are NULL on all 3,791 source questions,
+ * open item 13), so a hint affordance today would be a button that 404s to
+ * fetch content that does not exist. Recorded rather than stubbed.
+ */
+export const practicePaths = {
+  mission: '/practice/mission',
+  sessions: '/practice/sessions',
+  session: (sessionId: string) => `/practice/sessions/${encodeURIComponent(sessionId)}`,
+  answers: (sessionId: string) => `/practice/sessions/${encodeURIComponent(sessionId)}/answers`,
+  submit: (sessionId: string) => `/practice/sessions/${encodeURIComponent(sessionId)}/submit`,
+  history: '/practice/history',
+  progress: '/practice/progress',
+} as const;
+
 export const foxyPaths = {
   sessions: '/foxy/sessions',
   session: (sessionId: string) => `/foxy/sessions/${encodeURIComponent(sessionId)}`,

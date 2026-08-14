@@ -22,7 +22,7 @@ describe('ProgressSummary', () => {
         items: [
           {
             subject: 'Mathematics',
-            evidence: 'Strong evidence',
+            evidence: 'strong',
             detail: 'Consistent recent explanations.',
           },
         ],
