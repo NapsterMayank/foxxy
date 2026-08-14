@@ -420,3 +420,20 @@ describe('the screen’s own failures', () => {
     expect(await screen.findByText('Ask your first question')).toBeInTheDocument();
   });
 });
+
+describe('recovering from a failed load', () => {
+  it('retries the capabilities request when the student presses try again', async () => {
+    let fail = true;
+    route({
+      capabilities: () =>
+        fail ? json({ error: { code: 'INTERNAL_ERROR', message: 'x' } }, 500) : json(capabilities()),
+    });
+    render(<FoxyChat />);
+
+    await screen.findByRole('alert');
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+    expect(await screen.findByRole('button', { name: 'Start' })).toBeInTheDocument();
+  });
+});

@@ -1,50 +1,52 @@
 # Context — resume here
 
-**Last session:** 15 August 2026. Frontend build-order **steps 10 and 11 are
-closed** — practice and progress are live. Steps 0-11 are all done. Read
-`PROGRESS.md` §5 for the detail; this file is the 30-second version.
+**Last session:** 16 August 2026. Frontend build-order **step 12 is closed** —
+the parent dashboard is live and its fixtures are deleted. Steps 0-12 are done.
+Read `PROGRESS.md` §5 for the detail; this file is the 30-second version.
 
 ## Current task
 
-**Next: build-order step 12 — the parent dashboard.** `ChildSummary` exists as a
-fixture component; the `parent` module has six live endpoints (children,
-snapshot, digest, transcript, consent). Step 13 (billing) follows. The student
-dashboard is still fixtures too — open item 45, and it is wiring rather than
-design, because the mission and XP it should show are already on the wire.
+**Next: build-order step 13 — billing.** It is the last feature step, and the
+last frontend blocker of substance: `billing.contract.ts` is generated, the
+module is wired, and the Razorpay half is unproven against the live API because
+no account exists (open item 19). Then steps 14-15 — the responsive and
+accessibility passes, and the two end-to-end specs.
+
+The student dashboard at `/student` is now the ONLY fixture screen in the
+product — open item 45, and it is wiring rather than design.
 
 ## Key decisions from this session
 
-- **`EvidenceLabel` takes the wire code and is translated** (D-354). It used to
-  take a hand-written union of English strings and render them directly, so a
-  Hindi reader saw "Strong evidence" on their own progress. `src/types/
-  learning-evidence.ts` is deleted.
-- **Ownership of a wire call follows the caller, not the URL prefix** (D-356).
-  `/practice/progress` and `/practice/history` live in `features/progress/api`
-  because both their readers are that screen. The boundary lint rule caught the
-  first arrangement and was right.
-- **"4 of 6", never "67%"** (D-357). `scorePercent` is on the wire and is never
-  rendered — a session score and a mastery percentage are indistinguishable to a
-  child, and §9.1 forbids the second.
+- **The child-visibility notice renders before every branch** (D-359). §10.4's
+  only bold requirement. It sits above the source/empty/populated fork so the
+  two paths that show no conversation still carry it — a parent who looks, sees
+  nothing and is told nothing is the case the rule exists for.
+- **A 403 means two things to a parent** (D-361). On a GET it is the child
+  having revoked the link — a state, no retry offered. On the revoke POST it is
+  a stale page. Confusing them is a false alarm about their own child.
+- **Four queries, not one aggregate** (D-362). A failed panel still leaves the
+  consent controls reachable, which is the one part of the page a parent must
+  always be able to use.
 
 ## Next steps
 
-1. Step 12 — the parent dashboard, then step 13 — billing.
-2. **Run the browser suite.** It has never seen `/student/foxy`,
-   `/student/practice` or `/student/progress`: port 3000 is held by
-   `backend-api-1` and `playwright.config.ts` hardcodes `baseURL` to it. No
-   visual baseline exists for any of the three, and D-354 moved the evidence
-   badges on the two baselines that do exist.
+1. Step 13 — billing. Then 14-15.
+2. **Run the browser suite.** It has never seen any of the four live screens
+   (`/student/foxy`, `/student/practice`, `/student/progress`, `/parent`): port
+   3000 is held by `backend-api-1` and `playwright.config.ts` hardcodes
+   `baseURL` to it. Every existing visual baseline is now stale — open item 46.
 3. Still blocked on the owner: `LLM_API_KEY`, `VOYAGE_API_KEY`, **GitHub Actions
-   billing** (every run is `startup_failure`, account-level), Foxy caps.
+   billing** (every run is `startup_failure`, account-level), Foxy caps, and a
+   Razorpay account before step 13 can be proven against anything real.
 
 ## Gotchas that cost time
 
-- The generated `EVIDENCE_LABELS` order is DECLARATION order (`strong` first),
-  not an ordering of strength. A step bar built from it fills backwards — see
-  `features/progress/lib/evidence-order.ts`.
+- Almost no parent-facing prose lives in the dictionary. The summary, digest,
+  suggested action, disclosure and consent notice all arrive from the server in
+  BOTH languages, because they are sentences about one particular child.
 - A lint rule refusing your idea twice usually means the idea is in the wrong
-  file. That was true for the transcript freeze (D-351) and for the cross-feature
-  import (D-356); both times the comment explaining the exception was the tell.
+  file — true for the transcript freeze (D-351) and the cross-feature import
+  (D-356). The comment explaining the exception was the tell both times.
 - `next build` still only works in the container. `docker build -f
   frontend/Dockerfile`, then `docker run`.
 - `frontend;C` in the repository root is an empty stray directory from a

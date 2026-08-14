@@ -227,7 +227,7 @@ export const hi: Dictionary = {
 
   parent: {
     eyebrow: 'अभिभावक डैशबोर्ड',
-    greeting: 'वापसी पर स्वागत है, {name}',
+    title: 'आपके बच्चे की पढ़ाई',
     intro: 'बिना किसी रैंकिंग या तुलना के, हाल की पढ़ाई का शांत और प्रमाण-आधारित सारांश देखें।',
     updatesEyebrow: 'हाल की जानकारी',
     updatesTitle: 'पढ़ाई की गतिविधि',
@@ -389,6 +389,73 @@ export const hi: Dictionary = {
       'एक अभ्यास सत्र पूरा करें, फिर आपके प्रमाण यहाँ दिखेंगे।',
     loading: 'आपकी प्रगति खुल रही है',
     errorTitle: 'प्रगति खुल नहीं सकी',
+    retryAction: 'फिर कोशिश करें',
+  },
+
+  parentDashboard: {
+    childLabel: '{name} · कक्षा {grade}',
+    childPickerLabel: 'चुनें कि किस बच्चे की जानकारी देखनी है',
+
+    snapshotTitle: 'इस सप्ताह',
+    trendMore: 'पिछले सप्ताह से ज़्यादा अभ्यास',
+    trendSame: 'पिछले सप्ताह जैसा ही',
+    trendLess: 'पिछले सप्ताह से कम अभ्यास',
+    trendFirstWeek: 'यह पहला सप्ताह है, तुलना के लिए अभी कुछ नहीं',
+
+    digestTitle: 'इस सप्ताह क्या दिखा',
+    digestActionTitle: 'एक बात जो मदद करेगी',
+    digestMisconception: 'संदर्भ: {code}',
+    digestCounts: '{days} दिन · {sessions} सत्र · {questions} सवाल',
+    digestPendingTitle: 'इस सप्ताह का सारांश अभी नहीं लिखा गया',
+    digestPendingDescription:
+      'सारांश सप्ताह में एक बार तैयार होता है। तैयार होते ही यहाँ दिखेगा।',
+
+    transcriptTitle: 'Foxy के साथ बातचीत',
+    transcriptChild: 'आपका बच्चा',
+    transcriptFoxy: 'Foxy',
+    transcriptReadOnly: 'केवल पढ़ने के लिए',
+    transcriptEmptyTitle: 'अभी कोई बातचीत नहीं',
+    transcriptEmptyDescription: 'आपका बच्चा Foxy से जो पूछेगा, वह यहाँ दिखेगा।',
+    transcriptUnavailableTitle: 'बातचीत अभी उपलब्ध नहीं है',
+    transcriptUnavailableDescription:
+      'उत्पाद का यह हिस्सा अभी तैयार नहीं है। ऐसा नहीं है कि आपके बच्चे ने कुछ नहीं पूछा।',
+
+    visibilityChildTold: 'आपका बच्चा जानता है कि आप ये बातचीत पढ़ सकते हैं।',
+    visibilityChildNotTold:
+      'आपके बच्चे को नहीं बताया गया है कि आप ये बातचीत पढ़ सकते हैं।',
+
+    consentTitle: 'आपकी पहुँच',
+    consentViewSnapshot: 'साप्ताहिक झलक',
+    consentViewDigest: 'साप्ताहिक सारांश',
+    consentViewTranscript: 'Foxy के साथ बातचीत',
+    consentChildInformed: 'आपके बच्चे को इस पहुँच के बारे में बताया गया है।',
+    consentChildNotInformed: 'आपके बच्चे को इस पहुँच के बारे में नहीं बताया गया है।',
+    consentRevokeAction: 'मेरी पहुँच वापस लें',
+    consentRevokeTitle: 'अपनी पहुँच वापस लें?',
+    consentRevokeDescription:
+      'आपको इस बच्चे की झलक, सारांश और बातचीत दिखनी बंद हो जाएगी। दोबारा पहुँच केवल आपका बच्चा नए आमंत्रण कोड से दे सकता है।',
+    consentRevokeConfirm: 'पहुँच वापस लें',
+    consentRevokeCancel: 'पहुँच बनी रहने दें',
+
+    noChildrenTitle: 'अभी कोई बच्चा जुड़ा नहीं है',
+    noChildrenDescription:
+      'शुरू करने के लिए अपने बच्चे से उनके खाते का आमंत्रण कोड लें।',
+    pendingTitle: 'आपके बच्चे की मंज़ूरी का इंतज़ार',
+    pendingDescription:
+      'आपका अनुरोध भेज दिया गया है। जब तक आपका बच्चा अपने खाते से मंज़ूरी नहीं देता, यहाँ कुछ नहीं दिखेगा।',
+
+    loading: 'खुल रहा है',
+    errorTitle: 'यह खुल नहीं सका',
+    panelErrorDescription:
+      'यह हिस्सा खुल नहीं सका। बाकी पृष्ठ पर इसका असर नहीं है।',
+    errorGeneric: 'कुछ गड़बड़ हुई। फिर कोशिश करें।',
+    errorNoAccess:
+      'अब आपके पास इस बच्चे की पढ़ाई देखने की पहुँच नहीं है। दोबारा पहुँच केवल आपका बच्चा दे सकता है।',
+    errorNotFound: 'यह अब उपलब्ध नहीं है।',
+    errorBlocked: 'यह अनुरोध अस्वीकार हुआ। पेज दोबारा लोड करके कोशिश करें।',
+    errorRateLimited: 'बहुत ज़्यादा अनुरोध। थोड़ा रुककर फिर कोशिश करें।',
+    errorRateLimitedSeconds: 'बहुत ज़्यादा अनुरोध। {seconds} सेकंड बाद फिर कोशिश करें।',
+    errorDegraded: 'हमारी एक सेवा अभी उपलब्ध नहीं है। थोड़ी देर बाद कोशिश करें।',
     retryAction: 'फिर कोशिश करें',
   },
 

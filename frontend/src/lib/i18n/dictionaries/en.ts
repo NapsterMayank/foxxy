@@ -226,7 +226,7 @@ export const en = {
 
   parent: {
     eyebrow: 'Parent dashboard',
-    greeting: 'Welcome back, {name}',
+    title: 'Your child’s learning',
     intro: 'See a calm, evidence-based summary of recent learning without ranking or comparison.',
     updatesEyebrow: 'Recent updates',
     updatesTitle: 'Learning activity',
@@ -432,6 +432,91 @@ export const en = {
     emptyDescription: 'Finish one practice session and your evidence will appear here.',
     loading: 'Loading your progress',
     errorTitle: 'Progress could not load',
+    retryAction: 'Try again',
+  },
+
+  /**
+   * The parent dashboard — build-order step 12.
+   *
+   * ALMOST NO PROSE LIVES HERE, AND THAT IS THE DESIGN. The summary, the trend
+   * line, the digest, the suggested action, the disclosure and the consent
+   * notice all arrive from the server in BOTH languages — `bilingualTextSchema`
+   * requires a non-empty `hi` — because they are sentences about one particular
+   * child, derived from that child's own rows. A template here would replace a
+   * true specific sentence with a generic one.
+   *
+   * What is worded here is the furniture: headings, the four trend words, the
+   * consent vocabulary, and the errors.
+   */
+  parentDashboard: {
+    childLabel: '{name} · Grade {grade}',
+    childPickerLabel: 'Choose which child to view',
+
+    snapshotTitle: 'This week',
+    trendMore: 'More practice than last week',
+    trendSame: 'About the same as last week',
+    /* `less` is a fact about a week, never a verdict on a child. */
+    trendLess: 'Less practice than last week',
+    trendFirstWeek: 'The first week, so there is nothing to compare with yet',
+
+    digestTitle: 'What this week showed',
+    digestActionTitle: 'One thing that would help',
+    digestMisconception: 'Reference: {code}',
+    digestCounts: '{days} days · {sessions} sessions · {questions} questions',
+    digestPendingTitle: 'This week’s summary is not written yet',
+    digestPendingDescription: 'Summaries are prepared once a week. This one will appear here.',
+
+    transcriptTitle: 'Conversations with Foxy',
+    transcriptChild: 'Your child',
+    transcriptFoxy: 'Foxy',
+    transcriptReadOnly: 'Read only',
+    transcriptEmptyTitle: 'No conversations yet',
+    transcriptEmptyDescription: 'Anything your child asks Foxy will appear here.',
+    /*
+     * A DIFFERENT SENTENCE FROM "no conversations yet", deliberately. The
+     * contract keeps `not_yet_available` apart from an empty list so a parent
+     * learns which — telling them their child has never asked anything, when
+     * the truth is that nobody can see it yet, is a false statement about
+     * their child.
+     */
+    transcriptUnavailableTitle: 'Conversations are not available yet',
+    transcriptUnavailableDescription:
+      'This part of the product is not ready. It is not that your child has asked nothing.',
+
+    visibilityChildTold: 'Your child knows you can read these conversations.',
+    visibilityChildNotTold: 'Your child has not been told that you can read these conversations.',
+
+    consentTitle: 'Your access',
+    consentViewSnapshot: 'The weekly snapshot',
+    consentViewDigest: 'The weekly summary',
+    consentViewTranscript: 'Conversations with Foxy',
+    consentChildInformed: 'Your child has been told about this access.',
+    consentChildNotInformed: 'Your child has not been told about this access.',
+    consentRevokeAction: 'Withdraw my access',
+    consentRevokeTitle: 'Withdraw your access?',
+    /* What WILL happen, in the parent's words — never "are you sure?". */
+    consentRevokeDescription:
+      'You will stop seeing this child’s snapshot, summary and conversations. Only your child can give access again, with a new invitation code.',
+    consentRevokeConfirm: 'Withdraw access',
+    consentRevokeCancel: 'Keep my access',
+
+    noChildrenTitle: 'No child is linked yet',
+    noChildrenDescription: 'Ask your child for an invitation code from their account to get started.',
+    pendingTitle: 'Waiting for your child to approve',
+    pendingDescription:
+      'Your request has been sent. Nothing is shown here until your child approves it from their own account.',
+
+    loading: 'Loading',
+    errorTitle: 'This could not be loaded',
+    panelErrorDescription: 'This section could not be loaded. The rest of the page is unaffected.',
+    errorGeneric: 'Something went wrong. Try again.',
+    /* A state, not a fault. Nothing to press: a 403 will not become a 200. */
+    errorNoAccess: 'You no longer have access to this child’s learning. Only your child can give it again.',
+    errorNotFound: 'This is no longer available.',
+    errorBlocked: 'That request was refused. Reload the page and try again.',
+    errorRateLimited: 'Too many requests. Wait a moment and try again.',
+    errorRateLimitedSeconds: 'Too many requests. Try again in {seconds} seconds.',
+    errorDegraded: 'Something we rely on is unavailable right now. Try again shortly.',
     retryAction: 'Try again',
   },
 

@@ -48,6 +48,24 @@ export const linkPaths = {
  * matcher.
  */
 /**
+ * Parent — build-order step 12.
+ *
+ * `consentRevoke` IS A POST AND NOT A DELETE, and the route says why: the link
+ * row is not deleted, it moves to `revoked`, and the record that access once
+ * existed is part of what a consent trail is for. A `DELETE` here would be a
+ * client asserting an erasure the server deliberately does not perform.
+ */
+export const parentPaths = {
+  children: '/parent/children',
+  snapshot: (childId: string) => `/parent/children/${encodeURIComponent(childId)}/snapshot`,
+  digest: (childId: string) => `/parent/children/${encodeURIComponent(childId)}/digest`,
+  transcript: (childId: string) => `/parent/children/${encodeURIComponent(childId)}/transcript`,
+  consent: (childId: string) => `/parent/children/${encodeURIComponent(childId)}/consent`,
+  consentRevoke: (childId: string) =>
+    `/parent/children/${encodeURIComponent(childId)}/consent/revoke`,
+} as const;
+
+/**
  * Practice — build-order step 10.
  *
  * SEVEN ROUTES AND NO HINT ROUTE. `practice.contract.ts` defines

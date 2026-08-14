@@ -380,3 +380,35 @@ describe('the result', () => {
     );
   });
 });
+
+describe('recovering from a failed submit', () => {
+  /*
+   * The retry beside a failed SUBMIT re-runs the submit, not the answer — the
+   * two share one banner and one button, and sending the wrong one would ask
+   * the server to record an answer it already has (a 409 the student cannot
+   * act on).
+   */
+  it('re-submits rather than re-answering', async () => {
+    let fail = true;
+    openSession();
+    route({
+      submit: () =>
+        fail ? json({ error: { code: 'INTERNAL_ERROR', message: 'x' } }, 500) : json(submissionBody),
+    });
+    render(<PracticeScreen />);
+
+    fireEvent.click(await screen.findByRole('radio', { name: 'Leaf' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check my answer' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Next question' }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'Carbon dioxide' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check my answer' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Finish and see my result' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Something went wrong.');
+
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+    expect(await screen.findByText('Session complete')).toBeInTheDocument();
+  });
+});

@@ -6786,3 +6786,70 @@ own wall clock before averaging.
 `practicePaths` rather than stubbed. A hint button today would 404 to fetch content that
 does not exist; a disabled one would advertise a feature with no delivery date. The
 contract half is not deleted — it is the right shape for when generation lands.
+
+### D-359 · The child-visibility notice is rendered before every branch
+
+§10.4's row for the parent feature ends with the only requirement in that table written
+in bold: "the child's visibility indicator is ALWAYS present". The contract makes
+`visibility` non-optional for the same reason and says it — "an optional field is a field
+a client can forget to render".
+
+**Decision:** the notice is rendered above the source/empty/populated fork in
+`TranscriptPanel`, not inside any of them and not after an early return, so every path
+through the component passes through it — including the two paths that render no
+conversation at all. A parent who looks, sees nothing and is told nothing about what they
+were looking at is the exact case the requirement exists for. Tests cover the empty and
+`not_yet_available` paths specifically for this.
+
+`childIsTold: false` is rendered in `warning`, from the server's own bilingual
+`disclosure` sentence. A parent with permission over a child who does not know is the
+shape this product refuses to be, and it is a promise the product makes rather than copy a
+screen invents.
+
+### D-360 · `not_yet_available` and an empty transcript are different sentences
+
+The contract keeps `source: 'not_yet_available'` apart from `sessions: []` so "a parent
+shown an empty screen deserves to know which". Collapsing them into one empty state would
+tell a parent their child has never asked Foxy anything when the truth is that nobody can
+see it yet — a false statement about their child, produced by a client being tidy.
+
+**Decision:** two states, two sentences, and the unavailable one says explicitly that it is
+not the child having asked nothing.
+
+### D-361 · A 403 means two different things to a parent, and the method tells them apart
+
+On a GET it is almost always the CHILD having revoked the link — a right the product gives
+the child and the parent cannot override. On the revoke POST it is usually a CSRF origin
+rejection, because the backend returns 403 before 401 on state-changing requests.
+
+**Decision:** `parentErrorMessage` reads `no-access` as a STATE — "only your child can give
+it again" — with no retry offered, since §5.6 notes a 403 will not become a 200 and a retry
+button would invite a parent to hammer a refusal their child chose. `action-blocked` reads
+as a stale page. Telling a parent their access was withdrawn when it was not would be a
+false alarm about their own child.
+
+### D-362 · The parent dashboard is four queries, not one aggregate
+
+Snapshot, digest, transcript and consent are four endpoints answering four questions with
+different costs and different failure modes.
+
+**Decision:** four queries, each panel owning its own loading and error. A page-level gate
+would be as slow as the slowest and as fragile as the weakest — and the transcript, the
+biggest and the one a parent looks at least, would hold up the counts they came for. The
+property that matters: a failed panel still leaves the CONSENT controls reachable, which is
+the one part of this page a parent must always be able to use. Asserted by a test.
+
+Revoking removes the child's three data queries from the cache rather than invalidating
+them — they are exactly the data the parent just gave up, and refetching would fire three
+requests designed to 403 — and invalidates `children`, because the link leaves the approved
+set.
+
+### D-363 · The parent fixtures are deleted, not left beside the real screen
+
+`/parent` rendered a `ChildSummary` built from a hard-coded child, a hard-coded parent name
+and two invented "recent updates". Everything it stood in for is now on the wire.
+
+**Decision:** the page renders the live dashboard and `child-summary.tsx` and its test are
+deleted. A sample dashboard beside a real one is a screen nobody can tell is lying — and
+`parent.greeting` took a name the product no longer invents, so it becomes `parent.title`.
+The student dashboard is still fixtures (open item 45) and is now the only one.

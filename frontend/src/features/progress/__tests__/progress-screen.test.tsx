@@ -1,4 +1,4 @@
-import { cleanup, screen } from '@testing-library/react';
+import { cleanup, fireEvent, screen } from '@testing-library/react';
 import { renderClient as render } from '@test/setup/render';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProgressScreen } from '../progress-screen';
@@ -186,5 +186,22 @@ describe('the progress screen', () => {
     // `chapterTitleHi` is nullable, so an untranslated chapter falls back to
     // NCERT's own English wording rather than rendering an empty heading.
     expect(screen.getAllByText('Fractions').length).toBeGreaterThan(0);
+  });
+});
+
+describe('recovering from a failure', () => {
+  it('refetches when the parent presses retry', async () => {
+    let fail = true;
+    route({
+      progress: () =>
+        fail ? json({ error: { code: 'INTERNAL_ERROR', message: 'x' } }, 500) : json(progress()),
+    });
+    render(<ProgressScreen />);
+
+    await screen.findByRole('alert');
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+    expect(await screen.findByText('420')).toBeInTheDocument();
   });
 });

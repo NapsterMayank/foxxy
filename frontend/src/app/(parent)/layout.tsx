@@ -7,14 +7,14 @@ export default async function ParentLayout({ children }: Readonly<{ children: Re
   const t = await getServerT();
   const navigation: readonly ProductNavigationItem[] = [
     { href: '/parent', isCurrent: true, label: t('shell.navOverview'), marker: '⌂' },
-    { href: '/parent#child-summary', label: t('shell.navChild'), marker: '◎' },
-    { href: '/parent#updates', label: t('shell.navUpdates'), marker: '•' },
+    { href: '/parent#parent-snapshot-title', label: t('shell.navChild'), marker: '◎' },
+    { href: '/parent#parent-digest-title', label: t('shell.navUpdates'), marker: '•' },
   ];
 
   return (
     <div data-theme="parent">
       <SessionGate role="parent">
-        <ProductShell navigation={navigation} roleLabel={t('shell.parentRole')} userName="Ananya">
+        <ProductShell navigation={navigation} roleLabel={t('shell.parentRole')} userName={t('shell.parentRole')}>
           {children}
         </ProductShell>
       </SessionGate>
