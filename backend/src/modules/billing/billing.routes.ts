@@ -2,12 +2,14 @@ import type { FastifyInstance, FastifyRequest, preHandlerAsyncHookHandler } from
 import type {
   BillingStatusResponse,
   CancelResponse,
+  PlanCatalogueResponse,
   SubscribeResponse,
   WebhookResponse,
 } from '@/shared/contracts/billing.contract';
 import { requireActor as requireRequestActor } from '@/shared/http/require-actor';
 import { billingSchemas, parseInput } from './billing.schema';
 import type { BillingService } from './billing.service';
+import { purchasablePlans } from './domain/plans';
 import type { BillingActor } from './billing.types';
 
 /**
@@ -107,6 +109,32 @@ export async function registerBillingRoutes(
     };
     // 201: a subscription resource now exists, in `pending`. It grants nothing.
     return reply.status(201).send(payload);
+  });
+
+  /**
+   * The plans a customer may buy, and what each one costs.
+   *
+   * READ STRAIGHT FROM THE DOMAIN TABLE — no service call, because there is no
+   * access decision to make: the catalogue is the same for everyone and is
+   * public commercial information. It is behind `authenticated` only because
+   * the screen that renders it is, and an unauthenticated pricing page can call
+   * it the day one exists.
+   *
+   * It exists so no client holds its own copy of a PRICE. `findPlan` on the
+   * checkout path reads this same table, so the figure quoted and the figure
+   * charged cannot drift — see the contract header.
+   */
+  app.get(`${API_PREFIX}/billing/plans`, authenticated, async (_request, reply) => {
+    const body: PlanCatalogueResponse = {
+      plans: purchasablePlans().map((plan) => ({
+        code: plan.code,
+        amountMinorUnits: plan.amountMinorUnits,
+        currency: plan.currency,
+        periodDays: plan.periodDays,
+        features: [...plan.features],
+      })),
+    };
+    return reply.status(200).send(body);
   });
 
   /** §8.8 — status AND entitlements, from one row at one instant. */

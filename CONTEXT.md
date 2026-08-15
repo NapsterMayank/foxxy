@@ -1,52 +1,50 @@
 # Context — resume here
 
-**Last session:** 16 August 2026. Frontend build-order **step 12 is closed** —
-the parent dashboard is live and its fixtures are deleted. Steps 0-12 are done.
-Read `PROGRESS.md` §5 for the detail; this file is the 30-second version.
+**Last session:** 17 August 2026. Frontend build-order **step 13 is closed —
+every feature step is done.** Steps 0-13 complete. Read `PROGRESS.md` §5 for the
+detail; this file is the 30-second version.
 
 ## Current task
 
-**Next: build-order step 13 — billing.** It is the last feature step, and the
-last frontend blocker of substance: `billing.contract.ts` is generated, the
-module is wired, and the Razorpay half is unproven against the live API because
-no account exists (open item 19). Then steps 14-15 — the responsive and
-accessibility passes, and the two end-to-end specs.
-
-The student dashboard at `/student` is now the ONLY fixture screen in the
-product — open item 45, and it is wiring rather than design.
+**Next: steps 14-15 — the responsive pass on a real device, the accessibility
+pass, and the two end-to-end specs.** Both need the browser suite, which has
+never run: port 3000 is held by `backend-api-1` and `playwright.config.ts`
+hardcodes `baseURL` to it. Stop that container or give the config an env
+override. Every visual baseline is stale and none of the five live screens has
+one at all — open item 46, and it needs a human to approve the new look.
 
 ## Key decisions from this session
 
-- **The child-visibility notice renders before every branch** (D-359). §10.4's
-  only bold requirement. It sits above the source/empty/populated fork so the
-  two paths that show no conversation still carry it — a parent who looks, sees
-  nothing and is told nothing is the case the rule exists for.
-- **A 403 means two things to a parent** (D-361). On a GET it is the child
-  having revoked the link — a state, no retry offered. On the revoke POST it is
-  a stale page. Confusing them is a false alarm about their own child.
-- **Four queries, not one aggregate** (D-362). A failed panel still leaves the
-  consent controls reachable, which is the one part of the page a parent must
-  always be able to use.
+- **The plan catalogue is served** (D-364). `PLANS` lives in the module, so a
+  billing screen could only hard-code "₹299" or show nothing. A hard-coded price
+  is not a broken button — it is advertising one figure and charging another.
+  `GET /billing/plans` was added to the backend for this.
+- **One unknown entitlement must not take down the pricing page** (D-365). As a
+  closed enum, a single unrecognised feature rejected the whole catalogue. The
+  feature list is parsed as strings; everything that decides money stays strict.
+- **A 409 on subscribe means "you already have it", never "try again"** (D-367).
+  The thing a customer would retry is a payment.
 
 ## Next steps
 
-1. Step 13 — billing. Then 14-15.
-2. **Run the browser suite.** It has never seen any of the four live screens
-   (`/student/foxy`, `/student/practice`, `/student/progress`, `/parent`): port
-   3000 is held by `backend-api-1` and `playwright.config.ts` hardcodes
-   `baseURL` to it. Every existing visual baseline is now stale — open item 46.
+1. Steps 14-15. Then the backlog in §7 — items 41-47 are the frontend ones.
+2. **Run the browser suite** — see above. It has never seen `/student/foxy`,
+   `/student/practice`, `/student/progress`, `/parent` or `/parent/billing`.
 3. Still blocked on the owner: `LLM_API_KEY`, `VOYAGE_API_KEY`, **GitHub Actions
    billing** (every run is `startup_failure`, account-level), Foxy caps, and a
-   Razorpay account before step 13 can be proven against anything real.
+   **Razorpay account** — no real checkout has ever been completed, so the whole
+   payment path is exercised only against the deterministic fake (item 19).
 
 ## Gotchas that cost time
 
-- Almost no parent-facing prose lives in the dictionary. The summary, digest,
-  suggested action, disclosure and consent notice all arrive from the server in
-  BOTH languages, because they are sentences about one particular child.
+- Leniency belongs only where the data is presentational. The billing catalogue
+  parses `features` loosely and `amountMinorUnits` strictly, on purpose.
+- Almost no parent- or billing-facing prose that describes one account lives in
+  the dictionary — prices come from the server, and parent narrative arrives
+  bilingual from the server.
 - A lint rule refusing your idea twice usually means the idea is in the wrong
   file — true for the transcript freeze (D-351) and the cross-feature import
-  (D-356). The comment explaining the exception was the tell both times.
+  (D-356).
 - `next build` still only works in the container. `docker build -f
   frontend/Dockerfile`, then `docker run`.
 - `frontend;C` in the repository root is an empty stray directory from a

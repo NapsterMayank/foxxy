@@ -101,6 +101,7 @@ export const hi: Dictionary = {
     navChild: 'बच्चा',
     navUpdates: 'नई जानकारी',
     navFoxy: 'Foxy से पूछें',
+    navBilling: 'योजना',
   },
 
   auth: {
@@ -456,6 +457,69 @@ export const hi: Dictionary = {
     errorRateLimited: 'बहुत ज़्यादा अनुरोध। थोड़ा रुककर फिर कोशिश करें।',
     errorRateLimitedSeconds: 'बहुत ज़्यादा अनुरोध। {seconds} सेकंड बाद फिर कोशिश करें।',
     errorDegraded: 'हमारी एक सेवा अभी उपलब्ध नहीं है। थोड़ी देर बाद कोशिश करें।',
+    retryAction: 'फिर कोशिश करें',
+  },
+
+  billing: {
+    eyebrow: 'सदस्यता',
+    title: 'आपकी योजना',
+    description: 'आपके खाते में क्या शामिल है, और बदलने पर क्या लागत होगी।',
+
+    currentTitle: 'अभी',
+    planFree: 'मुफ़्त योजना',
+    planPaid: 'सशुल्क योजना',
+    currentPlanBadge: 'आपकी योजना',
+    currentPlanNote: 'आप इसी योजना पर हैं।',
+    paidBySchool:
+      'इस खाते का भुगतान आपका स्कूल करता है। आपको कुछ खरीदने या रद्द करने की ज़रूरत नहीं।',
+
+    statusActive: 'चालू',
+    statusPending: 'भुगतान की प्रतीक्षा',
+    statusPastDue: 'भुगतान पर ध्यान दें',
+    statusCancelled: 'रद्द',
+    statusExpired: 'समाप्त',
+
+    renewsOn: '{date} को नवीनीकरण होगा।',
+    accessUntil: '{date} तक आपकी पहुँच बनी रहेगी।',
+    cancelledNote: 'यह योजना आगे नवीनीकृत नहीं होगी।',
+
+    plansTitle: 'योजनाएँ',
+    perMonth: 'प्रति माह',
+    perYear: 'प्रति वर्ष',
+    perDays: 'हर {days} दिन',
+    chooseAction: 'यह योजना चुनें',
+
+    featurePracticeBasic: 'रोज़ का अभ्यास',
+    featurePracticeUnlimited: 'असीमित अभ्यास',
+    featureFoxyBasic: 'Foxy से पूछें',
+    featureFoxyUnlimited: 'Foxy से असीमित सवाल',
+    featureParentDigest: 'अभिभावक के लिए साप्ताहिक सारांश',
+
+    cancelAction: 'मेरी योजना रद्द करें',
+    cancelTitle: 'योजना रद्द करें?',
+    cancelDescription:
+      'आपकी योजना आगे नवीनीकृत नहीं होगी। {date} तक आपके पास सब कुछ बना रहेगा, और उसके बाद कोई शुल्क नहीं लगेगा।',
+    cancelConfirm: 'योजना रद्द करें',
+    cancelKeep: 'योजना बनी रहने दें',
+
+    loading: 'आपकी योजना खुल रही है',
+    errorTitle: 'आपकी योजना खुल नहीं सकी',
+    errorPlansTitle: 'योजनाएँ खुल नहीं सकीं',
+    errorGeneric: 'कुछ गड़बड़ हुई। फिर कोशिश करें।',
+    errorAlreadySubscribed:
+      'आपके पास पहले से एक चालू योजना है। इसे देखने के लिए पेज दोबारा लोड करें।',
+    errorPlanUnavailable:
+      'यह योजना अब उपलब्ध नहीं है। मौजूदा योजनाओं के लिए पेज दोबारा लोड करें।',
+    errorNoSubscription: 'बदलने के लिए कोई योजना नहीं है।',
+    errorCheckoutFailed:
+      'भुगतान पृष्ठ नहीं खुल सका। कोई शुल्क नहीं लिया गया है।',
+    errorCheckoutUnavailable:
+      'भुगतान पृष्ठ नहीं खुल सका। कोई शुल्क नहीं लिया गया है।',
+    errorProviderUnavailable:
+      'भुगतान सेवा अभी उपलब्ध नहीं है। थोड़ी देर बाद कोशिश करें।',
+    errorBlocked: 'यह अनुरोध अस्वीकार हुआ। पेज दोबारा लोड करके कोशिश करें।',
+    errorRateLimited: 'बहुत बार कोशिश हुई। थोड़ा रुककर फिर कोशिश करें।',
+    errorRateLimitedSeconds: 'बहुत बार कोशिश हुई। {seconds} सेकंड बाद फिर कोशिश करें।',
     retryAction: 'फिर कोशिश करें',
   },
 

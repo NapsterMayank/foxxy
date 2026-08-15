@@ -3,10 +3,12 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import {
   billingStatusResponseSchema,
   cancelResponseSchema,
+  planCatalogueResponseSchema,
   subscribeResponseSchema,
   webhookResponseSchema,
 } from '@/shared/contracts/billing.contract';
 import { WEBHOOK_PATH_PATTERN } from '../../../app/plugins/origin-check';
+import { PLANS } from '../domain/plans';
 import { createServer } from '../../../app/server';
 import { BILLING_WEBHOOK_PATH, createBillingModule } from '../index';
 import {
@@ -126,6 +128,40 @@ describe('the three authenticated endpoints answer the contract', () => {
     expect(body.entitlements.planCode).toBe('free');
   });
 
+  /*
+   * THE CATALOGUE EXISTS SO NO CLIENT HOLDS ITS OWN COPY OF A PRICE. A screen
+   * that hard-coded "₹299" would eventually advertise one figure and charge
+   * another — a chargeback, not a UI bug — because the checkout path reads
+   * `findPlan` from the same table this serves.
+   */
+  it('GET /billing/plans serves every purchasable plan, and no free tier', async () => {
+    const account = await onboard(harness);
+    const response = await get('/api/v1/billing/plans', account.cookie);
+
+    expect(response.statusCode).toBe(200);
+    const body = planCatalogueResponseSchema.parse(response.json());
+
+    const codes = body.plans.map((plan) => plan.code).sort();
+    expect(codes).toEqual(['monthly', 'yearly']);
+    // `free` is what somebody already has, not something to buy.
+    expect(codes).not.toContain('free');
+  });
+
+  it('GET /billing/plans quotes the price the checkout path would charge', async () => {
+    const account = await onboard(harness);
+    const body = planCatalogueResponseSchema.parse(
+      (await get('/api/v1/billing/plans', account.cookie)).json(),
+    );
+
+    const monthly = body.plans.find((plan) => plan.code === 'monthly');
+    // PAISE, integer, and the same number `PLANS` holds. Read from the table
+    // rather than restated, so a price change moves both together.
+    expect(monthly?.amountMinorUnits).toBe(PLANS.monthly?.amountMinorUnits);
+    expect(monthly?.currency).toBe('INR');
+    expect(monthly?.periodDays).toBe(30);
+    expect(monthly?.features).toContain('foxy.unlimited');
+  });
+
   it('POST /billing/cancel', async () => {
     const account = await onboard(harness);
     await post('/api/v1/billing/subscribe', account.cookie, { planCode: 'monthly' });
@@ -149,6 +185,7 @@ describe('the three authenticated endpoints answer the contract', () => {
   it('refuses an unauthenticated caller on all three', async () => {
     expect((await post('/api/v1/billing/subscribe', undefined, { planCode: 'monthly' })).statusCode).toBe(401);
     expect((await get('/api/v1/billing/status')).statusCode).toBe(401);
+    expect((await get('/api/v1/billing/plans')).statusCode).toBe(401);
     expect((await post('/api/v1/billing/cancel')).statusCode).toBe(401);
   });
 

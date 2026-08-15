@@ -89,6 +89,7 @@ export const en = {
     navChild: 'Child',
     navUpdates: 'Updates',
     navFoxy: 'Ask Foxy',
+    navBilling: 'Plan',
   },
 
   auth: {
@@ -517,6 +518,77 @@ export const en = {
     errorRateLimited: 'Too many requests. Wait a moment and try again.',
     errorRateLimitedSeconds: 'Too many requests. Try again in {seconds} seconds.',
     errorDegraded: 'Something we rely on is unavailable right now. Try again shortly.',
+    retryAction: 'Try again',
+  },
+
+  /**
+   * Billing — build-order step 13.
+   *
+   * NO PRICE, NO CURRENCY AND NO PLAN NAME LIVES HERE. Every figure comes from
+   * `GET /billing/plans`, which reads the same table the checkout path reads,
+   * so the number quoted and the number charged cannot drift. A hard-coded
+   * "₹299" is not a UI bug — it is advertising one price and charging another.
+   */
+  billing: {
+    eyebrow: 'Subscription',
+    title: 'Your plan',
+    description: 'What your account includes, and what changing it would cost.',
+
+    currentTitle: 'Right now',
+    planFree: 'Free plan',
+    planPaid: 'Paid plan',
+    currentPlanBadge: 'Your plan',
+    currentPlanNote: 'This is the plan you are on.',
+    paidBySchool: 'Your school pays for this account. There is nothing for you to buy or cancel.',
+
+    statusActive: 'Active',
+    /* `pending` grants nothing until the provider confirms payment. */
+    statusPending: 'Waiting for payment',
+    statusPastDue: 'Payment needs attention',
+    statusCancelled: 'Cancelled',
+    statusExpired: 'Expired',
+
+    renewsOn: 'Renews on {date}.',
+    accessUntil: 'You keep access until {date}.',
+    cancelledNote: 'This plan will not renew.',
+
+    plansTitle: 'Plans',
+    perMonth: 'per month',
+    perYear: 'per year',
+    perDays: 'every {days} days',
+    chooseAction: 'Choose this plan',
+
+    featurePracticeBasic: 'Daily practice',
+    featurePracticeUnlimited: 'Unlimited practice',
+    featureFoxyBasic: 'Ask Foxy',
+    featureFoxyUnlimited: 'Unlimited questions for Foxy',
+    featureParentDigest: 'Weekly summary for a parent',
+
+    cancelAction: 'Cancel my plan',
+    cancelTitle: 'Cancel your plan?',
+    /* What WILL happen — including the part people most fear losing. */
+    cancelDescription:
+      'Your plan will not renew. You keep everything you have now until {date}, and nothing is charged after that.',
+    cancelConfirm: 'Cancel the plan',
+    cancelKeep: 'Keep my plan',
+
+    loading: 'Loading your plan',
+    errorTitle: 'Your plan could not be loaded',
+    errorPlansTitle: 'Plans could not be loaded',
+    errorGeneric: 'Something went wrong. Try again.',
+    /*
+     * A 409 means they ALREADY HAVE IT. "Try again" would send somebody back
+     * into a payment they have already made.
+     */
+    errorAlreadySubscribed: 'You already have an active plan. Reload this page to see it.',
+    errorPlanUnavailable: 'That plan is no longer available. Reload this page for the current plans.',
+    errorNoSubscription: 'There is no plan to change.',
+    errorCheckoutFailed: 'The payment page could not be opened. Nothing has been charged.',
+    errorCheckoutUnavailable: 'The payment page could not be opened. Nothing has been charged.',
+    errorProviderUnavailable: 'The payment service is unavailable right now. Try again shortly.',
+    errorBlocked: 'That request was refused. Reload the page and try again.',
+    errorRateLimited: 'Too many attempts. Wait a moment and try again.',
+    errorRateLimitedSeconds: 'Too many attempts. Try again in {seconds} seconds.',
     retryAction: 'Try again',
   },
 

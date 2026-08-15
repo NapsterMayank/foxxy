@@ -55,6 +55,8 @@ export const parentKeys = {
 export const billingKeys = {
   all: ['billing'] as const,
   status: () => [...billingKeys.all, 'status'] as const,
+  /** The served catalogue — build-order step 13. Never a local price list. */
+  plans: () => [...billingKeys.all, 'plans'] as const,
 } as const;
 
 export const notifyKeys = {

@@ -6853,3 +6853,90 @@ and two invented "recent updates". Everything it stood in for is now on the wire
 deleted. A sample dashboard beside a real one is a screen nobody can tell is lying — and
 `parent.greeting` took a name the product no longer invents, so it becomes `parent.title`.
 The student dashboard is still fixtures (open item 45) and is now the only one.
+
+### D-364 · The plan catalogue is served, because a price is not a client's to know
+
+`PLANS` lives in `modules/billing/domain/plans.ts`, which the frontend cannot import. Before
+`GET /billing/plans` existed, a billing screen had exactly two options: hard-code
+"₹299 / month", or show nothing.
+
+A hard-coded price is not the same class of defect as a hard-coded button.
+`GET /foxy/capabilities` is served so a client cannot offer an action the server does not
+implement — a broken button. A client with its own copy of a PRICE eventually advertises
+one figure and charges another, which is a chargeback and a consumer-protection problem.
+
+**Decision:** a new route, reading `purchasablePlans()` — the same table `findPlan` reads on
+the checkout path, so the figure quoted and the figure charged cannot drift. `free` is
+absent: it is `purchasable: false`, what somebody already has rather than something to buy.
+No service call and no access decision — the catalogue is public commercial information and
+sits behind `authenticated` only because the screen that renders it does.
+
+`amountMinorUnits` is PAISE and an integer everywhere except the moment of display. Money in
+a float is how ₹299.00 becomes ₹298.99999999999994.
+
+### D-365 · One unknown entitlement must not take down the whole pricing page
+
+`planSummarySchema.features` is `z.array(entitlementFeatureSchema)` — a closed enum — so
+validating the catalogue against it made a SINGLE unrecognised feature reject the entire
+response. The screen then rendered "plans could not be loaded", and the cause was the
+backend having added an entitlement. Found by a test that fed it `school.reporting`.
+
+That is the failure §7's frame parser already refuses for Foxy in as many words: an additive
+backend change must not become an outage for everyone who has not reloaded. It matters more
+here, because a client that cannot render the catalogue cannot sell anything.
+
+**Decision:** the catalogue is parsed with `features` widened to `z.array(z.string())` and
+`PlanCard` drops the ones it has no words for. Everything that decides money — `code`,
+`amountMinorUnits`, `currency`, `periodDays` — stays on the generated schema and stays
+strict. Leniency is confined to the half that is presentational.
+
+A code rendered raw would be worse than a missing bullet: "practice.unlimited" in a feature
+list reads as an unfinished page, on the screen where trust matters most.
+
+### D-366 · The checkout URL is checked before the browser follows it
+
+`checkoutUrl` is a plain `z.string()` on the contract, not `z.string().url()`, so the schema
+does not establish that it is safe to navigate to. Every other external link in the product
+is a constant; this one arrives at runtime and is followed with the customer's payment
+intent behind it.
+
+**Decision:** `isFollowableCheckoutUrl` — absolute, and `http:` or `https:` only. Defence in
+depth, since the value comes from our own server, but the cost is one function and the cost
+of being wrong is a `javascript:` URL executing in the session of somebody who just pressed
+a button labelled "pay". A provider response passed through, a misconfigured
+`RAZORPAY_PLAN_IDS`, or a future adapter that builds the string differently are all ordinary
+ways for a non-http value to arrive. A refusal shows a failure that says NOTHING WAS
+CHARGED; doing nothing silently would leave somebody pressing "pay" with no response.
+
+### D-367 · A 409 on subscribe means "you already have it", never "try again"
+
+`createSubscription` refuses when a live subscription already exists. The honest reading is
+that the customer already has what they were trying to buy — a second tab, or a back button
+after a completed checkout.
+
+**Decision:** the 409 renders as "You already have an active plan. Reload this page to see
+it." A generic "something went wrong, try again" invites them to retry, and the thing they
+would be retrying is a payment. A 400 gets the same treatment one step down: the plan code
+came from the SERVED catalogue, so a rejection means the plan was retired between the page
+loading and the button being pressed — reloading is the actual fix, not correcting a field
+nobody filled in.
+
+`pending` is rendered as "waiting for payment" and never as active. A subscription is created
+in `pending` and grants nothing until the webhook confirms; a screen that read "subscribed"
+at checkout would tell somebody they had bought something before any money moved.
+
+### D-368 · A school-paid seat is shown no price and no cancel button
+
+The contract carries `payer.kind` because such a student "must not be shown 'you will be
+charged ₹299'", and because without the field a client would have to infer who pays from the
+role.
+
+**Decision:** `payer.kind === 'school'` hides the catalogue entirely — a price list below
+their status is that forbidden sentence in a different font — and hides the cancel control,
+because ending an institutional contract is not this screen's to offer and the attempt would
+produce a refusal the student could do nothing about.
+
+The screen ships under `(parent)` for the same unresolved question: the contract says
+"nothing in this file says a parent pays". A student on a school-paid seat therefore has
+nowhere to see that fact yet, recorded as an open item rather than answered by adding a
+fifth item to a mobile bottom navigation on a guess about who pays.

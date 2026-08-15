@@ -134,3 +134,46 @@ export type CancelResponse = z.infer<typeof cancelResponseSchema>;
  */
 export const webhookResponseSchema = z.object({ received: z.boolean() });
 export type WebhookResponse = z.infer<typeof webhookResponseSchema>;
+
+/**
+ * GET /api/v1/billing/plans
+ *
+ * ===========================================================================
+ * THE CATALOGUE IS SERVED BECAUSE A PRICE IS NOT A CLIENT'S TO KNOW.
+ *
+ * `PLANS` lives in `modules/billing/domain/plans.ts`, which the frontend cannot
+ * import — so before this endpoint existed a billing screen had exactly two
+ * options: hard-code "₹299 / month", or show nothing. The first is the reason
+ * this route exists.
+ *
+ * A hard-coded price is not the same class of defect as a hard-coded button.
+ * `GET /foxy/capabilities` is served so a client cannot offer an action the
+ * server does not implement — a broken button. A client with its own copy of a
+ * PRICE eventually advertises one figure and charges another, which is a
+ * consumer-protection problem and a chargeback, not a UI bug. The checkout path
+ * reads `findPlan` from this same table, so the number quoted and the number
+ * charged cannot drift.
+ *
+ * `amountMinorUnits` — PAISE, not rupees, and an integer. Money in a float is
+ * how ₹299.00 becomes ₹298.99999999999994; the client divides by 100 once, at
+ * the point of display, and never stores the result.
+ *
+ * `free` IS ABSENT. The route serves `purchasablePlans()`, and the free tier is
+ * `purchasable: false` — it is what somebody already has, not something to buy.
+ * ===========================================================================
+ */
+export const planSummarySchema = z.object({
+  code: z.string(),
+  /** PAISE. Integer. See the header. */
+  amountMinorUnits: z.number().int().min(0),
+  currency: z.string(),
+  periodDays: z.number().int().min(1),
+  /** What the plan grants, so a screen can say what is being bought. */
+  features: z.array(entitlementFeatureSchema),
+});
+export type PlanSummary = z.infer<typeof planSummarySchema>;
+
+export const planCatalogueResponseSchema = z.object({
+  plans: z.array(planSummarySchema),
+});
+export type PlanCatalogueResponse = z.infer<typeof planCatalogueResponseSchema>;

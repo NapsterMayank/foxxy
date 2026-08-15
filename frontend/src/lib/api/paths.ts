@@ -48,6 +48,22 @@ export const linkPaths = {
  * matcher.
  */
 /**
+ * Billing — build-order step 13.
+ *
+ * NO WEBHOOK PATH HERE. `/webhooks/billing` is server-to-server and the browser
+ * must never call it; listing it beside the routes this client uses would be an
+ * invitation. Its path also carries a security property the backend documents
+ * at length — the CSRF origin check exempts `^/api/v\d+/webhooks/` and nothing
+ * wider — which belongs with the route, not with a client.
+ */
+export const billingPaths = {
+  plans: '/billing/plans',
+  status: '/billing/status',
+  subscribe: '/billing/subscribe',
+  cancel: '/billing/cancel',
+} as const;
+
+/**
  * Parent — build-order step 12.
  *
  * `consentRevoke` IS A POST AND NOT A DELETE, and the route says why: the link

@@ -4,7 +4,7 @@
 
 **Update rule:** this file is updated at the end of every working session, before stopping. If it disagrees with the code, the code wins and this file was not updated — fix it immediately. A stale progress file is worse than none, because it is trusted.
 
-Last updated: **16 August 2026**
+Last updated: **17 August 2026**
 
 ---
 
@@ -24,9 +24,9 @@ Last updated: **16 August 2026**
 | Backend modules | **11 of 11 built AND WIRED** (identity, learner, content, notify, practice, parent, retrieval, foxy, **billing**, **knowledge**, **signals**). Every one is constructed in `buildModules`, and `src/app/__tests__/routes.test.ts` asserts the list exhaustively and pins each module's pool. **Eight register routes; three deliberately do not** — `retrieval` (D-122), `knowledge` and `signals`, none of which has an HTTP surface, with a comment at the foot of `registerRoutes` saying so because "built but never registered" reads exactly like an oversight (D-175). `billing`'s registration is **AWAITED**, the only one besides identity's: its webhook needs an encapsulated Fastify scope for a raw-body parser, and a dropped `await` 404s every genuine delivery in production only. The `payments` port lives on the container, guarded, with a **production boot refusal** (D-176) |
 | Mail | **SMTP adapter BUILT, 11 August.** There was previously no real adapter at all - production defaulted to a console stub with no environment gate, printing verification and password-reset links to stdout and delivering nothing. `createContainer` now refuses to boot in production without SMTP settings (D-226) |
 | Backend processes | **2** — `api` and `worker`. The worker exists and runs one real job |
-| Frontend | **WIRED AND GATED, 12 August.** It makes real network calls for the first time. All five of step 0's foundation gaps are closed — session strategy, the error-code table, the Foxy streaming client (all 7 cases in plan §7 are tests) and the token scales — plus build-order step 6, the typed client and providers. Backend contracts are GENERATED into `src/lib/api/generated/` with a drift test, because `frontend/Dockerfile` copies `frontend/` alone and a direct cross-package import cannot exist in the image. **Tests 10 → 414 unit and 28 end-to-end.** Build-order steps 0-12 are closed: the auth and onboarding screens are live, the Foxy chat UI shipped 14 August, practice and progress on 15 August, and **the parent dashboard on 16 August**. TWELVE CI gates exist and EIGHT have been deliberately broken and observed to fail; the two that cannot be (bundle budgets against a real build, Lighthouse) are blocked on item 33 and on CI ever running |
+| Frontend | **WIRED AND GATED, 12 August.** It makes real network calls for the first time. All five of step 0's foundation gaps are closed — session strategy, the error-code table, the Foxy streaming client (all 7 cases in plan §7 are tests) and the token scales — plus build-order step 6, the typed client and providers. Backend contracts are GENERATED into `src/lib/api/generated/` with a drift test, because `frontend/Dockerfile` copies `frontend/` alone and a direct cross-package import cannot exist in the image. **Tests 10 → 455 unit and 28 end-to-end.** **Build-order steps 0-13 are closed — every feature step is done**: the auth and onboarding screens are live, the Foxy chat UI shipped 14 August, practice and progress on 15 August, the parent dashboard on 16 August, and **billing on 17 August**. TWELVE CI gates exist and EIGHT have been deliberately broken and observed to fail; the two that cannot be (bundle budgets against a real build, Lighthouse) are blocked on item 33 and on CI ever running |
 | Marketing site | **scaffolded** - 32 files under `website/`, committed. Per `06-FRONTEND-SEPARATION-PLAN.md` |
-| Tests | **3,173 backend passing**, 185 files, plus **414 frontend unit and 28 end-to-end** (was 10 — see §5). Three audit waves have added 656 between them. **Every guard, threshold and validation in the codebase has been broken deliberately and confirmed to turn a named test red** - see D-214 |
+| Tests | **3,175 backend passing**, 185 files, plus **455 frontend unit and 28 end-to-end** (was 10 — see §5). Three audit waves have added 656 between them. **Every guard, threshold and validation in the codebase has been broken deliberately and confirmed to turn a named test red** - see D-214 |
 | Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice` + `0003_parent` + **`0004_billing`** + **`0005_foxy`**. Every one has a rollback test, because the round-trip is asserted over the DISCOVERED set rather than per file (D-126) — neither `0004` nor `0005` needed an edit to that test. **Neither has been applied to the development database**, deliberately, for the same reason `0002` has not: see open item 16. ✅ **`0004_billing`'s journal `when` is FIXED** — it was 1786374108357, below `0003_parent`'s 1786700000000, which is the exact D-109 hazard: drizzle selects by `when` and not by `idx`, so on any database already past `0003` it printed "Migrations applied." and applied nothing. **Reproduced on a scratch database before the fix** (`subscriptions` and `payment_events` absent, `0005` applied over the hole, exit code zero), corrected to **1786750000000**, and re-verified both from empty and from a ledger primed to `0003`. The rule is now enforced by `tests/integration/migration-journal-order.test.ts`, which was itself proved to fire by reverting the value. The round-trip test could not have caught this and never could: it applies by `idx` and never reads `when` (D-173, D-174) |
 | Gates | type-check · lint · build · test — all green. `platform/authz` stays **100%**; `billing/domain` 98.5% statements / 96.2% branches / 100% functions, `billing.service` 99.2% / 95.1% / 90%, `platform/payments` 100% statements. `parent/domain` 100%, `parent.service` 94.0%, `retrieval` 99.1%, `practice/domain` 100%. **`modules/foxy` 96.3% statements / 90.4% branches / 94.6% functions**, with `foxy/domain` at 100%/99.0%/100% and `platform/llm` at 98.5% — the real LLM adapter is fully covered and never called |
 | Deployment | **BUILT, 10 August.** `docker/compose.prod.yml` — postgres+pgvector · valkey · api · worker · alert evaluator · frontend · website · Caddy · backup. Three multi-stage non-root Dockerfiles, resource limits on EVERY service, an `internal: true` data network with no published ports, and volume names (`foxxy_prod_*`) that cannot collide with the development ones holding the corpus (D-140). Validated with `docker compose config` |
@@ -106,6 +106,38 @@ npx lhci autorun --collect.startServerCommand=""
 seconds with no jobs created, and an eight-line workflow with a single `echo`
 does the same — account-level, not a workflow defect. Check
 https://github.com/settings/billing.
+
+### Step 13 — billing, closed 17 August 2026
+
+**Every feature step is now done.** Steps 14-15 — the responsive and
+accessibility passes and the two end-to-end specs — are what remain, and both
+need the browser suite that has never run.
+
+**This step needed a BACKEND change first, and it was not scope creep.** The
+plan catalogue lives in `modules/billing/domain/plans.ts`, which the frontend
+cannot import, so a billing screen could either hard-code "₹299 / month" or show
+nothing. `GET /billing/plans` now serves `purchasablePlans()` — the same table
+`findPlan` reads on the checkout path — so the figure quoted and the figure
+charged cannot drift (D-364). Two backend tests, and the backend suite is 3,175.
+
+| Piece | Where | The decision worth knowing |
+|---|---|---|
+| The catalogue | `GET /billing/plans` + `api/billing-requests.ts` | Served, never local. `free` is absent — it is `purchasable: false`, what somebody already has rather than something to buy |
+| An unknown entitlement | `api/billing-requests.ts` | `features` is parsed as STRINGS. As a closed enum, one unrecognised feature rejected the whole response and the pricing page read "plans could not be loaded" because the backend had added an entitlement. Everything that decides money stays strict (D-365) |
+| Money | `lib/money.ts` | Paise, integer, divided once at display. `en-IN`/`hi-IN` for the lakh grouping. An unknown currency makes `Intl` THROW, so it degrades to "SGD 299" rather than crashing a pricing page |
+| The period | `lib/money.ts` | Derived from `periodDays`, not from the plan CODE. A switch on `monthly`/`yearly` reads correctly right up to the first `term` plan, which would render with no period at all |
+| The checkout URL | `lib/checkout-url.ts` | Absolute, `http:`/`https:` only, checked before `location.assign`. The contract types it as a plain string, and this is the one place the product sends a browser somewhere it does not control (D-366) |
+| A 409 | `lib/billing-messages.ts` | "You already have an active plan", never "try again" — the thing they would retry is a payment (D-367) |
+| `pending` | `components/current-plan.tsx` | Rendered as "waiting for payment". A subscription grants nothing until the webhook confirms, and "subscribed" at checkout tells somebody they bought something before any money moved |
+| A school-paid seat | `billing-screen.tsx` | No catalogue and no cancel button. The contract carries `payer.kind` precisely so such a student is never shown "you will be charged ₹299" (D-368) |
+
+**What is unproven, and cannot be proven here.** No Razorpay account exists
+(open item 19), so `checkoutUrl` comes from the deterministic fake and no real
+checkout has ever been completed. Everything above is exercised against the
+fake; the live half needs a key.
+
+**Verified in the container**: `/parent/billing` returns 200 and renders in both
+languages. The browser suite still has not run.
 
 ### Step 12 — the parent dashboard, closed 16 August 2026
 
@@ -222,7 +254,7 @@ because the CSRF verdict must not depend on who the caller claims to be.
 |---|---|
 | **A socket-level smoke test** - the only untested boundary in the backend. **Now the most valuable single day in the repository**: the Foxy chat UI ships against a harness that cannot tell incremental from buffered | 1 |
 | A Postman collection generated from the route definitions | 0.5 |
-| Frontend step 13 — billing | 3 |
+| Frontend steps 14-15 — responsive pass on a real device · accessibility · 2 E2E specs | 7 |
 | Remaining open items in section 7 | 3 |
 
 ### The wire boundary is the one thing three audits could not reach
@@ -631,7 +663,7 @@ Build order from `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` section 11. **Steps 0
 | ✅ 10 | **`practice` — the full cycle, 15 August 2026.** Mission → questions → result. Native radio groups, so "one option at a time" is the platform enforcing it rather than a `useState` that could hold two. Per-question timing, clamped into the contract's range because a backwards device clock or a tab left open over lunch would otherwise 400 an answer away. The result shows "4 of 6", never the `scorePercent` the wire carries — D-357. **No hint affordance: the ladder is contracted, unrouted AND unpopulated — D-358** | — |
 | ✅ 11 | **`progress` — 15 August 2026.** XP tiles, chapter-by-chapter evidence with a rank bar, recent sessions. Emptiness is NO SESSIONS rather than no chapters. History is a separate query that cannot take the XP figures down with it. **`EvidenceLabel` now takes the wire code and is TRANSLATED — D-354**, closing a hand-written English union that had been rendering English to Hindi readers on both dashboards | — |
 | ✅ 12 | **`parent-dashboard` — 16 August 2026.** Snapshot, digest, transcript and consent, as four independent queries. **The child-visibility notice renders before every branch** — §10.4's only bold requirement, and the two paths that show no conversation are tested specifically for it (D-359). A 403 reads as a state the child chose, not a fault (D-361). **The parent fixtures are deleted** rather than left beside the real screen (D-363) | — |
-| ⬜ 13 | `billing` | 3 |
+| ✅ 13 | **`billing` — 17 August 2026.** Catalogue, current plan, checkout and cancel. **A new backend route was needed first**: `GET /billing/plans`, because `PLANS` lives in the module and a frontend holding its own copy of a PRICE advertises one figure and charges another (D-364). A school-paid seat is shown no price and no cancel button (D-368); a 409 says "you already have it" and never "try again" (D-367) | — |
 | ⬜ 14-15 | Responsive pass on a real device · accessibility · 2 E2E specs | 7 |
 | | **Subtotal** | **~35** |
 
@@ -849,6 +881,7 @@ Each was reported by the agent that found it and left deliberately, because it s
 | 34 | ✅ **CLOSED — 12 August.** Onboarding submitted `english`/`hindi` where the contract accepts `en`/`hi`, and offered grades 6-10 where the syllabus and the database CHECK run to 12. Both now come from the GENERATED constants, so the form cannot offer a value the profile refuses. The test that pinned the 6-10 list — asserting Grade 11 was absent — was protecting the defect, and now asserts Grade 12 is present | frontend | — |
 | 35 | **`UserProfile.role` widened to ten values** (D-293). No byte changes today, but a frontend `switch` on `user.role` that was exhaustive over two cases now needs a default | frontend | — |
 | ~~36~~ | ~~**The resend-verification endpoint has no client.**~~ **CLOSED 12 August 2026.** `VerifyPanel` offers it, with constant copy either way so the screen cannot become an enumeration oracle | frontend | done |
+| 47 | **A student on a school-paid seat has nowhere to see that fact.** The billing screen ships under `(parent)`, because the contract is explicit that "nothing in this file says a parent pays" and the B2C-versus-school-pilot question is unresolved. Every billing endpoint resolves the subject from the SESSION, so a student route would work — it was not added rather than putting a fifth item in a mobile bottom navigation on a guess about who pays. Decide the model, then add the route | frontend + product | 0.5 d, with the answer |
 | 46 | **The parent visual baselines are stale by construction.** They were recorded against a fixture screen that no longer exists (D-363), and the four dashboard baselines from item 43 also moved when `EvidenceLabel` changed (D-354). None can be re-recorded without a human deciding what the approved look now is — and none of the four new routes (`/student/foxy`, `/student/practice`, `/student/progress`, and the rebuilt `/parent`) has a baseline at all | frontend | 0.5 d, with a human |
 | 44 | **The hint ladder is contracted, unrouted and unpopulated.** `practice.contract.ts` defines `hintQuerySchema` and `hintResponseSchema`; `practice.routes.ts` registers nothing that serves them, and `hint_level_1..3` are NULL on all 3,791 source questions (item 13). The practice screen therefore offers no hint affordance — a button today would 404 to fetch content that does not exist. Needs the route AND the generation, in that order | backend + section 6 | with item 13 |
 | 45 | **The student dashboard is still fixtures, and now points at real screens.** `/student` renders `sampleProgress` and a hard-coded learner name beside navigation that leads to live practice and progress. The mission and the XP figures it should show are both already on the wire (`GET /practice/mission`, `GET /practice/progress`), so this is wiring rather than design | frontend | 0.5 d |

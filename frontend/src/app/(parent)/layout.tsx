@@ -9,6 +9,7 @@ export default async function ParentLayout({ children }: Readonly<{ children: Re
     { href: '/parent', isCurrent: true, label: t('shell.navOverview'), marker: '⌂' },
     { href: '/parent#parent-snapshot-title', label: t('shell.navChild'), marker: '◎' },
     { href: '/parent#parent-digest-title', label: t('shell.navUpdates'), marker: '•' },
+    { href: '/parent/billing', label: t('shell.navBilling'), marker: '₹' },
   ];
 
   return (
