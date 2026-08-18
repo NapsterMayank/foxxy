@@ -26,6 +26,8 @@ export const contentKeys = {
   chapters: (filter: { grade?: string; subject?: string }) =>
     [...contentKeys.all, 'chapters', filter] as const,
   chapter: (chapterId: string) => [...contentKeys.all, 'chapter', chapterId] as const,
+  /** A chapter's concepts — the study walkthrough. */
+  concepts: (chapterId: string) => [...contentKeys.all, 'concepts', chapterId] as const,
 } as const;
 
 export const practiceKeys = {

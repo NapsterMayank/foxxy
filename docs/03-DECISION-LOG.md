@@ -7154,3 +7154,34 @@ Writing it cost one wrong turn worth recording: the CORS allow-list and the CSRF
 allow-list are DIFFERENT lists (D-082 split them deliberately), and asserting against
 `HARNESS_ORIGIN` — which is `APP_URL`, not `CORS_READ_ORIGINS` — makes a correct
 implementation look broken.
+
+### D-378 · Study is subject → chapter → concept, in the URL
+
+Foxy's start panel was the only way into the product's content, and it asked for a mode and
+a subject from two `<select>`s. That lost three things and broke one.
+
+Lost: the back button, a link somebody can send, and a screen that reopens where it was
+left. Broke: the subject `<select>` defaults to `SUBJECTS[0]`, which is MATHEMATICS, so a
+student asking a science question in a fresh conversation had it retrieved against the maths
+corpus and got an abstention. Confirmed in the trace — `subject=mathematics, chunks=0,
+abstain_reason=below_threshold`.
+
+**Decision:** `/student/learn?subject=science` and `/student/learn/[subject]/[chapter]`,
+matching the mental model the working product uses — Subjects → Chapters → Read → Practise.
+Both URL segments are validated server-side: an unknown subject and a malformed chapter id
+are 404s, because a path segment is user input exactly as a query string is.
+
+"Ask Foxy about this" carries `?subject=`, which `StartPanel` takes as `initialSubject`. The
+subject is now known rather than guessed on the path a student actually takes.
+
+**The concept position is component state, not the URL.** A half-read chapter is not worth
+linking to, and putting it in the URL would put every "next" press into history — leaving a
+seven-concept chapter would mean pressing back seven times.
+
+**One concept per screen.** A chapter averages seven; rendering all seven is a page a
+student scrolls past, and rendering one is a thing they finish. The last one offers PRACTICE
+rather than a dead end, because the pedagogy is read-then-practise and a chapter that ends
+with nothing to press ends the session.
+
+The chapter NUMBER leads and the title follows: students are told "do chapter 6", and 63 of
+the 137 titles are placeholders the number has to carry.

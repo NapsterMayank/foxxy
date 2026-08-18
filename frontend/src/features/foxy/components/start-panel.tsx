@@ -47,15 +47,32 @@ const subjectLabelKeys: Readonly<Record<Subject, TranslationKey>> = {
 
 export interface StartPanelProps {
   readonly modes: FoxyCapabilitiesResponse['modes'];
+  /**
+   * The subject the student ARRIVED WITH, from `?subject=` — set when they came
+   * from a chapter.
+   *
+   * The default is `SUBJECTS[0]`, which is MATHEMATICS, and that default caused
+   * a real failure: a student who asked a science question in a fresh
+   * conversation had it retrieved against the maths corpus and got an
+   * abstention. The trace showed `subject=mathematics, chunks=0`. Arriving from
+   * a chapter means the subject is known rather than guessed.
+   */
+  readonly initialSubject?: Subject;
   readonly onStart: (input: { mode: FoxyMode; subject: Subject }) => void;
   readonly isPending: boolean;
   readonly error?: string;
 }
 
-export function StartPanel({ error, isPending, modes, onStart }: StartPanelProps) {
+export function StartPanel({
+  error,
+  initialSubject,
+  isPending,
+  modes,
+  onStart,
+}: StartPanelProps) {
   const t = useT();
   const [mode, setMode] = useState<FoxyMode>('doubt');
-  const [subject, setSubject] = useState<Subject>(SUBJECTS[0]);
+  const [subject, setSubject] = useState<Subject>(initialSubject ?? SUBJECTS[0]);
 
   /*
    * The served list, narrowed to the modes this build can label. An unknown

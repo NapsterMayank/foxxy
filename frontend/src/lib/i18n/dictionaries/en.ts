@@ -88,6 +88,7 @@ export const en = {
     navOverview: 'Overview',
     navChild: 'Child',
     navUpdates: 'Updates',
+    navLearn2: 'Study',
     navFoxy: 'Ask Foxy',
     navBilling: 'Plan',
   },
@@ -589,6 +590,49 @@ export const en = {
     errorBlocked: 'That request was refused. Reload the page and try again.',
     errorRateLimited: 'Too many attempts. Wait a moment and try again.',
     errorRateLimitedSeconds: 'Too many attempts. Try again in {seconds} seconds.',
+    retryAction: 'Try again',
+  },
+
+  /**
+   * The study browser — subject → chapter → concept.
+   *
+   * The chapter TITLES and every concept's words come from the corpus, not from
+   * here. This section is only the furniture around them.
+   */
+  learn: {
+    eyebrow: 'Study',
+    title: 'Your subjects',
+    description: 'Read a chapter one idea at a time, then practise it.',
+
+    subjectsLabel: 'Choose a subject',
+    pickSubject: 'Pick a subject to see its chapters.',
+    chaptersTitle: 'Chapters',
+    noChapters: 'There are no chapters for your grade in this subject yet.',
+
+    chapterNumber: 'Chapter {number}',
+    backToChapters: '← All chapters',
+    conceptProgress: 'Idea {current} of {total}',
+    keyFormula: 'Formula',
+    example: 'Example',
+    commonMistakes: 'Watch out for',
+
+    previousConcept: 'Back',
+    nextConcept: 'Next idea',
+    practiceThisChapter: 'Practise this',
+    practiceInstead: 'Practise this chapter',
+    askFoxy: 'Ask Foxy about this',
+
+    /*
+     * Ten of the 137 chapters have no concepts. That is content missing rather
+     * than a chapter missing, and the wording has to say so — a student told
+     * "not found" would reasonably conclude the app is broken.
+     */
+    noConceptsTitle: 'This chapter has no reading yet',
+    noConceptsDescription: 'The questions for it are ready, so you can still practise it.',
+
+    loading: 'Loading',
+    errorTitle: 'This could not be loaded',
+    errorDescription: 'Something went wrong. Try again.',
     retryAction: 'Try again',
   },
 

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { EmptyState, ErrorState, LoadingState } from '@/components/patterns/states';
 import { Button } from '@/components/ui/button';
+import { SUBJECTS, type Subject } from '@/lib/api/generated/constants/curriculum';
 import { isFoxyAction } from '@/lib/api/generated/constants/foxy';
 import { useT } from '@/lib/i18n/i18n-provider';
 import { ActionBar } from './components/action-bar';
@@ -37,6 +38,8 @@ import { foxyErrorMessage } from './lib/foxy-messages';
  */
 /** The query parameter that makes a conversation survive a refresh. */
 export const FOXY_SESSION_PARAM = 'session';
+/** Set when the student arrived from a chapter — see `StartPanel.initialSubject`. */
+export const FOXY_SUBJECT_PARAM = 'subject';
 
 export function FoxyChat() {
   const t = useT();
@@ -51,7 +54,14 @@ export function FoxyChat() {
    * In the URL it is also shareable between the two tabs a phone user ends up
    * with, and back-navigable to the start panel for free.
    */
-  const sessionId = useSearchParams().get(FOXY_SESSION_PARAM);
+  const search = useSearchParams();
+  const sessionId = search.get(FOXY_SESSION_PARAM);
+  /*
+   * Narrowed rather than trusted: a query string is user input, and an unknown
+   * value must fall back to the picker rather than reach the API as a subject
+   * the pilot does not carry.
+   */
+  const arrivedWith = SUBJECTS.find((code): code is Subject => code === search.get(FOXY_SUBJECT_PARAM));
 
   const capabilities = useFoxyCapabilities();
   const startSession = useStartFoxySession();
@@ -89,6 +99,7 @@ export function FoxyChat() {
       <div className="space-y-6">
         <UsageLine limit={usage.limit} remaining={usage.remaining} />
         <StartPanel
+          {...(arrivedWith === undefined ? {} : { initialSubject: arrivedWith })}
           error={
             startSession.error === null
               ? undefined

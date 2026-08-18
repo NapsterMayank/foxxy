@@ -100,6 +100,7 @@ export const hi: Dictionary = {
     navOverview: 'सारांश',
     navChild: 'बच्चा',
     navUpdates: 'नई जानकारी',
+    navLearn2: 'अध्ययन',
     navFoxy: 'Foxy से पूछें',
     navBilling: 'योजना',
   },
@@ -520,6 +521,38 @@ export const hi: Dictionary = {
     errorBlocked: 'यह अनुरोध अस्वीकार हुआ। पेज दोबारा लोड करके कोशिश करें।',
     errorRateLimited: 'बहुत बार कोशिश हुई। थोड़ा रुककर फिर कोशिश करें।',
     errorRateLimitedSeconds: 'बहुत बार कोशिश हुई। {seconds} सेकंड बाद फिर कोशिश करें।',
+    retryAction: 'फिर कोशिश करें',
+  },
+
+  learn: {
+    eyebrow: 'अध्ययन',
+    title: 'आपके विषय',
+    description: 'अध्याय को एक-एक विचार करके पढ़ें, फिर अभ्यास करें।',
+
+    subjectsLabel: 'विषय चुनें',
+    pickSubject: 'अध्याय देखने के लिए विषय चुनें।',
+    chaptersTitle: 'अध्याय',
+    noChapters: 'इस विषय में आपकी कक्षा के लिए अभी कोई अध्याय नहीं है।',
+
+    chapterNumber: 'अध्याय {number}',
+    backToChapters: '← सभी अध्याय',
+    conceptProgress: '{total} में से {current} विचार',
+    keyFormula: 'सूत्र',
+    example: 'उदाहरण',
+    commonMistakes: 'इनसे बचें',
+
+    previousConcept: 'पीछे',
+    nextConcept: 'अगला विचार',
+    practiceThisChapter: 'इसका अभ्यास करें',
+    practiceInstead: 'इस अध्याय का अभ्यास करें',
+    askFoxy: 'इस बारे में Foxy से पूछें',
+
+    noConceptsTitle: 'इस अध्याय की पढ़ाई अभी तैयार नहीं है',
+    noConceptsDescription: 'इसके सवाल तैयार हैं, तो आप अभ्यास कर सकते हैं।',
+
+    loading: 'खुल रहा है',
+    errorTitle: 'यह खुल नहीं सका',
+    errorDescription: 'कुछ गड़बड़ हुई। फिर कोशिश करें।',
     retryAction: 'फिर कोशिश करें',
   },
 
