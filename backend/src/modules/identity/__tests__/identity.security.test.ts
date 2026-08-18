@@ -246,17 +246,32 @@ describe('SECURITY: the session token never appears in a response body', () => {
 describe('SECURITY: a 403 on a denied link carries no student data', () => {
   it('returns only the fixed forbidden envelope', async () => {
     const studentId = await createVerifiedUser('child@example.test', 'student', CONTEXT);
-    const parentId = await createVerifiedUser('parent@example.test', 'parent', {
+    await createVerifiedUser('parent@example.test', 'parent', {
       ipHash: 'sec-ip-2',
       userAgent: null,
     });
 
-    // A pending link exists — the parent has submitted a code but the student
-    // has not approved it.
+    /*
+     * A link belonging to SOMEBODY ELSE — migration 0007.
+     *
+     * This used to attempt `approve`, which no longer exists: the old consent
+     * model's approval step was unreachable and was removed. `revoke` is the
+     * remaining id-bearing link route and carries the identical property — a
+     * 403 must reveal nothing about the link or the student behind it.
+     */
+    const otherParentId = await createVerifiedUser('other-parent@example.test', 'parent', {
+      ipHash: 'sec-ip-2b',
+      userAgent: null,
+    });
     const issued = await service.generateLinkCode({ userId: studentId, role: 'student', tenantId: TEST_TENANT_ID });
-    const link = await service.submitLinkCode({ userId: parentId, role: 'parent', tenantId: TEST_TENANT_ID }, issued.code);
+    const otherActor = { userId: otherParentId, role: 'parent' as const, tenantId: TEST_TENANT_ID };
+    await service.requestLinkOtp(otherActor, { code: issued.code });
+    const link = await service.redeemLinkCode(otherActor, {
+      code: issued.code,
+      otp: String(harness.mail.sent.at(-1)?.data.otp),
+    });
 
-    // The parent tries to approve their own request.
+    // A DIFFERENT parent tries to revoke it.
     const parentSession = await service.login(
       { email: 'parent@example.test', password: GOOD_PASSWORD },
       { ipHash: 'sec-ip-3', userAgent: null },
@@ -265,7 +280,7 @@ describe('SECURITY: a 403 on a denied link carries no student data', () => {
     const response = await harness.app.inject({
       method: 'POST',
       headers: { origin: ALLOWED_ORIGIN },
-      url: `/api/v1/links/${link.id}/approve`,
+      url: `/api/v1/links/${link.id}/revoke`,
       cookies: { [TEST_COOKIE_NAME]: parentSession.session.token },
     });
 
@@ -276,7 +291,7 @@ describe('SECURITY: a 403 on a denied link carries no student data', () => {
     expect(response.body).not.toContain(studentId);
     expect(response.body).not.toContain(link.id);
     expect(response.body).not.toContain('child@example.test');
-    expect(response.body).not.toContain('pending');
+    expect(response.body).not.toContain('approved');
   }, 90_000);
 
   it('answers identically for a link id that does not exist at all', async () => {
@@ -290,7 +305,7 @@ describe('SECURITY: a 403 on a denied link carries no student data', () => {
     const response = await harness.app.inject({
       method: 'POST',
       headers: { origin: ALLOWED_ORIGIN },
-      url: '/api/v1/links/00000000-0000-4000-8000-00000000dead/approve',
+      url: '/api/v1/links/00000000-0000-4000-8000-00000000dead/revoke',
       cookies: { [TEST_COOKIE_NAME]: session.session.token },
     });
 

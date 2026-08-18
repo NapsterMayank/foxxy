@@ -88,7 +88,7 @@ describe('issueLinkCode', () => {
 
     expect(issued.code).toBe('AB3DEF');
     expect(issued.studentUserId).toBe(student);
-    expect(issued.expiresAt.getTime()).toBe(clock.now().getTime() + FIFTEEN_MINUTES_MS);
+    expect(issued.expiresAt?.getTime()).toBe(clock.now().getTime() + FIFTEEN_MINUTES_MS);
   });
 
   it('retires the previous code rather than failing on the unique index', async () => {
@@ -170,7 +170,7 @@ describe('issueLinkCode', () => {
       expiresAt: expiry(),
       now: clock.now(),
     });
-    expect(issued.expiresAt.toISOString()).toBe('2030-01-01T00:15:00.000Z');
+    expect(issued.expiresAt?.toISOString()).toBe('2030-01-01T00:15:00.000Z');
   });
 });
 

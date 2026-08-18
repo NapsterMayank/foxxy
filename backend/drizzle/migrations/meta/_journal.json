@@ -50,6 +50,13 @@
       "when": 1786850000000,
       "tag": "0006_notify_preferences",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786900000000,
+      "tag": "0007_past_colossus",
+      "breakpoints": true
     }
   ]
 }

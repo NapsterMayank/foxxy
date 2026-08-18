@@ -144,19 +144,36 @@ describe('THE END-TO-END JOURNEY', () => {
     const issued = linkCodeResponseSchema.parse(codeResponse.json());
     expect(issued.code).toHaveLength(6);
 
-    // --- 5. The parent submits it — and gets NOTHING yet -------------------
-    const submitted = await post('/api/v1/links/submit', { code: issued.code }, parentCookie ?? '');
-    expect(submitted.statusCode).toBe(201);
-    const pending = linkResponseSchema.parse(submitted.json());
-    expect(pending.link.status).toBe('pending');
+    /*
+     * --- 5. The parent asks for an OTP — and gets NOTHING yet -------------
+     *
+     * Migration 0007. This step used to be `POST /links/submit`, which created a
+     * `pending` link for the student to approve — and that approval was
+     * unreachable, because no endpoint gives a student a pending link's id.
+     * The consent is now the code hand-off; the OTP proves the parent controls
+     * the account they are typing it into.
+     */
+    const requested = await post(
+      '/api/v1/links/request-otp',
+      { code: issued.code },
+      parentCookie ?? '',
+    );
+    expect(requested.statusCode).toBe(200);
 
-    const beforeApproval = await get('/api/v1/links/children', parentCookie ?? '');
-    expect(linkedChildrenResponseSchema.parse(beforeApproval.json()).children).toEqual([]);
+    const beforeRedeem = await get('/api/v1/links/children', parentCookie ?? '');
+    expect(linkedChildrenResponseSchema.parse(beforeRedeem.json()).children).toEqual([]);
 
-    // --- 6. The student approves — this is where consent happens ----------
-    const approve = await post(`/api/v1/links/${pending.link.id}/approve`, {}, studentCookie ?? '');
-    expect(approve.statusCode).toBe(200);
-    expect(linkResponseSchema.parse(approve.json()).link.status).toBe('approved');
+    // --- 6. The parent redeems the code with the OTP we emailed them -------
+    const otp = String(harness.mail.sent.at(-1)?.data.otp);
+    const redeemed = await post(
+      '/api/v1/links/redeem',
+      { code: issued.code, otp },
+      parentCookie ?? '',
+    );
+    expect(redeemed.statusCode).toBe(201);
+    const pending = linkResponseSchema.parse(redeemed.json());
+    // Approved on the spot. There is no pending state on this path.
+    expect(pending.link.status).toBe('approved');
 
     // --- 7. The child now appears -----------------------------------------
     const children = await get('/api/v1/links/children', parentCookie ?? '');
@@ -322,6 +339,367 @@ describe('POST /api/v1/auth/logout and logout-all', () => {
   });
 });
 
+/**
+ * ===========================================================================
+ * GUARDIAN LINKING VIA CODE + OTP — migration 0007.
+ *
+ * This replaced a flow whose consent step was UNREACHABLE: the student had to
+ * approve, and no endpoint gave a student a pending link's id. Every parent
+ * stayed pending forever, and it only surfaced when somebody walked the journey
+ * end to end.
+ *
+ * The consent now lives where it already was in practice — the student reading
+ * their code aloud — and the second factor protects the PARENT'S account. So the
+ * tests worth having are the ones about that factor, not about the happy path.
+ * ===========================================================================
+ */
+describe('guardian linking — code + OTP', () => {
+  /** The OTP the module just emailed. Read from the recorder, never guessed. */
+  function lastOtp(): string {
+    const sent = harness.mail.sent.at(-1);
+    if (sent?.template !== 'guardian-link-otp') {
+      throw new Error(`lastOtp: last mail was ${String(sent?.template)}`);
+    }
+    return String(sent.data.otp);
+  }
+
+  async function pair(): Promise<{ student: string; parent: string; code: string }> {
+    const student = await onboard('kid@example.test', 'student');
+    const parent = await onboard('mum@example.test', 'parent');
+    const issued = linkCodeResponseSchema.parse(
+      (await post('/api/v1/links/code', {}, student)).json(),
+    );
+    return { student, parent, code: issued.code };
+  }
+
+  it('links the parent once both factors are shown', async () => {
+    const { parent, code } = await pair();
+
+    const requested = await post('/api/v1/links/request-otp', { code }, parent);
+    expect(requested.statusCode).toBe(200);
+    expect(requested.json()).toEqual({ status: 'ok', otpSent: true });
+
+    const redeemed = await post('/api/v1/links/redeem', { code, otp: lastOtp() }, parent);
+    expect(redeemed.statusCode).toBe(201);
+    // APPROVED IMMEDIATELY. There is no pending state on this path — that state
+    // is what the old flow could never leave.
+    expect(redeemed.json()).toMatchObject({ link: { status: 'approved' } });
+  });
+
+  /*
+   * THE MOST IMPORTANT TEST IN THIS FILE.
+   *
+   * The endpoint takes a six-character code, so a truthful "no such student"
+   * turns a 31^6 search into an enumeration of children. The response must be
+   * byte-identical, and no email may be sent.
+   */
+  it('answers a bogus code exactly as it answers a real one, and mails nothing', async () => {
+    const { parent, code } = await pair();
+    const before = harness.mail.sent.length;
+
+    const real = await post('/api/v1/links/request-otp', { code }, parent);
+    const bogus = await post('/api/v1/links/request-otp', { code: 'ZZZZZZ' }, parent);
+
+    expect(bogus.statusCode).toBe(real.statusCode);
+    expect(bogus.json()).toEqual(real.json());
+    // One email for the real code, none for the bogus one.
+    expect(harness.mail.sent.length).toBe(before + 1);
+  });
+
+  it('names the child in the email, so a misdirected link is noticeable', async () => {
+    const { parent, code } = await pair();
+
+    await post('/api/v1/links/request-otp', { code }, parent);
+
+    const sent = harness.mail.sent.at(-1);
+    expect(sent?.template).toBe('guardian-link-otp');
+    expect(sent?.to).toBe('mum@example.test');
+    // The OTP goes to the ACCOUNT's address. There is no field on the request
+    // that could redirect it.
+    expect(String(sent?.data.otp)).toMatch(/^\d{6}$/);
+  });
+
+  it('refuses a wrong OTP without linking anything', async () => {
+    const { parent, code } = await pair();
+    await post('/api/v1/links/request-otp', { code }, parent);
+
+    const wrong = await post('/api/v1/links/redeem', { code, otp: '000000' }, parent);
+
+    expect(wrong.statusCode).toBe(400);
+    expect((await get('/api/v1/links/children', parent)).json()).toEqual({ children: [] });
+  });
+
+  /*
+   * THE ATTEMPT CAP. Five wrong guesses against a million candidates, then an
+   * hour's lock. Without it a six-digit secret is a weekend of grinding.
+   */
+  it('locks the challenge after five wrong codes, and says so', async () => {
+    const { parent, code } = await pair();
+    await post('/api/v1/links/request-otp', { code }, parent);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await post('/api/v1/links/redeem', { code, otp: '000000' }, parent);
+      expect(response.statusCode).toBe(400);
+    }
+
+    /*
+     * 429 AND NOT 400. Somebody locked out for an hour who is told only "wrong
+     * code" keeps trying, and every attempt after the cap is a request that can
+     * never succeed. That is a support ticket, not a security gain.
+     */
+    const locked = await post('/api/v1/links/redeem', { code, otp: '000000' }, parent);
+    expect(locked.statusCode).toBe(429);
+  });
+
+  /*
+   * THE OBVIOUS WAY AROUND AN ATTEMPT CAP: ask for a fresh secret and get a
+   * fresh budget. The resend UPDATES the challenge with `attempts` deliberately
+   * absent from the SET clause, so the counter survives.
+   */
+  it('does not reset the attempt counter when the OTP is resent', async () => {
+    const { parent, code } = await pair();
+    await post('/api/v1/links/request-otp', { code }, parent);
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await post('/api/v1/links/redeem', { code, otp: '000000' }, parent);
+    }
+
+    // Past the cooldown, so the resend is accepted rather than silently skipped.
+    harness.clock.advanceMs(61_000);
+    await post('/api/v1/links/request-otp', { code }, parent);
+
+    // A fresh secret, but the FIFTH wrong guess still trips the cap.
+    await post('/api/v1/links/redeem', { code, otp: '000000' }, parent);
+    const locked = await post('/api/v1/links/redeem', { code, otp: lastOtp() }, parent);
+
+    expect(locked.statusCode).toBe(429);
+  });
+
+  /* Every send costs an email to a real person's inbox. */
+  it('silently skips a resend inside the cooldown', async () => {
+    const { parent, code } = await pair();
+    await post('/api/v1/links/request-otp', { code }, parent);
+    const after = harness.mail.sent.length;
+
+    const again = await post('/api/v1/links/request-otp', { code }, parent);
+
+    // Same success shape — a truthful "too soon" would confirm the code is real.
+    expect(again.statusCode).toBe(200);
+    expect(harness.mail.sent.length).toBe(after);
+  });
+
+  it('expires the OTP after ten minutes', async () => {
+    const { parent, code } = await pair();
+    await post('/api/v1/links/request-otp', { code }, parent);
+    const otp = lastOtp();
+
+    harness.clock.advanceMs(10 * 60 * 1000);
+
+    expect((await post('/api/v1/links/redeem', { code, otp }, parent)).statusCode).toBe(400);
+  });
+
+  /* A second factor that survives its own use is replayable. */
+  it('cannot be redeemed twice with the same OTP', async () => {
+    const { parent, code } = await pair();
+    await post('/api/v1/links/request-otp', { code }, parent);
+    const otp = lastOtp();
+
+    expect((await post('/api/v1/links/redeem', { code, otp }, parent)).statusCode).toBe(201);
+    expect((await post('/api/v1/links/redeem', { code, otp }, parent)).statusCode).toBe(400);
+  });
+
+  it('is refused to a student, in both directions', async () => {
+    const { student, code } = await pair();
+
+    expect((await post('/api/v1/links/request-otp', { code }, student)).statusCode).toBe(403);
+    expect((await post('/api/v1/links/redeem', { code, otp: '000000' }, student)).statusCode).toBe(
+      403,
+    );
+  });
+
+  it('requires a session', async () => {
+    expect((await post('/api/v1/links/request-otp', { code: 'ABC234' })).statusCode).toBe(401);
+    expect((await post('/api/v1/links/redeem', { code: 'ABC234', otp: '000000' })).statusCode).toBe(
+      401,
+    );
+  });
+
+  /*
+   * SIX DIGITS AS A STRING. A numeric OTP loses its leading zeros in JSON, which
+   * would silently shrink the space by 10% — so the contract takes a string and
+   * the schema rejects anything else.
+   */
+  it('rejects a malformed OTP at the boundary', async () => {
+    const { parent, code } = await pair();
+    await post('/api/v1/links/request-otp', { code }, parent);
+
+    expect((await post('/api/v1/links/redeem', { code, otp: '12345' }, parent)).statusCode).toBe(
+      400,
+    );
+    expect((await post('/api/v1/links/redeem', { code, otp: 'abcdef' }, parent)).statusCode).toBe(
+      400,
+    );
+  });
+
+  /*
+   * The code no longer expires — migration 0007. A countdown required the parent
+   * to be beside the child while it was generated, which is not how a code
+   * reaches a parent.
+   */
+  it('issues a code with no expiry', async () => {
+    const student = await onboard('kid@example.test', 'student');
+
+    const issued = linkCodeResponseSchema.parse(
+      (await post('/api/v1/links/code', {}, student)).json(),
+    );
+
+    expect(issued.expiresAt).toBeNull();
+  });
+});
+
+describe('POST /api/v1/auth/change-password', () => {
+  it('requires a session', async () => {
+    const response = await post('/api/v1/auth/change-password', {
+      currentPassword: GOOD_PASSWORD,
+      newPassword: 'brand-new-passphrase-1',
+    });
+
+    expect(response.statusCode).toBe(401);
+  });
+
+  /*
+   * THE POINT OF THE ENDPOINT. A live cookie proves the browser signed in; it
+   * does not prove the person at the keyboard is the account holder. On the
+   * shared family device this product is built for, changing a password on
+   * cookie possession alone lets whoever finds the laptop open lock the owner
+   * out of their own account.
+   */
+  it('refuses a valid session that cannot produce the current password', async () => {
+    const cookie = await onboard('a@example.test', 'student');
+
+    const response = await post(
+      '/api/v1/auth/change-password',
+      { currentPassword: 'not-the-right-password', newPassword: 'brand-new-passphrase-1' },
+      cookie,
+    );
+
+    expect(response.statusCode).toBe(400);
+    /*
+     * The session SURVIVES a failed attempt — a wrong guess must not sign
+     * somebody out of their own account.
+     *
+     * Asserted against `/auth/me` and not `/links/children`: the latter is
+     * parent-only, so a student reaches it as a 403 and the assertion would be
+     * measuring the role check rather than the session.
+     */
+    expect((await get('/api/v1/auth/me', cookie)).statusCode).toBe(200);
+  });
+
+  it('changes the password, and the new one works while the old one does not', async () => {
+    const cookie = await onboard('a@example.test', 'student');
+
+    const response = await post(
+      '/api/v1/auth/change-password',
+      { currentPassword: GOOD_PASSWORD, newPassword: 'brand-new-passphrase-1' },
+      cookie,
+    );
+    expect(response.statusCode).toBe(200);
+
+    const withOld = await post('/api/v1/auth/login', {
+      email: 'a@example.test',
+      password: GOOD_PASSWORD,
+    });
+    expect(withOld.statusCode).toBe(401);
+
+    const withNew = await post('/api/v1/auth/login', {
+      email: 'a@example.test',
+      password: 'brand-new-passphrase-1',
+    });
+    expect(withNew.statusCode).toBe(200);
+  });
+
+  /*
+   * Somebody changes their password BECAUSE they believe another party has it.
+   * A change that left the other party's session alive would not do the one
+   * thing it was asked to do.
+   */
+  it('revokes every session, including the caller’s own', async () => {
+    const first = await onboard('a@example.test', 'student');
+    const secondLogin = await post('/api/v1/auth/login', {
+      email: 'a@example.test',
+      password: GOOD_PASSWORD,
+    });
+    const second = sessionCookieFrom(secondLogin.headers['set-cookie']) ?? '';
+
+    const response = await post(
+      '/api/v1/auth/change-password',
+      { currentPassword: GOOD_PASSWORD, newPassword: 'brand-new-passphrase-1' },
+      first,
+    );
+    expect(response.statusCode).toBe(200);
+
+    expect((await get('/api/v1/links/children', first)).statusCode).toBe(401);
+    expect((await get('/api/v1/links/children', second)).statusCode).toBe(401);
+  });
+
+  /* The cookie must go, or the next request reads as "your session expired". */
+  it('clears the session cookie, because the session it names is gone', async () => {
+    const cookie = await onboard('a@example.test', 'student');
+
+    const response = await post(
+      '/api/v1/auth/change-password',
+      { currentPassword: GOOD_PASSWORD, newPassword: 'brand-new-passphrase-1' },
+      cookie,
+    );
+
+    const setCookie = String(response.headers['set-cookie'] ?? '');
+    expect(setCookie).toContain(TEST_COOKIE_NAME);
+    expect(setCookie.toLowerCase()).toMatch(/expires=|max-age=0/);
+  });
+
+  /*
+   * Reporting success while changing nothing is the worst possible answer to
+   * somebody who believes they have just secured their account.
+   */
+  it('refuses the password already in use', async () => {
+    const cookie = await onboard('a@example.test', 'student');
+
+    const response = await post(
+      '/api/v1/auth/change-password',
+      { currentPassword: GOOD_PASSWORD, newPassword: GOOD_PASSWORD },
+      cookie,
+    );
+
+    expect(response.statusCode).toBe(400);
+    // Still signed in, and the password still works.
+    expect((await get('/api/v1/auth/me', cookie)).statusCode).toBe(200);
+  });
+
+  it('applies the same strength rules as signup', async () => {
+    const cookie = await onboard('a@example.test', 'student');
+
+    const tooShort = await post(
+      '/api/v1/auth/change-password',
+      { currentPassword: GOOD_PASSWORD, newPassword: 'short' },
+      cookie,
+    );
+    expect(tooShort.statusCode).toBe(400);
+
+    const common = await post(
+      '/api/v1/auth/change-password',
+      { currentPassword: GOOD_PASSWORD, newPassword: 'password123' },
+      cookie,
+    );
+    expect(common.statusCode).toBe(400);
+
+    // Nothing changed: the original password still signs in.
+    expect(
+      (await post('/api/v1/auth/login', { email: 'a@example.test', password: GOOD_PASSWORD }))
+        .statusCode,
+    ).toBe(200);
+  });
+});
+
 describe('POST /api/v1/auth/reset-password', () => {
   it('logs every session out, so the caller must sign in again', async () => {
     const cookie = await onboard('a@example.test', 'student');
@@ -351,8 +729,8 @@ describe('POST /api/v1/auth/reset-password', () => {
 describe('the authenticated routes', () => {
   it.each([
     ['POST', '/api/v1/links/code'],
-    ['POST', '/api/v1/links/submit'],
-    ['POST', '/api/v1/links/00000000-0000-4000-8000-000000000001/approve'],
+    ['POST', '/api/v1/links/request-otp'],
+    ['POST', '/api/v1/links/redeem'],
     ['POST', '/api/v1/links/00000000-0000-4000-8000-000000000001/revoke'],
     ['GET', '/api/v1/links/children'],
     ['GET', '/api/v1/auth/me'],
@@ -369,15 +747,22 @@ describe('the authenticated routes', () => {
     expect(String(response.headers['set-cookie'])).toContain(`${TEST_COOKIE_NAME}=;`);
   });
 
+  /* `revoke` is the only id-bearing link route left — migration 0007. */
   it('rejects a link id that is not a uuid with a 400, not a 500', async () => {
     const cookie = await onboard('a@example.test', 'student');
-    const response = await post('/api/v1/links/not-a-uuid/approve', {}, cookie);
+    const response = await post('/api/v1/links/not-a-uuid/revoke', {}, cookie);
     expect(response.statusCode).toBe(400);
   });
 
   it('rejects a malformed link code with a 400', async () => {
     const cookie = await onboard('p@example.test', 'parent');
-    const response = await post('/api/v1/links/submit', { code: 'ABC' }, cookie);
+    /*
+     * The SCHEMA rejects a three-character code with a 400 — a length rule is
+     * not an oracle, because it says nothing about which codes exist. A
+     * well-formed but unknown code returns 200, which is asserted in the
+     * guardian-linking block above.
+     */
+    const response = await post('/api/v1/links/request-otp', { code: 'ABC' }, cookie);
     expect(response.statusCode).toBe(400);
   });
 
@@ -712,13 +1097,18 @@ describe('a cross-tenant link is refused — D-073', () => {
 
     await moveToOtherTenant('kid-t@example.test');
 
-    const submit = await post('/api/v1/links/submit', { code }, parentCookie);
+    const before = harness.mail.sent.length;
+    const requested = await post('/api/v1/links/request-otp', { code }, parentCookie);
 
-    // The SAME 400 as an unknown or expired code. Distinguishing them would tell
-    // a parent in tenant A that this code belongs to a real student in tenant B
-    // — the existence disclosure a white-labelled deployment cannot afford,
-    // delivered by a helpful error message.
-    expect(submit.statusCode).toBe(400);
+    /*
+     * A SILENT 200, and NO EMAIL — migration 0007 moved this refusal one step
+     * earlier. Telling a parent in tenant A that this code belongs to a real
+     * student in tenant B is the existence disclosure a white-labelled
+     * deployment cannot afford, and on this endpoint every refusal looks like a
+     * success. The absence of the email is what proves the refusal happened.
+     */
+    expect(requested.statusCode).toBe(200);
+    expect(harness.mail.sent.length).toBe(before);
 
     const links = await harness.postgres.client.query('select count(*)::text as n from parent_child_links');
     expect((links.rows[0] as { n: string }).n).toBe('0');
@@ -733,9 +1123,13 @@ describe('a cross-tenant link is refused — D-073', () => {
     const issued = await post('/api/v1/links/code', {}, studentCookie);
     const code = linkCodeResponseSchema.parse(issued.json()).code;
 
-    const submit = await post('/api/v1/links/submit', { code }, parentCookie);
-    expect(submit.statusCode).toBe(201);
-    expect(linkResponseSchema.parse(submit.json()).link.status).toBe('pending');
+    const requested = await post('/api/v1/links/request-otp', { code }, parentCookie);
+    expect(requested.statusCode).toBe(200);
+
+    const otp = String(harness.mail.sent.at(-1)?.data.otp);
+    const redeemed = await post('/api/v1/links/redeem', { code, otp }, parentCookie);
+    expect(redeemed.statusCode).toBe(201);
+    expect(linkResponseSchema.parse(redeemed.json()).link.status).toBe('approved');
   });
 });
 

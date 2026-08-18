@@ -928,12 +928,21 @@ describe('parent-child linking', () => {
     return { student: student.userId, parent: parent.userId };
   }
 
-  it('issues a 6-character code that expires in 15 minutes', async () => {
+  /*
+   * MIGRATION 0007 — the code no longer expires.
+   *
+   * A fifteen-minute countdown required the parent to be beside the child while
+   * the code was generated, which is not how a code reaches a parent: it is read
+   * out on a phone call or sent home on a slip. What bounds somebody who merely
+   * LEARNS a code is the OTP to the parent's own mailbox, not a timer, and the
+   * code is still single-use and still one-per-student.
+   */
+  it('issues a 6-character code that does not expire', async () => {
     const { student } = await pair();
     const issued = await service.generateLinkCode({ userId: student, role: 'student', tenantId: TEST_TENANT_ID });
 
     expect(issued.code).toHaveLength(6);
-    expect(issued.expiresAt.getTime()).toBe(harness.clock.now().getTime() + LINK_CODE_TTL_MS);
+    expect(issued.expiresAt).toBeNull();
   });
 
   it('keeps ONE ACTIVE CODE PER STUDENT — a new code kills the previous one', async () => {
@@ -1120,26 +1129,42 @@ describe('parent-child linking', () => {
     expect(await service.isLinkApproved(parent, student)).toBe(true);
   });
 
-  it('REJECTS AN EXPIRED CODE', async () => {
-    const { student, parent } = await pair();
+  /*
+   * ========================================================================
+   * THE EXPIRY TESTS ARE GONE — migration 0007, and they were asserting a rule
+   * the product deliberately dropped rather than a rule it broke.
+   *
+   * A fifteen-minute code required the parent to be standing beside the child
+   * while it was generated. That is not how a code reaches a parent: it is read
+   * out on a phone call, or sent home on a slip. What now bounds somebody who
+   * merely LEARNS a code is the OTP to the parent's own mailbox — see
+   * `link-otp.test.ts` and the guardian-linking block in the route tests, which
+   * between them cover the attempt cap, the lock, the resend, and the fact that
+   * a resend cannot reset the counter.
+   *
+   * The code is still SINGLE USE and still ONE PER STUDENT, and both properties
+   * keep their own tests below. The repository still honours a non-null expiry,
+   * asserted in `tests/integration/link-code-repository.test.ts`, so the column
+   * has not become decorative.
+   * ========================================================================
+   */
+
+  it('issues a code that does not expire, however long the clock runs', async () => {
+    const { student } = await pair();
     const issued = await service.generateLinkCode({ userId: student, role: 'student', tenantId: TEST_TENANT_ID });
 
-    harness.clock.advanceMs(LINK_CODE_TTL_MS);
+    expect(issued.expiresAt).toBeNull();
 
-    await expect(
-      service.submitLinkCode({ userId: parent, role: 'parent', tenantId: TEST_TENANT_ID }, issued.code),
-    ).rejects.toMatchObject({ code: ERROR_CODES.VALIDATION });
-  });
+    // A week later it is still the student's active code, not a stale row the
+    // screen would replace on every render.
+    harness.clock.advanceMs(7 * 24 * 60 * 60 * 1000);
+    const active = await service.getActiveLinkCode({
+      userId: student,
+      role: 'student',
+      tenantId: TEST_TENANT_ID,
+    });
 
-  it('accepts a code one millisecond before expiry', async () => {
-    const { student, parent } = await pair();
-    const issued = await service.generateLinkCode({ userId: student, role: 'student', tenantId: TEST_TENANT_ID });
-
-    harness.clock.advanceMs(LINK_CODE_TTL_MS - 1);
-
-    await expect(
-      service.submitLinkCode({ userId: parent, role: 'parent', tenantId: TEST_TENANT_ID }, issued.code),
-    ).resolves.toMatchObject({ status: 'pending' });
+    expect(active?.code).toBe(issued.code);
   });
 
   it('consumes the code on submission', async () => {
@@ -1262,9 +1287,9 @@ describe('link codes live in the database', () => {
     );
     expect(stored.rows).toHaveLength(1);
     expect(stored.rows[0]?.code).toBe(issued.code);
-    expect(stored.rows[0]?.expires_at.getTime()).toBe(
-      harness.clock.now().getTime() + LINK_CODE_TTL_MS,
-    );
+    // NULL rather than a timestamp — migration 0007. The point of this test is
+    // that the code is a ROW, and it still is.
+    expect(stored.rows[0]?.expires_at).toBeNull();
   });
 
   it('ISSUING TWICE leaves exactly one active row under the partial unique index', async () => {
@@ -1297,18 +1322,6 @@ describe('link codes live in the database', () => {
     expect(link.status).toBe('pending');
   });
 
-  it('REJECTS AN EXPIRED CODE, on the injected clock', async () => {
-    const { student, parent } = await pair();
-    const issued = await service.generateLinkCode({ userId: student, role: 'student', tenantId: TEST_TENANT_ID });
-
-    // The deadline itself counts as expired, matching every other deadline in
-    // the module.
-    harness.clock.advanceMs(LINK_CODE_TTL_MS);
-
-    await expect(
-      service.submitLinkCode({ userId: parent, role: 'parent', tenantId: TEST_TENANT_ID }, issued.code),
-    ).rejects.toMatchObject({ code: ERROR_CODES.VALIDATION });
-  });
 
   it('accepts the same code one millisecond before it expires', async () => {
     const { student, parent } = await pair();
@@ -1399,7 +1412,7 @@ describe('getActiveLinkCode', () => {
     const active = await service.getActiveLinkCode({ userId, role: 'student', tenantId: TEST_TENANT_ID });
 
     expect(active?.code).toBe(issued.code);
-    expect(active?.expiresAt.getTime()).toBe(issued.expiresAt.getTime());
+    expect(active?.expiresAt).toBeNull();
   });
 
   it('returns null when no code has been issued', async () => {
@@ -1407,13 +1420,24 @@ describe('getActiveLinkCode', () => {
     expect(await service.getActiveLinkCode({ userId, role: 'student', tenantId: TEST_TENANT_ID })).toBeNull();
   });
 
-  it('returns null once the code has expired', async () => {
+  /*
+   * MIGRATION 0007 — a code does not expire, so the only way it stops being
+   * active is being SPENT (the test below). This one asserts the other half:
+   * time passing does not retire it.
+   *
+   * The null-expiry branch of the query matters here. `expires_at > now` is NULL
+   * for a persistent row, which is not true — so without an explicit null check
+   * the student's own screen could not see their own code and would mint a
+   * replacement on every render.
+   */
+  it('keeps returning the code however long the clock runs', async () => {
     const userId = await newStudent();
-    await service.generateLinkCode({ userId, role: 'student', tenantId: TEST_TENANT_ID });
+    const issued = await service.generateLinkCode({ userId, role: 'student', tenantId: TEST_TENANT_ID });
 
-    harness.clock.advanceMs(LINK_CODE_TTL_MS);
+    harness.clock.advanceMs(30 * 24 * 60 * 60 * 1000);
 
-    expect(await service.getActiveLinkCode({ userId, role: 'student', tenantId: TEST_TENANT_ID })).toBeNull();
+    const active = await service.getActiveLinkCode({ userId, role: 'student', tenantId: TEST_TENANT_ID });
+    expect(active?.code).toBe(issued.code);
   });
 
   it('returns null once the code has been redeemed', async () => {

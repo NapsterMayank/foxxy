@@ -1,5 +1,14 @@
 import { sql } from 'drizzle-orm';
-import { check, index, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import {
+  check,
+  index,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import { PLATFORM_ROLES } from '../../../shared/constants/roles';
 import { citext } from '../column-types';
 import { DEFAULT_TENANT_ID, tenants } from './tenants';
@@ -163,7 +172,15 @@ export const linkCodes = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     /** 6 chars from an unambiguous alphabet — no 0/O, no 1/I/l (§6.8). */
     code: text('code').notNull(),
-    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    /**
+     * NULL MEANS "DOES NOT EXPIRE" — migration 0007.
+     *
+     * A fifteen-minute code required the parent to be standing beside the child
+     * while it was generated. A persistent code is what a slip sent home in a
+     * school bag has to be. A non-null value still expires, so every existing
+     * row keeps exactly the meaning it had.
+     */
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
     consumedAt: timestamp('consumed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -243,6 +260,63 @@ export const parentChildLinks = pgTable(
   ],
 );
 
+/**
+ * The SECOND FACTOR on guardian linking — migration 0007.
+ *
+ * ===========================================================================
+ * IT PROTECTS THE PARENT'S ACCOUNT, NOT THE STUDENT'S CONSENT.
+ *
+ * The code hand-off is the consent: a student reading their code aloud to a
+ * parent is a deliberate act. What a bare code cannot prove is that the person
+ * TYPING it controls the parent account they are typing it into — a code
+ * overheard in a classroom would otherwise be enough. So the OTP goes to the
+ * parent's own verified address, and possession of that mailbox is the thing
+ * being demonstrated.
+ *
+ * ONE ROW PER (parent, code). A resend UPDATES it, so `attempts` and
+ * `lockedUntil` cannot be reset by asking for another code — which is the
+ * obvious way to defeat an attempt cap and the reason this is a unique index
+ * rather than a convention.
+ * ===========================================================================
+ */
+export const linkCodeOtpChallenges = pgTable(
+  'link_code_otp_challenges',
+  {
+    /**
+     * ASSIGNED BY THE CALLER, not `defaultRandom()`. The digest is
+     * `sha256(otp || id)`, so the id must be known before the hash is computed
+     * and therefore before the insert.
+     */
+    id: uuid('id').primaryKey(),
+    parentUserId: uuid('parent_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    studentUserId: uuid('student_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** As submitted, upper-cased, so a resend need not re-resolve the student. */
+    code: text('code').notNull(),
+    /**
+     * `sha256(otp || id)`. THE OTP IS NEVER STORED. A six-digit secret in a
+     * leaked table is a million guesses, which is no guesses at all — the same
+     * argument that makes SHA-256 acceptable for a 256-bit session token makes
+     * it unacceptable to store the OTP itself.
+     */
+    otpHash: text('otp_hash').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    /** Set at the attempt cap. The row survives, so the cap cannot be reset. */
+    lockedUntil: timestamp('locked_until', { withTimezone: true }),
+    /** Resend cooldown — every send costs an email to a real person. */
+    lastSentAt: timestamp('last_sent_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('link_code_otp_one_per_parent_code').on(table.parentUserId, table.code),
+    index('link_code_otp_expires_at_idx').on(table.expiresAt),
+  ],
+);
+
 export type UserRow = typeof users.$inferSelect;
 export type NewUserRow = typeof users.$inferInsert;
 export type SessionRow = typeof sessions.$inferSelect;
@@ -253,3 +327,5 @@ export type ParentChildLinkRow = typeof parentChildLinks.$inferSelect;
 export type NewParentChildLinkRow = typeof parentChildLinks.$inferInsert;
 export type LinkCodeRow = typeof linkCodes.$inferSelect;
 export type NewLinkCodeRow = typeof linkCodes.$inferInsert;
+export type LinkCodeOtpChallengeRow = typeof linkCodeOtpChallenges.$inferSelect;
+export type NewLinkCodeOtpChallengeRow = typeof linkCodeOtpChallenges.$inferInsert;

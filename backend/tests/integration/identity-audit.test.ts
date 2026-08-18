@@ -137,15 +137,25 @@ describe('the parent-child consent trail', () => {
     const codeResponse = await post('/api/v1/links/code', {}, student.cookie);
     const code = (JSON.parse(codeResponse.body) as { code: string }).code;
 
-    const submitted = await post('/api/v1/links/submit', { code }, parent.cookie);
-    const linkId = (JSON.parse(submitted.body) as { link: { id: string } }).link.id;
+    /*
+     * MIGRATION 0007 — the trail is unchanged in shape, reached by a new route.
+     *
+     * `POST /links/submit` and the student's `approve` are gone: that consent
+     * step was unreachable, because no endpoint gave a student a pending link's
+     * id. The parent now proves possession of their own mailbox instead, and the
+     * link is approved on redemption.
+     */
+    await post('/api/v1/links/request-otp', { code }, parent.cookie);
 
-    // SUBMITTING A CODE IS NOT AUDITED, and that is deliberate. A pending link
-    // grants nothing (§6.8) — the security state has not changed yet. Auditing
-    // it would record an intention rather than an access.
+    // REQUESTING AN OTP IS NOT AUDITED, and that is deliberate — the same
+    // reasoning that left `submit` unaudited. No access has been granted yet, so
+    // a row here would record an intention rather than an access.
     expect(await auditRows()).toHaveLength(0);
 
-    await post(`/api/v1/links/${linkId}/approve`, {}, student.cookie);
+    const otp = String(harness.mail.sent.at(-1)?.data.otp);
+    const redeemed = await post('/api/v1/links/redeem', { code, otp }, parent.cookie);
+    const linkId = (JSON.parse(redeemed.body) as { link: { id: string } }).link.id;
+
     await post(`/api/v1/links/${linkId}/revoke`, {}, parent.cookie);
 
     const rows = await auditRows();
@@ -159,9 +169,18 @@ describe('the parent-child consent trail', () => {
     expect(rows[0]?.actor_user_id).toBe(student.userId);
     expect(rows[0]?.actor_role).toBe('student');
     expect(rows[0]?.resource_id).toBe(linkId);
+    /*
+     * `via` RECORDS WHICH ROUTE PRODUCED THE CONSENT — migration 0007.
+     *
+     * The action stays `LINK_APPROVED`, because from a school's or a regulator's
+     * point of view this is the same event the old flow recorded. What changed is
+     * how it was reached, and a trail that could not distinguish "the student
+     * pressed approve" from "the student handed over a code and the parent proved
+     * their mailbox" would be answering a question it cannot actually answer.
+     */
     expect(rows[0]?.metadata).toEqual({
+      via: 'link_code_otp',
       parentUserId: parent.userId,
-      studentUserId: student.userId,
     });
 
     // EITHER party may revoke (§6.8 step 7), and "the parent withdrew" and "the
@@ -178,9 +197,9 @@ describe('the parent-child consent trail', () => {
 
     const codeResponse = await post('/api/v1/links/code', {}, student.cookie);
     const code = (JSON.parse(codeResponse.body) as { code: string }).code;
-    const submitted = await post('/api/v1/links/submit', { code }, parent.cookie);
-    const linkId = (JSON.parse(submitted.body) as { link: { id: string } }).link.id;
-    await post(`/api/v1/links/${linkId}/approve`, {}, student.cookie);
+    await post('/api/v1/links/request-otp', { code }, parent.cookie);
+    const otp = String(harness.mail.sent.at(-1)?.data.otp);
+    await post('/api/v1/links/redeem', { code, otp }, parent.cookie);
 
     // The strongest form: dump the whole table and look for anything personal.
     const raw = await harness.postgres.client.query<{ dump: string }>(

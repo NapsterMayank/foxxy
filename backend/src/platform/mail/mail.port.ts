@@ -17,6 +17,8 @@
  */
 export type MailTemplate =
   | 'email-verification'
+  /** The guardian-link second factor — migration 0007. */
+  | 'guardian-link-otp'
   | 'password-reset'
   | 'signup-attempt-on-existing-account'
   | 'weekly-digest';

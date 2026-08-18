@@ -65,6 +65,30 @@ const RENDERERS: Readonly<Record<MailTemplate, (message: MailMessage) => Rendere
       SIGNATURE,
   }),
 
+  /**
+   * The guardian-link second factor — migration 0007.
+   *
+   * IT NAMES THE CHILD AND SAYS WHAT PRESSING ON WILL GRANT. An OTP email that
+   * says only "your code is 123456" is a code somebody types reflexively; a
+   * parent who is being socially engineered into linking to a child that is not
+   * theirs needs the child's name in front of them to notice.
+   *
+   * It also states the do-nothing path, because the safe action for a parent who
+   * did not ask for this is to ignore it — and unlike a verification link, an
+   * unused OTP leaves no trace they could be worried about.
+   */
+  'guardian-link-otp': (message) => ({
+    subject: 'Your Foxxy verification code',
+    text:
+      'Use this code to finish linking your account to ' +
+      `${requireField(message, 'studentName')}:\n\n` +
+      `${requireField(message, 'otp')}\n\n` +
+      'It expires in 10 minutes and can be used once. Once linked you will be able to see ' +
+      'their weekly learning summary.\n\n' +
+      'If you did not request this, ignore this email — nothing has been shared.' +
+      SIGNATURE,
+  }),
+
   'password-reset': (message) => ({
     subject: 'Reset your Foxxy password',
     text:
