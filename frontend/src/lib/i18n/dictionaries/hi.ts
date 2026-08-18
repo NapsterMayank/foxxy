@@ -216,18 +216,24 @@ export const hi: Dictionary = {
   student: {
     eyebrow: 'विद्यार्थी डैशबोर्ड',
     greeting: 'नमस्ते, {name}',
-    intro: 'आपकी अगली गतिविधि तैयार है। जहाँ छोड़ा था वहाँ से शुरू करें या हाल की प्रगति देखें।',
-    seeNext: 'अगली गतिविधि देखें',
+    intro: 'आपका अगला अभ्यास और हाल के सत्र क्या दिखाते हैं।',
+    greetingUnknown: 'नमस्ते',
     reviewProgress: 'मेरी प्रगति देखें',
+
     nextUpEyebrow: 'अगला',
-    nextUpTitle: 'रोज़मर्रा में भिन्न',
-    nextUpDescription: 'व्यंजनों और बाँटने के उदाहरणों से एक छोटा अभ्यास।',
-    previewOnly: 'केवल झलक',
-    weekEyebrow: 'इस सप्ताह',
-    weekTitle: 'चार दिन पढ़ाई',
-    weekDescription: 'लगातार बने रहना, बिना नागा वाले रिकॉर्ड से अधिक मायने रखता है। अच्छा चल रहा है।',
-    weekProgressLabel: '{total} में से {done} दिन पूरे',
-    progressTitle: 'आपकी पढ़ाई कैसे आगे बढ़ रही है',
+    nextUpChapter: 'अध्याय {number} · {title}',
+    nextUpQuestions: '{count} प्रश्न',
+    startPractice: 'अभ्यास शुरू करें',
+    missionEmptyTitle: 'अभी अभ्यास के लिए कुछ नहीं',
+    missionEmptyDescription: 'आपके विषयों में अध्याय जुड़ते ही अगला अभ्यास यहाँ दिखेगा।',
+
+    continueEyebrow: 'जहाँ छोड़ा था',
+    continueNone: 'आपने अभी कोई अभ्यास सत्र पूरा नहीं किया है।',
+    continueChapter: '{title} · अभ्यास {date}',
+
+    loading: 'आपका डैशबोर्ड खुल रहा है',
+    errorTitle: 'आपका डैशबोर्ड खुल नहीं सका',
+    retryAction: 'फिर कोशिश करें',
   },
 
   parent: {

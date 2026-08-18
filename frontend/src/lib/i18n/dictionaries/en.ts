@@ -217,22 +217,40 @@ export const en = {
     linkPending: 'Request sent. Your child approves it from their account before you see anything.',
   },
 
+  /**
+   * The student dashboard.
+   *
+   * WHAT IS NOT HERE IS THE POINT. `nextUpTitle` used to read "Fractions in
+   * everyday life" and `weekTitle` "Four learning days" — sentences written
+   * into the dictionary about a chapter nobody chose and a week nobody had.
+   * Every line below is either furniture or a slot filled from this student's
+   * own rows.
+   *
+   * `greeting` LOST ITS TIME OF DAY. "Good afternoon" was rendered at every
+   * hour to every user; a greeting that is wrong two thirds of the day is
+   * worse than one that never claims to know.
+   */
   student: {
     eyebrow: 'Student dashboard',
-    greeting: 'Good afternoon, {name}',
-    intro: 'Your next activity is ready. Pick up where you left off or review your recent learning evidence.',
-    seeNext: 'See next activity',
+    greeting: 'Hello, {name}',
+    greetingUnknown: 'Hello',
+    intro: 'Your next practice and what your recent sessions show.',
     reviewProgress: 'Review my progress',
+
     nextUpEyebrow: 'Next up',
-    nextUpTitle: 'Fractions in everyday life',
-    nextUpDescription: 'A short practice set using recipes and sharing examples.',
-    previewOnly: 'Preview only',
-    weekEyebrow: 'This week',
-    weekTitle: 'Four learning days',
-    weekDescription:
-      'A steady rhythm matters more than a perfect streak. Nice work returning regularly.',
-    weekProgressLabel: '{done} of {total} learning days completed',
-    progressTitle: 'How your learning is developing',
+    nextUpChapter: 'Chapter {number} · {title}',
+    nextUpQuestions: '{count} questions',
+    startPractice: 'Start practice',
+    missionEmptyTitle: 'Nothing to practise yet',
+    missionEmptyDescription: 'Once your subjects have chapters, your next practice appears here.',
+
+    continueEyebrow: 'Where you left off',
+    continueNone: 'You have not finished a practice session yet.',
+    continueChapter: '{title} · practised {date}',
+
+    loading: 'Loading your dashboard',
+    errorTitle: 'Your dashboard could not load',
+    retryAction: 'Try again',
   },
 
   parent: {

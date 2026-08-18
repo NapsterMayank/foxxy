@@ -82,9 +82,7 @@ describe('the dictionaries', () => {
 
 describe('the translator', () => {
   it('fills interpolation slots', () => {
-    expect(createTranslator('en')('student.greeting', { name: 'Aarav' })).toBe(
-      'Good afternoon, Aarav',
-    );
+    expect(createTranslator('en')('student.greeting', { name: 'Aarav' })).toBe('Hello, Aarav');
   });
 
   it('leaves an unfilled slot visible rather than blanking it', () => {
