@@ -16,8 +16,8 @@ mission, ledger and profile, and `/student/profile` is the first client
 authenticated screen, 15 min), item 53 (option letter prefixes shuffled into
 `A) … C) … D) … B)`, 1 h, at import), item 49 (`questions` has no
 `hint_level_*` and no `question_hi` columns — a migration before any generation
-work), then item 46's visual baselines, which now need a human for two more
-routes.
+work), then item 44 (the hint ladder: contracted, unrouted, unpopulated).
+Item 46's baselines are done.
 
 ## How to run it
 
@@ -49,7 +49,11 @@ a fake. Run it before believing anything in this file.
   cannot read the session cookie.
 - **The dashboard is live and the week strip is gone** (D-380). No endpoint
   carries a streak, so the decoration was deleted rather than faked.
-
+- **Saving a language switches the interface** (D-381), one direction only —
+  the header switch is per-device and still does not write the profile.
+- **The browser suite got fixtures** (D-382). `stubStudentData` in
+  `tests/e2e/support/session.ts`, frozen in time. All 14 visual baselines
+  re-recorded; 126 browser checks pass.
 - **Guardian linking is code + OTP** (D-373). The old student-approval model
   could never complete — no endpoint gave a student the pending link's id.
 - **The SSE route had no CORS headers** (D-377), so Foxy was blocked in every

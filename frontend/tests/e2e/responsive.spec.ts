@@ -44,6 +44,7 @@ const ROUTES = [
   { path: '/student/foxy', name: 'foxy', role: 'student' as const },
   { path: '/student/practice', name: 'practice', role: 'student' as const },
   { path: '/student/progress', name: 'progress', role: 'student' as const },
+  { path: '/student/profile', name: 'profile', role: 'student' as const },
   { path: '/parent', name: 'parent dashboard', role: 'parent' as const },
   { path: '/parent/billing', name: 'billing', role: 'parent' as const },
 ];

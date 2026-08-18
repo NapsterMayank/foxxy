@@ -127,6 +127,45 @@ describe('ProfileScreen', () => {
     expect(bodyOf(fetchMock.mock.calls[1])).toEqual({ grade: '9', preferredLanguage: 'hi' });
   });
 
+  it('switches the interface to the language it just saved', async () => {
+    fetchMock.mockResolvedValueOnce(json({ profile }));
+
+    render(<ProfileScreen />);
+
+    const hindi = (await screen.findAllByRole('radio')).find(
+      (radio) => (radio as HTMLInputElement).value === 'hi',
+    );
+    fireEvent.click(hindi as HTMLElement);
+
+    fetchMock.mockResolvedValueOnce(
+      json({ profile: { ...profile, preferredLanguage: 'hi' } }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    // The save confirmation itself arrives in Hindi — the switch happens on
+    // success, not on the click, so a refused save leaves the screen alone.
+    expect(await screen.findByText(/प्रोफ़ाइल अपडेट हो गई/)).toBeTruthy();
+    expect(document.documentElement.lang).toBe('hi');
+  });
+
+  it('leaves the interface alone when the save is refused', async () => {
+    fetchMock.mockResolvedValueOnce(json({ profile }));
+    document.documentElement.lang = 'en';
+
+    render(<ProfileScreen />);
+
+    const hindi = (await screen.findAllByRole('radio')).find(
+      (radio) => (radio as HTMLInputElement).value === 'hi',
+    );
+    fireEvent.click(hindi as HTMLElement);
+
+    fetchMock.mockResolvedValueOnce(json({ error: { code: 'INTERNAL' } }, 500));
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(document.documentElement.lang).toBe('en');
+  });
+
   it('reports a refused save without losing what was typed', async () => {
     fetchMock.mockResolvedValueOnce(json({ profile }));
 

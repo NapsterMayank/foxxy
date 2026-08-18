@@ -92,3 +92,86 @@ export async function holdBootstrap(page: Page): Promise<void> {
     // Never fulfilled, never aborted. The request simply stays in flight.
   });
 }
+
+/**
+ * ===========================================================================
+ * THE STUDENT DASHBOARD'S OWN READS — added when `/student` stopped being a
+ * fixture (open item 51).
+ *
+ * Until then the screen rendered from constants in the file, so a browser test
+ * that stubbed only the bootstrap saw a complete page. It now issues three
+ * requests, and with no backend in these tests all three fail at the transport
+ * layer — which the screen correctly renders as "your dashboard could not
+ * load", a state with no `h1` and nothing worth a baseline.
+ *
+ * THE FIXTURES ARE FROZEN IN TIME ON PURPOSE. `lastPractisedAt` is rendered as
+ * a day and a month, so a relative date would change the screenshot without
+ * anybody changing the product — a baseline that fails once a month teaches
+ * everyone to re-record without looking.
+ * ===========================================================================
+ */
+const STUDENT_CHAPTER_ID = '44444444-4444-4444-8444-444444444444';
+
+export async function stubStudentData(page: Page): Promise<void> {
+  await page.route('**/api/v1/practice/mission', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        mission: {
+          chapterId: STUDENT_CHAPTER_ID,
+          chapterNumber: 6,
+          chapterTitleEn: 'Life Processes',
+          chapterTitleHi: 'जैव प्रक्रम',
+          subjectCode: 'science',
+          reason: 'due_review',
+          reasonEn: 'You practised this three days ago and it is due for review.',
+          reasonHi: 'आपने इसे तीन दिन पहले किया था और अब दोहराव का समय है।',
+          evidence: 'developing',
+          suggestedQuestionCount: 8,
+        },
+      }),
+    }),
+  );
+
+  await page.route('**/api/v1/practice/progress', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        chapters: [
+          {
+            chapterId: STUDENT_CHAPTER_ID,
+            chapterTitleEn: 'Life Processes',
+            chapterTitleHi: 'जैव प्रक्रम',
+            evidence: 'developing',
+            attempts: 3,
+            lastPractisedAt: '2026-08-12T09:00:00.000Z',
+            nextReviewAt: '2026-08-21T09:00:00.000Z',
+          },
+        ],
+        totalXp: 420,
+        xpToday: 30,
+        sessionsCompleted: 7,
+      }),
+    }),
+  );
+
+  await page.route('**/api/v1/me/profile', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        profile: {
+          userId: USER_IDS.student,
+          displayName: 'Meera',
+          grade: '10',
+          board: 'CBSE',
+          preferredLanguage: 'en',
+          createdAt: '2026-08-01T00:00:00.000Z',
+          updatedAt: '2026-08-12T09:00:00.000Z',
+        },
+      }),
+    }),
+  );
+}

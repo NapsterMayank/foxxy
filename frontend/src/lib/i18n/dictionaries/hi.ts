@@ -414,8 +414,7 @@ export const hi: Dictionary = {
     gradeLabel: 'कक्षा',
     gradeOption: 'कक्षा {grade}',
     languageLabel: 'उत्तर की भाषा',
-    languageHint:
-      'Foxy और आपकी रिपोर्ट इसी भाषा में आएँगी। इस स्क्रीन की भाषा बदलने के लिए ऊपर दिए बटन का उपयोग करें।',
+    languageHint: 'सहेजते ही Foxy, आपकी रिपोर्ट और यह ऐप — सब इसी भाषा में हो जाएँगे।',
     boardLabel: 'बोर्ड',
     boardNote: 'बोर्ड खाता बनते समय तय होता है और यहाँ से नहीं बदला जा सकता।',
 

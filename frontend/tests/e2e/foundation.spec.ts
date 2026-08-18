@@ -1,6 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
-import { holdBootstrap, signInAs, signOut } from './support/session';
+import { holdBootstrap, signInAs, signOut, stubStudentData } from './support/session';
 
 test('role selection is responsive and keyboard reachable', async ({ page }) => {
   const response = await page.goto('/');
@@ -101,7 +101,15 @@ test('auth, onboarding and preview dashboards render without overflow or serious
     // Both dashboards are behind `SessionGate` now, so each needs a session in
     // the matching role — an unauthenticated visit is a redirect, which the
     // gate's own tests above assert.
-    { path: '/student', heading: 'Good afternoon, Aarav', role: 'student' },
+    /*
+     * "Hello, Meera" and no longer "Good afternoon, Aarav" — the dashboard
+     * fixtures were deleted when it went live (D-380), so the name is the one
+     * `stubStudentData` supplies and the greeting no longer claims to know the
+     * time of day. Every student route below is stubbed for the same reason:
+     * with no backend here, an unstubbed dashboard renders its error state,
+     * which has no `h1` at all.
+     */
+    { path: '/student', heading: 'Hello, Meera', role: 'student' },
     /*
      * "Your child's learning" and no longer "Welcome back, Ananya" — the parent
      * fixtures were deleted when the dashboard went live (D-363), and the
@@ -115,11 +123,15 @@ test('auth, onboarding and preview dashboards render without overflow or serious
     { path: '/student/foxy', heading: 'Foxy, your textbook tutor', role: 'student' },
     { path: '/student/practice', heading: 'Today’s practice', role: 'student' },
     { path: '/student/progress', heading: 'What your practice shows', role: 'student' },
+    { path: '/student/profile', heading: 'Your profile', role: 'student' },
     { path: '/parent/billing', heading: 'Your plan', role: 'parent' },
   ] as const;
 
   for (const route of routes) {
-    if ('role' in route) await signInAs(page, route.role);
+    if ('role' in route) {
+      await signInAs(page, route.role);
+      if (route.role === 'student') await stubStudentData(page);
+    }
     const response = await page.goto(route.path);
     expect(response?.status(), route.path).toBe(200);
     expect(response?.headers()['x-robots-tag'], route.path).toContain('noindex');

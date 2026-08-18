@@ -13,8 +13,8 @@ import {
   type UpdateProfileRequest,
 } from '@/lib/api/generated/contracts/learner.contract';
 import { fieldIssues, type FieldIssues } from '@/lib/forms/field-issues';
-import { useT } from '@/lib/i18n/i18n-provider';
-import { languages, type Translator } from '@/lib/i18n/translate';
+import { useLanguage, useT } from '@/lib/i18n/i18n-provider';
+import { languages, type LanguageCode, type Translator } from '@/lib/i18n/translate';
 import { useMyProfile, useUpdateProfile } from './hooks/use-profile';
 
 /**
@@ -131,6 +131,7 @@ function ProfileForm({ profile, t }: { readonly profile: StudentProfile; readonl
   const [formMessage, setFormMessage] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const update = useUpdateProfile();
+  const { setLanguage } = useLanguage();
 
   const changes = changesBetween(profile, draft);
   const hasChanges = Object.keys(changes).length > 0;
@@ -158,8 +159,27 @@ function ProfileForm({ profile, t }: { readonly profile: StudentProfile; readonl
 
     setFields({});
     update.mutate(parsed.data, {
-      onSuccess: () => {
+      onSuccess: (response) => {
         setSaved(true);
+        /*
+         * THE INTERFACE FOLLOWS THE SAVED LANGUAGE.
+         *
+         * These were two settings for one word: this field tells the SERVER
+         * which language to answer in, and the header switch tells the CLIENT
+         * which language to render in. Keeping them independent was defensible
+         * and, in front of a student, indefensible — choosing "Hindi" on a
+         * screen called "Your profile" and watching the product stay in
+         * English reads as a save that did not work.
+         *
+         * ONE DIRECTION ONLY. The header switch still does NOT write the
+         * profile: it is a per-device control, reachable on every screen, and
+         * a student switching to English on a borrowed phone must not silently
+         * change the language Foxy answers their homework in.
+         *
+         * From the RESPONSE, not from the draft — the server's copy is what
+         * was stored, and the rest of this screen already re-keys on it.
+         */
+        setLanguage(response.profile.preferredLanguage as LanguageCode);
       },
       /*
        * The draft is NOT cleared. A refused save that also wipes what somebody
@@ -244,11 +264,11 @@ function ProfileForm({ profile, t }: { readonly profile: StudentProfile; readonl
           {t('profileScreen.languageLabel')}
         </legend>
         {/*
-          THE HINT IS NOT DECORATION. This field is the language the SERVER
-          answers in; the switch in the header is the language THIS INTERFACE
-          is written in, kept in a cookie on this device. Two controls, two
-          scopes, and a student who changes one expecting the other has been
-          misled by a screen that did not say which was which.
+          THE HINT IS NOT DECORATION. Saving this field changes what the SERVER
+          answers in AND what this interface is rendered in — see `onSuccess`.
+          The header switch remains a per-device control that does not write
+          the profile, so the two are asymmetric on purpose and the hint says
+          what the button will actually do.
         */}
         <p className="mt-2 max-w-prose text-sm leading-body text-muted">
           {t('profileScreen.languageHint')}

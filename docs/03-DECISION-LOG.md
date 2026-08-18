@@ -7246,3 +7246,38 @@ costs nothing at runtime and the dashboard and the progress screen resolve to on
 
 `student.greeting` lost its time of day: "Good afternoon" was rendered at every hour to
 every user.
+
+### D-381 · Saving a language switches the interface, and only in that direction
+
+D-379 left the profile's `preferredLanguage` and the header's language switch independent, and
+said so in a hint: this field sets what the SERVER answers in, the switch sets what the
+INTERFACE is written in. That was defensible on paper and indefensible in front of a student —
+choosing "हिन्दी" on a screen called "Your profile" and watching the product stay in English
+reads as a save that did not work.
+
+**Decision:** a successful save calls `setLanguage` with the language in the RESPONSE, so the
+interface follows what was actually stored. A refused save changes nothing, which the tests
+pin from both sides.
+
+**One direction only.** The header switch still does not write the profile. It is a per-device
+control on every screen, and a student switching a borrowed phone to English must not silently
+change the language Foxy answers their homework in. The asymmetry is deliberate and the hint
+now describes what the button does rather than what the two settings are.
+
+### D-382 · The browser suite needs fixtures the moment a screen stops having them
+
+Re-recording the twelve stale baselines (item 46) could not start until `/student` rendered at
+all. It reads three endpoints now, no backend runs behind the browser suite, and three failed
+reads are an error state with no `h1` — Playwright's own assertion caught it, and a
+screenshot of "your dashboard could not load" would have been a baseline saying the product
+works.
+
+**Decision:** `support/session.ts` owns `stubStudentData`, beside `signInAs`, and every student
+route in every spec goes through it. **The fixtures are frozen in time.** `lastPractisedAt`
+renders as a day and a month; a relative date would fail a screenshot next month with nothing
+changed in the product, and a gate that cries wolf on a calendar teaches everyone to
+re-record without looking.
+
+`foundation.spec.ts` was asserting the heading "Good afternoon, Aarav" — a fixture name and a
+time of day that no longer exist. That assertion had been stale since the dashboard went live
+and passed anyway, because it was only ever run against the fixture screen.

@@ -1,6 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test } from '@playwright/test';
-import { signInAs, useLanguage } from './support/session';
+import { expect, test, type Page } from '@playwright/test';
+import { signInAs, stubStudentData, useLanguage } from './support/session';
 
 /**
  * ===========================================================================
@@ -45,6 +45,7 @@ import { signInAs, useLanguage } from './support/session';
  */
 const journeys = [
   { name: 'student-dashboard', path: '/student', role: 'student' },
+  { name: 'student-profile', path: '/student/profile', role: 'student' },
   { name: 'parent-dashboard', path: '/parent', role: 'parent' },
   { name: 'auth-login', path: '/login?role=student', role: null },
   { name: 'auth-signup', path: '/signup?role=parent', role: null },
@@ -54,6 +55,21 @@ const journeys = [
 
 const languages = ['en', 'hi'] as const;
 
+/**
+ * Signing in is no longer enough for a student route.
+ *
+ * `/student` and `/student/profile` read their own data now, and with no
+ * backend behind these tests an unstubbed read renders an error state — no
+ * `h1`, and nothing a baseline should be taken of. The parent journeys are
+ * unchanged: their screen already handled its own empty and error states when
+ * it was built.
+ */
+async function enter(page: Page, journey: (typeof journeys)[number]): Promise<void> {
+  if (journey.role === null) return;
+  await signInAs(page, journey.role);
+  if (journey.role === 'student') await stubStudentData(page);
+}
+
 test.describe('visual regression', () => {
   for (const journey of journeys) {
     for (const language of languages) {
@@ -62,7 +78,7 @@ test.describe('visual regression', () => {
         page,
       }) => {
         await useLanguage(context, language);
-        if (journey.role !== null) await signInAs(page, journey.role);
+        await enter(page, journey);
         await page.goto(journey.path);
         await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 
@@ -87,7 +103,7 @@ test.describe('Hindi does not break the layout', () => {
        * symptom at 360px is a page that scrolls sideways.
        */
       await useLanguage(context, 'hi');
-      if (journey.role !== null) await signInAs(page, journey.role);
+      await enter(page, journey);
       await page.goto(journey.path);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 
@@ -104,6 +120,7 @@ test.describe('Hindi does not break the layout', () => {
   }) => {
     await useLanguage(context, 'hi');
     await signInAs(page, 'student');
+    await stubStudentData(page);
     await page.goto('/student');
 
     // `lang` drives screen-reader pronunciation and hyphenation, and it is set
@@ -116,7 +133,7 @@ test.describe('Hindi does not break the layout', () => {
 test.describe('contrast, in both themes', () => {
   for (const journey of journeys) {
     test(`${journey.name} meets WCAG AA`, async ({ page }) => {
-      if (journey.role !== null) await signInAs(page, journey.role);
+      await enter(page, journey);
       await page.goto(journey.path);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 
@@ -136,6 +153,7 @@ test.describe('contrast, in both themes', () => {
     page,
   }) => {
     await signInAs(page, 'student');
+    await stubStudentData(page);
     await page.goto('/student');
     await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
     const studentBrand = await page.evaluate(() =>

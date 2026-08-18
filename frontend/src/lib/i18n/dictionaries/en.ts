@@ -473,13 +473,12 @@ export const en = {
    * for a field nobody can change is a label somebody will later attach an
    * input to.
    *
-   * `languageHint` exists because there are TWO languages on this product and
-   * this screen only sets one of them. The switch in the header changes what
-   * THIS INTERFACE is written in, on this device, and is stored in a cookie.
-   * The field below tells the server which language to answer in — Foxy's
-   * replies, a parent's digest, the sentences the backend composes. Somebody
-   * who changes one and expects the other to follow has been misled by us, so
-   * the screen says which is which.
+   * `languageHint` promises what saving actually does, and the promise is now
+   * bigger than it was: the field sets the language the SERVER answers in, and
+   * saving it also switches the interface. One direction only — the header
+   * switch is a per-device control and does not write the profile, so a
+   * student switching a borrowed phone to English does not quietly change the
+   * language Foxy answers their homework in.
    */
   profileScreen: {
     eyebrow: 'Your account',
@@ -491,7 +490,7 @@ export const en = {
     gradeLabel: 'Grade',
     gradeOption: 'Grade {grade}',
     languageLabel: 'Language we answer in',
-    languageHint: 'Foxy and your reports use this. To change the language of this screen, use the switch at the top.',
+    languageHint: 'Foxy, your reports and this app all switch to it when you save.',
     boardLabel: 'Board',
     boardNote: 'Your board is set when your account is created and cannot be changed here.',
 
