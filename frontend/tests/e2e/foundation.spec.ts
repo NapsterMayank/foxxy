@@ -102,7 +102,20 @@ test('auth, onboarding and preview dashboards render without overflow or serious
     // the matching role — an unauthenticated visit is a redirect, which the
     // gate's own tests above assert.
     { path: '/student', heading: 'Good afternoon, Aarav', role: 'student' },
-    { path: '/parent', heading: 'Welcome back, Ananya', role: 'parent' },
+    /*
+     * "Your child's learning" and no longer "Welcome back, Ananya" — the parent
+     * fixtures were deleted when the dashboard went live (D-363), and the
+     * product stopped inventing a parent's name. This assertion went stale in
+     * the same commit and could not be caught, because the browser suite was
+     * unrunnable until `PLAYWRIGHT_BASE_URL` existed.
+     */
+    { path: '/parent', heading: 'Your child’s learning', role: 'parent' },
+
+    /* THE FOUR SCREENS BUILT WHILE THIS SUITE COULD NOT RUN — steps 9-13. */
+    { path: '/student/foxy', heading: 'Foxy, your textbook tutor', role: 'student' },
+    { path: '/student/practice', heading: 'Today’s practice', role: 'student' },
+    { path: '/student/progress', heading: 'What your practice shows', role: 'student' },
+    { path: '/parent/billing', heading: 'Your plan', role: 'parent' },
   ] as const;
 
   for (const route of routes) {

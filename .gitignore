@@ -53,3 +53,4 @@ docker/data/
 # workspace
 frontend/node_modules/
 frontend/.next/
+demo-shots/

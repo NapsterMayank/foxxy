@@ -64,7 +64,8 @@ export function AuthShell({
       */}
       <header className="flex flex-wrap items-center justify-between gap-3">
         <Link
-          className="rounded-full px-3 py-2 text-lg font-extrabold tracking-tight text-ink focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25"
+          /* 44px — §12. It measured 43 in Hindi and 43 in English. */
+          className="inline-flex min-h-control items-center rounded-full px-3 py-2 text-lg font-extrabold tracking-tight text-ink focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25"
           href="/"
         >
           <span className="text-brand">{t('common.brandPrefix')}</span>
@@ -73,7 +74,7 @@ export function AuthShell({
         <div className="flex items-center gap-2">
           <LanguageSwitch />
           <Link
-            className="rounded-full px-3 py-2 text-sm font-semibold text-muted hover:text-ink focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25"
+            className="inline-flex min-h-control items-center rounded-full px-3 py-2 text-sm font-semibold text-muted hover:text-ink focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/25"
             href="/"
           >
             {t('auth.changeRole')}

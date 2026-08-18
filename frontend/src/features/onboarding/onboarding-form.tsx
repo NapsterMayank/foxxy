@@ -188,7 +188,19 @@ function StudentFields({ error, t }: { error: ErrorLookup; t: Translator }) {
         <legend className="text-sm font-semibold text-ink">{t('onboarding.languageLabel')}</legend>
         <div className="mt-3 flex flex-wrap gap-4">
           {languages.map((code) => (
-            <label className="inline-flex items-center gap-2 text-sm text-muted" key={code}>
+            /*
+              `min-h-control` and real padding — §12's 44px, on the LABEL,
+              because a wrapping label is what a finger actually hits and the
+              radio itself is a 16px user-agent control that CSS does not
+              meaningfully resize.
+              It measured 68x21 and 50x21. The browser suite found it the first
+              time it ever ran against these screens; the subject checkboxes
+              below already had this and these did not.
+            */
+            <label
+              className="inline-flex min-h-control items-center gap-2 rounded-card border border-line px-4 py-3 text-sm text-muted"
+              key={code}
+            >
               <input
                 className="h-4 w-4 accent-brand"
                 defaultChecked={code === 'en'}

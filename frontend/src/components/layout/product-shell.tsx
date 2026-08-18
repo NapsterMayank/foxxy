@@ -51,7 +51,15 @@ function NavigationLink({ href, isCurrent = false, label, marker }: ProductNavig
  */
 function Brand({ t }: { t: Translator }) {
   return (
-    <Link className="inline-flex items-center gap-2 font-extrabold tracking-tight text-ink" href="/">
+    /*
+      `min-h-control` — 44px, §12, and this link had 36. It is a NAVIGATION
+      CONTROL in the product header, not decoration, and the browser suite
+      found it the first time it ever looked at an authenticated screen.
+    */
+    <Link
+      className="inline-flex min-h-control items-center gap-2 font-extrabold tracking-tight text-ink"
+      href="/"
+    >
       <span aria-hidden="true" className="grid size-logo place-items-center rounded-md bg-brand text-brand-fg">
         {t('common.brandPrefix').slice(0, 1)}
       </span>

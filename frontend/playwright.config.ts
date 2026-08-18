@@ -23,6 +23,29 @@ import { defineConfig, devices } from '@playwright/test';
 
 const isCi = process.env.CI === 'true' || process.env.CI === '1';
 
+/**
+ * ===========================================================================
+ * THE TARGET IS OVERRIDABLE, AND THAT IS WHAT UNBLOCKED THIS SUITE.
+ *
+ * `baseURL` was the literal `http://127.0.0.1:3000`, and that single line is
+ * why the browser suite had never seen five of the product's screens: port 3000
+ * on this machine is held by the backend's own `api` container, so the only way
+ * to run Playwright was to stop the backend — which the suite needs, once it
+ * tests anything past a static page.
+ *
+ * `PLAYWRIGHT_BASE_URL` points it at the frontend container on any port. The
+ * default is unchanged, so nothing about CI moves.
+ *
+ * `PLAYWRIGHT_NO_SERVER` is the other half. `webServer` would otherwise start a
+ * dev server AS WELL, and `reuseExistingServer` cannot help — it probes the URL
+ * it was given, which is now somebody else's. When the app under test is
+ * already running (a container, a colleague's tunnel), the runner must not try
+ * to start a second one.
+ * ===========================================================================
+ */
+const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:3000';
+const manageServer = process.env.PLAYWRIGHT_NO_SERVER !== '1';
+
 export default defineConfig({
   testDir: './tests/e2e',
   fullyParallel: true,
@@ -44,7 +67,7 @@ export default defineConfig({
     },
   },
   use: {
-    baseURL: 'http://127.0.0.1:3000',
+    baseURL,
     trace: 'on-first-retry',
   },
   projects: [
@@ -57,10 +80,14 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 900 } },
     },
   ],
-  webServer: {
-    command: isCi ? 'npm run start' : 'npm run dev',
-    url: 'http://127.0.0.1:3000',
-    reuseExistingServer: !isCi,
-    timeout: 120_000,
-  },
+  ...(manageServer
+    ? {
+        webServer: {
+          command: isCi ? 'npm run start' : 'npm run dev',
+          url: baseURL,
+          reuseExistingServer: !isCi,
+          timeout: 120_000,
+        },
+      }
+    : {}),
 });

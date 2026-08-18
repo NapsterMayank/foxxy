@@ -28,6 +28,16 @@ const USER_IDS: Readonly<Record<BrowserRole, string>> = {
 };
 
 /**
+ * Where the app under test is. Mirrors `playwright.config.ts`.
+ *
+ * A COOKIE IS SET FOR A URL, so this cannot be a constant: the cookie was being
+ * planted on `127.0.0.1:3000` while the run targeted a container on another
+ * port, which sets it on an origin the browser never visits. Every Hindi
+ * assertion would then have silently tested English.
+ */
+export const BASE_URL = process.env.PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:3000';
+
+/**
  * Sets the display language for a browser context.
  *
  * The SAME cookie the switch writes and the server reads, so a test in Hindi
@@ -35,9 +45,7 @@ const USER_IDS: Readonly<Record<BrowserRole, string>> = {
  * client-side override the deployed app never uses.
  */
 export async function useLanguage(context: BrowserContext, language: 'en' | 'hi'): Promise<void> {
-  await context.addCookies([
-    { name: 'foxxy_lang', value: language, url: 'http://127.0.0.1:3000' },
-  ]);
+  await context.addCookies([{ name: 'foxxy_lang', value: language, url: BASE_URL }]);
 }
 
 /** Answers the bootstrap with a verified account in the given role. */
