@@ -86,6 +86,16 @@ export interface AuditPort {
 export const AUDIT_ACTIONS = {
   /** §6.7 — a password was reset by token, and every session was revoked. */
   PASSWORD_RESET: 'identity.password_reset',
+  /**
+   * A signed-in user rotated their own password, proving the current one first.
+   *
+   * DISTINCT FROM `PASSWORD_RESET`, which is performed by whoever holds a
+   * mailed token — often somebody who had LOST access. This one is performed by
+   * somebody who demonstrably had it. "Was this account taken over, or did the
+   * owner tidy up" is exactly the question an audit trail is read to answer, and
+   * one shared action would make the two indistinguishable.
+   */
+  PASSWORD_CHANGED: 'identity.password_changed',
   /** §6.6 — "sign out everywhere". */
   LOGOUT_ALL: 'identity.logout_all',
   /** §6.8 step 5 — THE STUDENT approved a parent's access. Consent, recorded. */

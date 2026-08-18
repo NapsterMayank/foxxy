@@ -1,4 +1,8 @@
-import { randomBytes as cryptoRandomBytes, randomInt as cryptoRandomInt } from 'node:crypto';
+import {
+  randomBytes as cryptoRandomBytes,
+  randomInt as cryptoRandomInt,
+  randomUUID as cryptoRandomUUID,
+} from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { AuditPort } from '@/platform/audit/index';
 import type { CachePort } from '@/platform/cache/index';
@@ -207,6 +211,7 @@ export function createIdentityModule(deps: IdentityModuleDeps): IdentityModule {
     logger: deps.logger,
     randomBytes: (size: number): Uint8Array => cryptoRandomBytes(size),
     randomInt: (max: number): number => cryptoRandomInt(max),
+    randomUuid: (): string => cryptoRandomUUID(),
     sessionTtlDays: deps.session.ttlDays,
     ipHashSalt,
     // D-073 — from configuration, never from a request body.

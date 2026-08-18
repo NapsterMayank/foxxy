@@ -12,6 +12,7 @@ import {
   DependencyError,
   ERROR_CODES,
   ForbiddenError,
+  RateLimitError,
   UnauthenticatedError,
   ValidationError,
   type ErrorCode,
@@ -26,22 +27,38 @@ import {
   LOGIN_RATE_LIMIT,
   LOGOUT_RATE_LIMIT,
   SIGNUP_RATE_LIMIT,
+  CHANGE_PASSWORD_RATE_LIMIT,
+  LINK_OTP_RATE_LIMIT,
+  LINK_REDEEM_RATE_LIMIT,
   TOKEN_ENDPOINT_RATE_LIMIT,
 } from '@/shared/constants/rate-limits';
 import type {
+  ChangePasswordRequest,
   ForgotPasswordRequest,
+  LinkOtpRedeem,
+  LinkOtpRequest,
   LoginRequest,
   ResendVerificationRequest,
   ResetPasswordRequest,
   SignupRequest,
 } from '@/shared/contracts/identity.contract';
 import {
-  LINK_CODE_TTL_MS,
   generateLinkCode as buildLinkCode,
   isValidLinkCode,
   normaliseLinkCode,
   type RandomInt,
 } from './domain/link-code';
+import {
+  LINK_OTP_LOCK_MS,
+  LINK_OTP_MAX_ATTEMPTS,
+  LINK_OTP_TTL_MS,
+  generateLinkOtp,
+  hashLinkOtp,
+  isLinkOtpExpired,
+  isLinkOtpLocked,
+  isResendTooSoon,
+  verifyLinkOtp,
+} from './domain/link-otp';
 import { checkPasswordStrength, normaliseEmail } from './domain/password';
 import {
   EMAIL_VERIFICATION_TTL_MS,
@@ -133,6 +150,15 @@ const LOGIN_FAILURE_MESSAGE = 'Invalid email or password.';
  */
 const TOKEN_FAILURE_MESSAGE = 'This link is invalid or has expired.';
 
+/**
+ * ONE MESSAGE FOR "wrong current password" AND FOR "the session's user is gone".
+ *
+ * Both are a failed credential from the caller's point of view and there is
+ * nothing useful to tell them apart with. Naming which one happened would say
+ * whether the account still exists to somebody holding a stale cookie.
+ */
+const CHANGE_PASSWORD_FAILURE_MESSAGE = 'That password is not correct.';
+
 /** The constant signup response body. Identical for new and existing. */
 export const SIGNUP_MESSAGE = 'Check your email to finish setting up your account.';
 
@@ -170,6 +196,14 @@ export interface IdentityServiceDeps {
   readonly logger: Logger;
   readonly randomBytes: RandomBytes;
   readonly randomInt: RandomInt;
+  /**
+   * A v4 UUID, injected like every other source of nondeterminism here.
+   *
+   * The OTP digest is salted with the challenge id, so the id must exist before
+   * the hash — it cannot come from a database default, and a test needs it
+   * predictable.
+   */
+  readonly randomUuid: () => string;
   /**
    * Where the rate-limit fallback metric goes. Optional only because no
    * metrics port exists yet — see `identity.rate-limit.ts` and D-034.
@@ -289,9 +323,25 @@ export interface IdentityService {
    */
   getCurrentUser(actor: SessionActor): Promise<UserRecord>;
   requestPasswordReset(input: ForgotPasswordRequest, context: RequestContext): Promise<void>;
+  /**
+   * A signed-in user rotating their own password.
+   *
+   * Returns nothing and REVOKES EVERY SESSION, the caller's included, so the
+   * route must clear the cookie — see the implementation.
+   */
+  changePassword(actor: SessionActor, input: ChangePasswordRequest): Promise<void>;
   resetPassword(input: ResetPasswordRequest, context: RequestContext): Promise<void>;
-  generateLinkCode(actor: SessionActor): Promise<{ code: string; expiresAt: Date }>;
-  getActiveLinkCode(actor: SessionActor): Promise<{ code: string; expiresAt: Date } | null>;
+  generateLinkCode(actor: SessionActor): Promise<{ code: string; expiresAt: Date | null }>;
+  getActiveLinkCode(actor: SessionActor): Promise<{ code: string; expiresAt: Date | null } | null>;
+  /**
+   * Step 1 of guardian linking — migration 0007. Emails an OTP to the PARENT.
+   *
+   * Returns nothing and reveals nothing: a code that matched no student and a
+   * code that matched one produce identical responses.
+   */
+  requestLinkOtp(actor: SessionActor, input: LinkOtpRequest): Promise<void>;
+  /** Step 2 — the code plus the OTP. Creates the link ALREADY APPROVED. */
+  redeemLinkCode(actor: SessionActor, input: LinkOtpRedeem): Promise<LinkRecord>;
   submitLinkCode(actor: SessionActor, rawCode: string): Promise<LinkRecord>;
   approveLink(actor: SessionActor, linkId: string): Promise<LinkRecord>;
   revokeLink(actor: SessionActor, linkId: string): Promise<LinkRecord>;
@@ -998,6 +1048,106 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
      * triggered by a compromise, leaving the attacker's session alive means
      * the password change achieved nothing.
      */
+    /**
+     * ========================================================================
+     * CHANGE PASSWORD — a signed-in user rotating their own credential.
+     *
+     * THE CURRENT PASSWORD IS VERIFIED EVEN THOUGH THE SESSION IS VALID.
+     *
+     * A cookie proves the browser was signed in; it does not prove the person
+     * at the keyboard is the account holder. Shared family devices are the
+     * normal case here — the entire parent-child link design assumes them — so
+     * changing a password on cookie possession alone would let whoever finds
+     * the laptop open lock the owner out of their own account.
+     *
+     * ------------------------------------------------------------------------
+     * EVERY SESSION IS REVOKED, THE CALLER'S INCLUDED.
+     *
+     * The tempting alternative is to keep the current session so the user is
+     * not signed out of the device they are holding. It was rejected: `Actor`
+     * carries no session identity (userId, role, tenantId and nothing else), so
+     * sparing "this one" would mean threading the raw cookie token down into
+     * the service — putting a live credential into a signature that has never
+     * needed one — and the security argument runs the other way anyway. Somebody
+     * changes their password BECAUSE they think someone else has it; a change
+     * that leaves the other party's session alive does not do the one thing it
+     * was asked to do.
+     *
+     * `resetPassword` already revokes everything for the same reason, so this
+     * is the existing rule rather than a new one. The cost is one re-login.
+     * ========================================================================
+     */
+    async changePassword(actor: SessionActor, input: ChangePasswordRequest): Promise<void> {
+      /*
+       * Keyed by USER, not by IP — this endpoint is an online guessing oracle
+       * against `currentPassword`, and the caller is authenticated so the user
+       * id is the honest identity. An IP counter would also punish everybody
+       * behind a school's single address.
+       */
+      await limiter.consume(
+        rateLimitKeys.changePasswordByUser(actor.userId),
+        CHANGE_PASSWORD_RATE_LIMIT,
+      );
+
+      const user = await repository.findUserById(actor.userId);
+      if (user === null) {
+        // A valid session for a user row that no longer exists. Treated as a
+        // failed credential rather than a 404: there is nothing to disclose.
+        throw new ValidationError(CHANGE_PASSWORD_FAILURE_MESSAGE, {
+          message: 'change-password: session user no longer exists',
+        });
+      }
+
+      const currentOk = await hasher.verify(user.passwordHash, input.currentPassword);
+      if (!currentOk) {
+        throw new ValidationError(CHANGE_PASSWORD_FAILURE_MESSAGE, {
+          message: 'change-password: current password did not verify',
+        });
+      }
+
+      /*
+       * THE SAME PASSWORD IS REFUSED, and the check is a `verify` against the
+       * stored hash rather than a string comparison of the two inputs — Argon2
+       * salts every hash, so the stored value cannot be compared any other way.
+       * Accepting it would report success while changing nothing, which is the
+       * worst possible answer to somebody who believes they have just secured
+       * their account.
+       */
+      const unchanged = await hasher.verify(user.passwordHash, input.newPassword);
+      if (unchanged) {
+        throw new ValidationError('Choose a password you have not used here before.', {
+          message: 'change-password: new password matches the current one',
+        });
+      }
+
+      const strength = checkPasswordStrength(input.newPassword);
+      if (!strength.ok) {
+        throw new ValidationError(strength.message, {
+          message: `change-password rejected: password ${strength.reason}`,
+        });
+      }
+
+      const newPasswordHash = await hasher.hash(input.newPassword);
+      await repository.changePassword({ userId: actor.userId, newPasswordHash });
+
+      logger.info(
+        { event: 'password_change.completed' },
+        'password changed, all sessions revoked',
+      );
+
+      // AFTER the write, and carrying neither the old nor the new password.
+      // `PASSWORD_CHANGED` rather than `PASSWORD_RESET`: this one was performed
+      // by somebody who PROVED they had the credential, and "was this a takeover
+      // or the owner tidying up" is the question the trail is read to answer.
+      await audit.record({
+        actor: { userId: actor.userId, role: actor.role },
+        action: AUDIT_ACTIONS.PASSWORD_CHANGED,
+        resourceType: AUDIT_RESOURCES.USER,
+        resourceId: actor.userId,
+        metadata: { sessionsRevoked: true, via: 'current_password' },
+      });
+    },
+
     async resetPassword(input: ResetPasswordRequest, context: RequestContext): Promise<void> {
       await limiter.consume(
         rateLimitKeys.tokenEndpointByIp(context.ipHash),
@@ -1065,7 +1215,9 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
      * The 15-minute expiry is unchanged and every comparison against it goes
      * through the injected clock.
      */
-    async generateLinkCode(actor: SessionActor): Promise<{ code: string; expiresAt: Date }> {
+    async generateLinkCode(
+      actor: SessionActor,
+    ): Promise<{ code: string; expiresAt: Date | null }> {
       if (actor.role !== 'student') {
         throw new ForbiddenError({ message: 'Only a student may issue a link code' });
       }
@@ -1093,10 +1245,18 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
       await limiter.consume(rateLimitKeys.linkCodeByStudent(actor.userId), LINK_CODE_RATE_LIMIT);
 
       const now = clock.now();
+      /*
+       * NO EXPIRY — migration 0007. A fifteen-minute code required the parent
+       * to be beside the child while it was generated, which is not how a code
+       * reaches a parent: it is read out on a phone call, or sent home on a
+       * slip. The code is still single-use and still one-per-student, and what
+       * bounds an attacker who learns it is the OTP to the parent's own
+       * mailbox, not a countdown.
+       */
       const issued = await repository.issueLinkCode({
         studentUserId: actor.userId,
         code: buildLinkCode(deps.randomInt),
-        expiresAt: expiryFrom(now, LINK_CODE_TTL_MS),
+        expiresAt: null,
         now,
       });
 
@@ -1115,7 +1275,9 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
      * An expired-but-unconsumed row is not an active code, and the comparison
      * is against the injected clock.
      */
-    async getActiveLinkCode(actor: SessionActor): Promise<{ code: string; expiresAt: Date } | null> {
+    async getActiveLinkCode(
+      actor: SessionActor,
+    ): Promise<{ code: string; expiresAt: Date | null } | null> {
       if (actor.role !== 'student') {
         throw new ForbiddenError({ message: 'Only a student has a link code' });
       }
@@ -1135,6 +1297,221 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
      * Rate limited at 5 per hour per parent account before any lookup — a
      * 6-character code is brute-forceable without it.
      */
+    /**
+     * ========================================================================
+     * STEP 1 — THE PARENT SUBMITS THE CODE AND WE EMAIL THEM AN OTP.
+     *
+     * This replaces the consent model `submitLinkCode` below implements. That
+     * one created a `pending` row for the STUDENT to approve, and the approval
+     * step was unreachable: no endpoint exists through which a student can
+     * discover a pending link's id, so every parent stayed pending forever.
+     * The defect only appeared when the flow was walked end to end.
+     *
+     * The consent now lives where it already was in practice — the student
+     * reading their code aloud is a deliberate act — and the second factor
+     * protects the PARENT'S account instead of asking the student twice. A code
+     * overheard in a classroom is not enough; you must also hold the mailbox.
+     *
+     * ------------------------------------------------------------------------
+     * IT RETURNS THE SAME THING WHETHER OR NOT THE CODE EXISTS.
+     *
+     * Every early exit below is a silent success. The endpoint takes a short
+     * code, so a truthful "no such student" would turn a 31^6 search into an
+     * enumeration of children. The cost is a worse experience on a typo, and
+     * that is the right trade on this particular list.
+     * ========================================================================
+     */
+    async requestLinkOtp(actor: SessionActor, input: LinkOtpRequest): Promise<void> {
+      if (actor.role !== 'parent') {
+        throw new ForbiddenError({ message: 'Only a parent may link to a student' });
+      }
+
+      /*
+       * Keyed by the PARENT, and it is the only limit that fires before any
+       * database work. Every accepted request sends an email, so this is the
+       * counter that stops the endpoint being a mail bomb aimed at whichever
+       * address the caller is signed in as.
+       */
+      await limiter.consume(rateLimitKeys.linkOtpByParent(actor.userId), LINK_OTP_RATE_LIMIT);
+
+      const code = normaliseLinkCode(input.code);
+      // A malformed code is indistinguishable from an unknown one, on purpose.
+      if (!isValidLinkCode(code)) return;
+
+      const now = clock.now();
+      // PEEK, not consume. The code must survive to be spent in step 2 — see
+      // the repository note.
+      const found = await repository.peekLinkCode({ code, now });
+      if (found === null) return;
+      if (found.studentUserId === actor.userId) return;
+
+      /*
+       * The cross-tenant refusal from `submitLinkCode`, applied one step
+       * earlier and silently. Telling a parent in tenant A that a code belongs
+       * to a real student in tenant B is the existence disclosure a
+       * white-labelled deployment cannot afford (D-073).
+       */
+      const studentTenantId = await repository.findUserTenant(found.studentUserId);
+      if (studentTenantId === null || studentTenantId !== actor.tenantId) return;
+
+      const existing = await repository.findLinkOtpChallenge(actor.userId, code);
+      /*
+       * A LOCKED CHALLENGE IS NOT RE-SENT. Otherwise the lock protects only the
+       * verify endpoint, and the way around it is to ask for a fresh secret.
+       */
+      if (existing !== null && isLinkOtpLocked(existing.lockedUntil, now)) return;
+      // Resend cooldown, so the button cannot be leaned on.
+      if (existing !== null && isResendTooSoon(existing.lastSentAt, now)) return;
+
+      /*
+       * The address comes from the ACCOUNT, never from the request — there is no
+       * field on this endpoint that could redirect the OTP. It is also only
+       * returned once verified, which is what stops an unverified typo at signup
+       * from receiving somebody else's linking code.
+       */
+      const recipient = await repository.findUserById(actor.userId);
+      if (recipient?.emailVerifiedAt == null) return;
+
+      const student = await repository.findLearnerDisplayName(found.studentUserId);
+
+      const challengeId = deps.randomUuid();
+      const otp = generateLinkOtp(deps.randomInt);
+      await repository.upsertLinkOtpChallenge({
+        id: challengeId,
+        parentUserId: actor.userId,
+        studentUserId: found.studentUserId,
+        code,
+        otpHash: hashLinkOtp(otp, challengeId),
+        expiresAt: new Date(now.getTime() + LINK_OTP_TTL_MS),
+        now,
+      });
+
+      /*
+       * DEFERRED, like every other send in this module. A mail outage must not
+       * fail the request — the parent can press resend, and the challenge row is
+       * already durable. `deferMail` logs the failure under a named event.
+       */
+      deferMail(
+        {
+          to: recipient.email,
+          template: 'guardian-link-otp',
+          data: { otp, studentName: student ?? 'your child' },
+        },
+        'link_otp.mail_failed',
+      );
+
+      logger.info({ event: 'link_otp.requested' }, 'guardian link OTP issued');
+    },
+
+    /**
+     * ========================================================================
+     * STEP 2 — THE CODE AND THE OTP. The link is created ALREADY APPROVED.
+     *
+     * Unlike step 1 this one DOES report failure, and it has to: a parent who
+     * mistypes six digits must be told, or the screen is unusable. What it never
+     * reports is WHICH thing was wrong — no challenge, wrong OTP, expired and
+     * locked are one message, because the alternative tells an attacker whether
+     * a given code has a live challenge against it.
+     *
+     * The exception is the LOCK, which is surfaced as a distinct error. A person
+     * locked out for an hour who is told only "that code is wrong" will keep
+     * trying, and every attempt after the cap is a request that can never
+     * succeed. That is a support ticket, not a security gain.
+     * ========================================================================
+     */
+    async redeemLinkCode(actor: SessionActor, input: LinkOtpRedeem): Promise<LinkRecord> {
+      if (actor.role !== 'parent') {
+        throw new ForbiddenError({ message: 'Only a parent may link to a student' });
+      }
+
+      await limiter.consume(
+        rateLimitKeys.linkRedeemByParent(actor.userId),
+        LINK_REDEEM_RATE_LIMIT,
+      );
+
+      const code = normaliseLinkCode(input.code);
+      const invalid = new ValidationError('That code or verification code is not correct.', {
+        message: 'Link redeem rejected',
+      });
+
+      if (!isValidLinkCode(code)) throw invalid;
+
+      const now = clock.now();
+      const challenge = await repository.findLinkOtpChallenge(actor.userId, code);
+      if (challenge === null) throw invalid;
+
+      /*
+       * THE LOCK IS CHECKED BEFORE THE OTP AND DOES NOT SPEND AN ATTEMPT.
+       * Checking it after would let a locked-out caller keep incrementing the
+       * counter, and a lock that extends itself on every rejected request is a
+       * permanent lock.
+       */
+      if (isLinkOtpLocked(challenge.lockedUntil, now)) {
+        throw new RateLimitError(
+          Math.ceil(((challenge.lockedUntil?.getTime() ?? now.getTime()) - now.getTime()) / 1000),
+          { message: 'Link redeem locked after too many wrong codes' },
+        );
+      }
+
+      if (isLinkOtpExpired(challenge.expiresAt, now)) throw invalid;
+
+      if (!verifyLinkOtp(challenge.otpHash, input.otp, challenge.id)) {
+        const willReachCap = challenge.attempts + 1 >= LINK_OTP_MAX_ATTEMPTS;
+        await repository.recordLinkOtpFailure({
+          id: challenge.id,
+          lockedUntil: willReachCap ? new Date(now.getTime() + LINK_OTP_LOCK_MS) : null,
+        });
+        logger.warn({ event: 'link_otp.wrong_code' }, 'guardian link OTP rejected');
+        throw invalid;
+      }
+
+      /*
+       * SPEND THE CODE ONLY NOW. Both factors have been shown, so this is the
+       * first moment at which burning it is correct: the same locked
+       * read-and-update as before, so two parents racing on one code cannot both
+       * win.
+       */
+      const consumed = await repository.consumeLinkCode({ code, now });
+      if (consumed === null) throw invalid;
+      if (consumed.studentUserId !== challenge.studentUserId) throw invalid;
+
+      // Re-checked after consuming, because a tenant can change between the two
+      // steps and this row spans both parties (D-073).
+      const studentTenantId = await repository.findUserTenant(consumed.studentUserId);
+      if (studentTenantId === null || studentTenantId !== actor.tenantId) throw invalid;
+
+      const link = await repository.createApprovedLink({
+        parentUserId: actor.userId,
+        studentUserId: consumed.studentUserId,
+        linkCode: code,
+        tenantId: actor.tenantId,
+        now,
+      });
+
+      // A SPENT CHALLENGE IS DELETED. A second factor that survives its own use
+      // is replayable, and the row has no further purpose.
+      await repository.deleteLinkOtpChallenge(challenge.id);
+
+      logger.info({ event: 'link.redeemed' }, 'guardian linked');
+
+      /*
+       * The audit row records the STUDENT as having approved, because the act
+       * being recorded is the code hand-off. `LINK_APPROVED` and not a new
+       * action: from a school's or a regulator's point of view this is the same
+       * event the old flow recorded, reached by a different route, and `metadata`
+       * carries which one.
+       */
+      await audit.record({
+        actor: { userId: consumed.studentUserId, role: 'student' },
+        action: AUDIT_ACTIONS.LINK_APPROVED,
+        resourceType: AUDIT_RESOURCES.PARENT_CHILD_LINK,
+        resourceId: link.id,
+        metadata: { via: 'link_code_otp', parentUserId: actor.userId },
+      });
+
+      return link;
+    },
+
     async submitLinkCode(actor: SessionActor, rawCode: string): Promise<LinkRecord> {
       if (actor.role !== 'parent') {
         throw new ForbiddenError({ message: 'Only a parent may submit a link code' });

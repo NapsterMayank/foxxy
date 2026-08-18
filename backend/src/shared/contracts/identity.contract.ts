@@ -186,6 +186,74 @@ export type ForgotPasswordRequest = z.infer<typeof forgotPasswordRequestSchema>;
 export const resendVerificationRequestSchema = z.object({ email: emailSchema });
 export type ResendVerificationRequest = z.infer<typeof resendVerificationRequestSchema>;
 
+/**
+ * `POST /auth/change-password` — a SIGNED-IN user rotating their own password.
+ *
+ * ===========================================================================
+ * THE CURRENT PASSWORD IS REQUIRED, AND A LIVE SESSION IS NOT ENOUGH.
+ *
+ * The session cookie proves the browser was signed in at some point; it does
+ * not prove the person at the keyboard is the account holder. A shared family
+ * device is the normal case in this product — the whole parent-child link
+ * design assumes it — so an endpoint that changed a password on cookie
+ * possession alone lets whoever finds the laptop open lock the real owner out.
+ *
+ * Requiring the current password is what makes the session a channel rather
+ * than the credential.
+ *
+ * `newPassword` reuses `passwordSchema`, so the 10-character floor is the same
+ * rule signup applies. The common-password rejection is a domain rule and lives
+ * in the service, exactly as it does for signup and reset.
+ * ===========================================================================
+ */
+export const changePasswordRequestSchema = z.object({
+  currentPassword: passwordSchema,
+  newPassword: passwordSchema,
+});
+export type ChangePasswordRequest = z.infer<typeof changePasswordRequestSchema>;
+
+/**
+ * `POST /links/request-otp` — step 1 of guardian linking, migration 0007.
+ *
+ * ===========================================================================
+ * THE RESPONSE IS CONSTANT WHETHER OR NOT THE CODE MATCHED A STUDENT.
+ *
+ * Same discipline as the signup response. This endpoint takes a short code and
+ * would otherwise be a free oracle: poll it with guesses and the ones that
+ * return "sent" are real students. 31^6 is large, but an endpoint that confirms
+ * a hit turns a search into an enumeration, and the thing being enumerated is
+ * a list of children.
+ *
+ * The cost is a worse experience on a typo — the parent presses resend before
+ * learning the code was wrong. Worth it.
+ * ===========================================================================
+ */
+export const linkOtpRequestSchema = z.object({ code: linkCodeSchema });
+export type LinkOtpRequest = z.infer<typeof linkOtpRequestSchema>;
+
+/** Deliberately says nothing about whether a student was found. */
+export const linkOtpRequestResponseSchema = z.object({
+  status: z.literal('ok'),
+  otpSent: z.literal(true),
+});
+export type LinkOtpRequestResponse = z.infer<typeof linkOtpRequestResponseSchema>;
+
+/**
+ * `POST /links/redeem` — step 2. The code AND the OTP.
+ *
+ * Six DIGITS, so the whole space is reachable and `000042` is valid. Coerced to
+ * a string on the wire and never a number: a numeric OTP loses its leading
+ * zeros in JSON, which silently shrinks the space by 10%.
+ */
+export const linkOtpRedeemSchema = z.object({
+  code: linkCodeSchema,
+  otp: z
+    .string()
+    .trim()
+    .regex(/^\d{6}$/, 'Enter the 6-digit code from your email.'),
+});
+export type LinkOtpRedeem = z.infer<typeof linkOtpRedeemSchema>;
+
 export const resetPasswordRequestSchema = z.object({
   token: opaqueTokenSchema,
   password: passwordSchema,
@@ -199,7 +267,14 @@ export type ResetPasswordRequest = z.infer<typeof resetPasswordRequestSchema>;
 /** What a student receives after asking for a code. Shared out of band. */
 export const linkCodeResponseSchema = z.object({
   code: z.string(),
-  expiresAt: z.string().datetime(),
+  /**
+   * NULL = the code does not expire — migration 0007.
+   *
+   * A countdown required the parent to be beside the child while the code was
+   * generated. What bounds somebody who merely learns a code is the OTP sent to
+   * the parent's own mailbox, not a timer.
+   */
+  expiresAt: z.string().datetime().nullable(),
 });
 export type LinkCodeResponse = z.infer<typeof linkCodeResponseSchema>;
 

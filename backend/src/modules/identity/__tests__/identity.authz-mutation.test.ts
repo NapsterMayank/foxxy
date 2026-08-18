@@ -1,4 +1,5 @@
-import { randomBytes as cryptoRandomBytes, randomInt as cryptoRandomInt } from 'node:crypto';
+import { randomBytes as cryptoRandomBytes, randomInt as cryptoRandomInt,
+  randomUUID as cryptoRandomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ERROR_CODES } from '@/platform/errors/index';
 import type { LinkStatusValue } from '@/shared/contracts/identity.contract';
@@ -109,6 +110,7 @@ function buildService(mutations: Mutations = {}): IdentityService {
     logger: harness.logger,
     randomBytes: (size: number): Uint8Array => cryptoRandomBytes(size),
     randomInt: (max: number): number => cryptoRandomInt(max),
+    randomUuid: (): string => cryptoRandomUUID(),
     sessionTtlDays: 30,
     ipHashSalt: TEST_IP_HASH_SALT,
     defaultTenantId: TEST_TENANT_ID,

@@ -4,6 +4,7 @@ import type {
   ActiveLinkCodeResponse,
   Link,
   LinkedChildrenResponse,
+  LinkOtpRequestResponse,
   LinkResponse,
   LinkCodeResponse,
   LoginResponse,
@@ -222,6 +223,30 @@ export async function registerIdentityRoutes(
     return reply.status(200).send(OK);
   });
 
+  /**
+   * A signed-in user rotating their own password.
+   *
+   * ======================================================================
+   * `authenticated`, AND THE SERVICE STILL DEMANDS THE CURRENT PASSWORD.
+   *
+   * The pre-handler proves there is a live session; it does not prove who is
+   * holding the device. On the shared family hardware this product is built
+   * for, those are different facts — see the service header.
+   *
+   * THE COOKIE IS CLEARED because every session was revoked in the same
+   * transaction, the caller's included. Exactly the same reason
+   * `reset-password` above clears it: leaving a cookie that names a deleted
+   * session makes the next request a 401 the client reads as "your session
+   * expired", when what actually happened is the thing they just asked for.
+   * ======================================================================
+   */
+  app.post(`${API_PREFIX}/auth/change-password`, authenticated, async (request, reply) => {
+    const input = parseInput(identitySchemas.changePassword, request.body);
+    await deps.service.changePassword(requireActor(request), input);
+    clearSessionCookie(reply, deps.cookie);
+    return reply.status(200).send(OK);
+  });
+
   // ---------------------------------------------------------------------
   // Parent-child linking — §6.8
   // ---------------------------------------------------------------------
@@ -231,7 +256,7 @@ export async function registerIdentityRoutes(
     const issued = await deps.service.generateLinkCode(requireActor(request));
     const body: LinkCodeResponse = {
       code: issued.code,
-      expiresAt: issued.expiresAt.toISOString(),
+      expiresAt: issued.expiresAt === null ? null : issued.expiresAt.toISOString(),
     };
     return reply.status(201).send(body);
   });
@@ -247,26 +272,65 @@ export async function registerIdentityRoutes(
     const active = await deps.service.getActiveLinkCode(requireActor(request));
     const body: ActiveLinkCodeResponse = {
       code: active?.code ?? null,
-      expiresAt: active?.expiresAt.toISOString() ?? null,
+      // Null for both reasons: no active code, or a code that never expires.
+      expiresAt: active?.expiresAt?.toISOString() ?? null,
     };
     return reply.status(200).send(body);
   });
 
-  /** Step 3: the parent submits it. Creates a `pending` link and nothing more. */
-  app.post(`${API_PREFIX}/links/submit`, authenticated, async (request, reply) => {
-    const input = parseInput(identitySchemas.submitLink, request.body);
-    const link = await deps.service.submitLinkCode(requireActor(request), input.code);
+  /**
+   * ======================================================================
+   * GUARDIAN LINKING, STEP 1 — migration 0007. The parent submits the code
+   * and we email them a six-digit OTP.
+   *
+   * ALWAYS 200 WITH THE SAME BODY, whether or not the code matched a student.
+   * The endpoint takes a short code, so a truthful "no such student" would turn
+   * a 31^6 search into an enumeration of children. Every early return in the
+   * service is a silent success for that reason.
+   * ======================================================================
+   */
+  app.post(`${API_PREFIX}/links/request-otp`, authenticated, async (request, reply) => {
+    const input = parseInput(identitySchemas.linkOtpRequest, request.body);
+    await deps.service.requestLinkOtp(requireActor(request), input);
+    const body: LinkOtpRequestResponse = { status: 'ok', otpSent: true };
+    return reply.status(200).send(body);
+  });
+
+  /**
+   * STEP 2 — the code and the OTP. The link is created ALREADY APPROVED.
+   *
+   * This one DOES report failure, because a parent who mistypes six digits must
+   * be told. It never reports WHICH thing was wrong; the one exception is the
+   * lock, which returns 429 with a retry-after, because somebody locked out for
+   * an hour who is told only "wrong code" will keep trying.
+   */
+  app.post(`${API_PREFIX}/links/redeem`, authenticated, async (request, reply) => {
+    const input = parseInput(identitySchemas.linkOtpRedeem, request.body);
+    const link = await deps.service.redeemLinkCode(requireActor(request), input);
     const body: LinkResponse = { link: toLink(link) };
     return reply.status(201).send(body);
   });
 
-  /** Step 5: the STUDENT approves. This is where consent actually happens. */
-  app.post(`${API_PREFIX}/links/:id/approve`, authenticated, async (request, reply) => {
-    const { id } = parseInput(identitySchemas.linkIdParam, request.params);
-    const link = await deps.service.approveLink(requireActor(request), id);
-    const body: LinkResponse = { link: toLink(link) };
-    return reply.status(200).send(body);
-  });
+  /*
+   * ======================================================================
+   * `POST /links/submit` AND `POST /links/:id/approve` ARE GONE — migration
+   * 0007, and their absence is the point rather than a tidy-up.
+   *
+   * They implemented the old consent model: submit created a `pending` link and
+   * THE STUDENT approved it. That model could never complete, because no
+   * endpoint exists through which a student can discover a pending link's id —
+   * so every parent stayed pending forever. It was only visible once the journey
+   * was walked end to end.
+   *
+   * `request-otp` + `redeem` above replace both. Two reachable consent models
+   * would be worse than one broken one: somebody would eventually wire a screen
+   * to the wrong pair.
+   *
+   * `pending` REMAINS A VALID STATUS on the table and every read still denies
+   * on it. Rows written by the old flow exist in live databases, and a guard
+   * that stopped recognising them would silently grant access.
+   * ======================================================================
+   */
 
   /** Step 7: either party revokes, and it takes effect on the next request. */
   app.post(`${API_PREFIX}/links/:id/revoke`, authenticated, async (request, reply) => {

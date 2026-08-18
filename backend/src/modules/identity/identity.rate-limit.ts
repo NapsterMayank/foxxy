@@ -62,6 +62,17 @@ export const rateLimitKeys = {
     `${RATE_LIMIT_KEY_PREFIX}:forgot:email:${emailHash}`,
   tokenEndpointByIp: (ipHash: string): string => `${RATE_LIMIT_KEY_PREFIX}:token:ip:${ipHash}`,
   /**
+   * change-password, keyed by the authenticated USER rather than by IP.
+   *
+   * Every other password counter here is per-IP, and this one must not be: the
+   * caller is authenticated, so the user id is the honest identity, and an IP
+   * counter would let one attacker on a shared network exhaust the budget for
+   * everybody behind it — a school or an internet cafe, which is this product's
+   * normal deployment.
+   */
+  changePasswordByUser: (userId: string): string =>
+    `${RATE_LIMIT_KEY_PREFIX}:change-password:user:${userId}`,
+  /**
    * Resend-verification, keyed by the EMAIL, hashed — D-291.
    *
    * The IP side of this endpoint rides `tokenEndpointByIp` with the other two
@@ -84,6 +95,12 @@ export const rateLimitKeys = {
    */
   linkCodeByStudent: (studentUserId: string): string =>
     `${RATE_LIMIT_KEY_PREFIX}:link-code:${studentUserId}`,
+  /** link OTP request, keyed by the parent — every accepted call sends an email. */
+  linkOtpByParent: (parentUserId: string): string =>
+    `${RATE_LIMIT_KEY_PREFIX}:link-otp:parent:${parentUserId}`,
+  /** link OTP redeem, keyed by the parent. The per-challenge cap does the real work. */
+  linkRedeemByParent: (parentUserId: string): string =>
+    `${RATE_LIMIT_KEY_PREFIX}:link-redeem:parent:${parentUserId}`,
   linkSubmitByParent: (parentUserId: string): string =>
     `${RATE_LIMIT_KEY_PREFIX}:link-submit:${parentUserId}`,
   authenticatedByUser: (userId: string): string => `${RATE_LIMIT_KEY_PREFIX}:auth:${userId}`,

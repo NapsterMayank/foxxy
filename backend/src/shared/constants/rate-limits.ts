@@ -48,6 +48,24 @@ export const FORGOT_PASSWORD_RATE_LIMIT: RateLimitRule = { limit: 3, windowSecon
  */
 export const LOGOUT_RATE_LIMIT: RateLimitRule = { limit: 30, windowSeconds: HOUR_SECONDS };
 
+/**
+ * change-password — 5 / hour, keyed by the USER ID.
+ *
+ * KEYED BY USER AND NOT BY IP, unlike every other password endpoint here. The
+ * caller is already authenticated, so the user id is the honest identity and an
+ * IP counter would let one attacker on a shared network exhaust the budget for
+ * everybody else behind it — a school or an internet cafe, which is this
+ * product's normal deployment.
+ *
+ * The endpoint verifies the CURRENT password, so it is an online guessing
+ * oracle against somebody who has a live session. Five attempts an hour makes
+ * that useless without locking out a person who genuinely mistyped twice.
+ */
+export const CHANGE_PASSWORD_RATE_LIMIT: RateLimitRule = {
+  limit: 5,
+  windowSeconds: HOUR_SECONDS,
+};
+
 /** verify and reset — 10 / hour, keyed by IP. */
 export const TOKEN_ENDPOINT_RATE_LIMIT: RateLimitRule = { limit: 10, windowSeconds: HOUR_SECONDS };
 
@@ -74,6 +92,26 @@ export const LINK_CODE_RATE_LIMIT: RateLimitRule = { limit: 5, windowSeconds: HO
  * and mandatory student approval (§6.10).
  */
 export const LINK_SUBMIT_RATE_LIMIT: RateLimitRule = { limit: 5, windowSeconds: HOUR_SECONDS };
+
+/**
+ * link OTP REQUEST — 5 / hour, keyed by the parent.
+ *
+ * Every accepted request SENDS AN EMAIL to the address the caller is signed in
+ * as, so this is the counter that stops the endpoint being a mail bomb. It is
+ * also the enumeration bound: five guesses an hour against 31^6 is not a search.
+ */
+export const LINK_OTP_RATE_LIMIT: RateLimitRule = { limit: 5, windowSeconds: HOUR_SECONDS };
+
+/**
+ * link OTP REDEEM — 10 / hour, keyed by the parent.
+ *
+ * LOOSER THAN THE REQUEST LIMIT, deliberately: this one sends nothing, and a
+ * parent copying six digits off a phone will mistype. The real bound on guessing
+ * is the PER-CHALLENGE attempt cap in `domain/link-otp.ts`, which locks after
+ * five wrong codes and cannot be reset by asking for a new one. This limit only
+ * stops somebody hammering the endpoint across many challenges.
+ */
+export const LINK_REDEEM_RATE_LIMIT: RateLimitRule = { limit: 10, windowSeconds: HOUR_SECONDS };
 
 /**
  * all other authenticated requests — 100 / min, keyed by user id.
