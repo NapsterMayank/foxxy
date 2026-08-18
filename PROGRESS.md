@@ -4,7 +4,7 @@
 
 **Update rule:** this file is updated at the end of every working session, before stopping. If it disagrees with the code, the code wins and this file was not updated — fix it immediately. A stale progress file is worse than none, because it is trusted.
 
-Last updated: **17 August 2026**
+Last updated: **18 August 2026**
 
 ---
 
@@ -24,9 +24,9 @@ Last updated: **17 August 2026**
 | Backend modules | **11 of 11 built AND WIRED** (identity, learner, content, notify, practice, parent, retrieval, foxy, **billing**, **knowledge**, **signals**). Every one is constructed in `buildModules`, and `src/app/__tests__/routes.test.ts` asserts the list exhaustively and pins each module's pool. **Eight register routes; three deliberately do not** — `retrieval` (D-122), `knowledge` and `signals`, none of which has an HTTP surface, with a comment at the foot of `registerRoutes` saying so because "built but never registered" reads exactly like an oversight (D-175). `billing`'s registration is **AWAITED**, the only one besides identity's: its webhook needs an encapsulated Fastify scope for a raw-body parser, and a dropped `await` 404s every genuine delivery in production only. The `payments` port lives on the container, guarded, with a **production boot refusal** (D-176) |
 | Mail | **SMTP adapter BUILT, 11 August.** There was previously no real adapter at all - production defaulted to a console stub with no environment gate, printing verification and password-reset links to stdout and delivering nothing. `createContainer` now refuses to boot in production without SMTP settings (D-226) |
 | Backend processes | **2** — `api` and `worker`. The worker exists and runs one real job |
-| Frontend | **WIRED AND GATED, 12 August.** It makes real network calls for the first time. All five of step 0's foundation gaps are closed — session strategy, the error-code table, the Foxy streaming client (all 7 cases in plan §7 are tests) and the token scales — plus build-order step 6, the typed client and providers. Backend contracts are GENERATED into `src/lib/api/generated/` with a drift test, because `frontend/Dockerfile` copies `frontend/` alone and a direct cross-package import cannot exist in the image. **Tests 10 → 455 unit and 28 end-to-end.** **Build-order steps 0-13 are closed — every feature step is done**: the auth and onboarding screens are live, the Foxy chat UI shipped 14 August, practice and progress on 15 August, the parent dashboard on 16 August, and **billing on 17 August**. TWELVE CI gates exist and EIGHT have been deliberately broken and observed to fail; the two that cannot be (bundle budgets against a real build, Lighthouse) are blocked on item 33 and on CI ever running |
+| Frontend | **WIRED AND GATED, 12 August.** It makes real network calls for the first time. All five of step 0's foundation gaps are closed — session strategy, the error-code table, the Foxy streaming client (all 7 cases in plan §7 are tests) and the token scales — plus build-order step 6, the typed client and providers. Backend contracts are GENERATED into `src/lib/api/generated/` with a drift test, because `frontend/Dockerfile` copies `frontend/` alone and a direct cross-package import cannot exist in the image. **Tests 10 → 455 unit and 113 end-to-end.** THE BROWSER SUITE FINALLY RUNS — see §5. **Build-order steps 0-13 are closed — every feature step is done**: the auth and onboarding screens are live, the Foxy chat UI shipped 14 August, practice and progress on 15 August, the parent dashboard on 16 August, and **billing on 17 August**. TWELVE CI gates exist and EIGHT have been deliberately broken and observed to fail; the two that cannot be (bundle budgets against a real build, Lighthouse) are blocked on item 33 and on CI ever running |
 | Marketing site | **scaffolded** - 32 files under `website/`, committed. Per `06-FRONTEND-SEPARATION-PLAN.md` |
-| Tests | **3,175 backend passing**, 185 files, plus **455 frontend unit and 28 end-to-end** (was 10 — see §5). Three audit waves have added 656 between them. **Every guard, threshold and validation in the codebase has been broken deliberately and confirmed to turn a named test red** - see D-214 |
+| Tests | **3,211 backend passing**, 186 files, plus **455 frontend unit and 113 end-to-end** (was 10 and 28 — see §5). Three audit waves have added 656 between them. **Every guard, threshold and validation in the codebase has been broken deliberately and confirmed to turn a named test red** - see D-214 |
 | Migrations | `0000_baseline` + `0001_pedagogy` + `0002_practice` + `0003_parent` + **`0004_billing`** + **`0005_foxy`**. Every one has a rollback test, because the round-trip is asserted over the DISCOVERED set rather than per file (D-126) — neither `0004` nor `0005` needed an edit to that test. **Neither has been applied to the development database**, deliberately, for the same reason `0002` has not: see open item 16. ✅ **`0004_billing`'s journal `when` is FIXED** — it was 1786374108357, below `0003_parent`'s 1786700000000, which is the exact D-109 hazard: drizzle selects by `when` and not by `idx`, so on any database already past `0003` it printed "Migrations applied." and applied nothing. **Reproduced on a scratch database before the fix** (`subscriptions` and `payment_events` absent, `0005` applied over the hole, exit code zero), corrected to **1786750000000**, and re-verified both from empty and from a ledger primed to `0003`. The rule is now enforced by `tests/integration/migration-journal-order.test.ts`, which was itself proved to fire by reverting the value. The round-trip test could not have caught this and never could: it applies by `idx` and never reads `when` (D-173, D-174) |
 | Gates | type-check · lint · build · test — all green. `platform/authz` stays **100%**; `billing/domain` 98.5% statements / 96.2% branches / 100% functions, `billing.service` 99.2% / 95.1% / 90%, `platform/payments` 100% statements. `parent/domain` 100%, `parent.service` 94.0%, `retrieval` 99.1%, `practice/domain` 100%. **`modules/foxy` 96.3% statements / 90.4% branches / 94.6% functions**, with `foxy/domain` at 100%/99.0%/100% and `platform/llm` at 98.5% — the real LLM adapter is fully covered and never called |
 | Deployment | **BUILT, 10 August.** `docker/compose.prod.yml` — postgres+pgvector · valkey · api · worker · alert evaluator · frontend · website · Caddy · backup. Three multi-stage non-root Dockerfiles, resource limits on EVERY service, an `internal: true` data network with no published ports, and volume names (`foxxy_prod_*`) that cannot collide with the development ones holding the corpus (D-140). Validated with `docker compose config` |
@@ -106,6 +106,86 @@ npx lhci autorun --collect.startServerCommand=""
 seconds with no jobs created, and an eight-line workflow with a single `echo`
 does the same — account-level, not a workflow defect. Check
 https://github.com/settings/billing.
+
+### Guardian linking rebuilt, and a status report that tells the truth — 18 August 2026
+
+**The parent flow could never complete, and unit tests could not have caught
+it.** The old model was: student issues a code, parent submits it, link sits
+`pending`, THE STUDENT APPROVES. No endpoint exists through which a student can
+discover a pending link's id, so the approval step was unreachable. Each half
+worked in isolation; the journey did not. Found by walking it end to end.
+
+**Rebuilt on the shape the already-working product uses** (D-373): the code
+hand-off is the consent, and the second factor protects the PARENT'S account —
+an OTP to their own verified address. `POST /links/request-otp` and
+`POST /links/redeem` replace `submit` + `approve`, which are deleted. Verified
+live with a real OTP delivered to a real inbox.
+
+| Control | Where |
+|---|---|
+| OTP is `sha256(otp‖challengeId)`, never stored in the clear, constant-time compare | `domain/link-otp.ts` |
+| 10-minute life · 5 attempts · 1-hour lock · 60-second resend cooldown | same |
+| **A resend replaces the secret but never resets the attempt counter** — the obvious way around any cap | `upsertLinkOtpChallenge`, `attempts` absent from the SET clause |
+| Identical response and no email for a code that matched nothing | `requestLinkOtp` — otherwise the endpoint enumerates children |
+| Address comes from the ACCOUNT, never the request | same |
+
+**Link codes no longer expire** (D-374) — a countdown required the parent to be
+beside the child. That change broke `findActiveLinkCodeForStudent`
+(`expires_at > now` is NULL for a persistent code) and **an existing test caught
+it**: the student's own screen could not see their own code.
+
+**`POST /auth/change-password`** (D-372) — requires the current password even
+with a live session, revokes every session, clears the cookie.
+
+**`npm run ops:status`** (D-375) — drives the API as a real student and parent,
+then reports content coverage. It separates WIRED from POPULATED from REAL,
+which is the distinction a health check cannot make. **Its first run corrected
+two entries in this file:**
+
+| Reported here as | Actually |
+|---|---|
+| hint ladder "NULL on all questions" | **NO `hint_level_*` COLUMNS EXIST.** The contract sends `hintLevelsAvailable` on every question — an array that can only ever be empty |
+| Hindi questions "NULL on 3,581" | **NO `question_hi` COLUMN.** Practice cannot be taken in Hindi at all |
+
+It also found 20 of 4,686 chunks still unembedded, 0 of 2,741 questions tagging a
+misconception, and — the actionable one — **639 chapter concepts with full
+explanations across 129 chapters that no API serves.**
+
+### Step 14 — the responsive pass, and the browser suite's first real run — 18 August 2026
+
+**One line had been blocking the browser suite for six days.**
+`playwright.config.ts` hardcoded `baseURL` to port 3000, which the backend's own
+`api` container holds — so running Playwright meant stopping the backend. That
+is why Foxy, practice, progress, the rebuilt parent dashboard and billing had
+never been opened in a browser. `PLAYWRIGHT_BASE_URL` and `PLAYWRIGHT_NO_SERVER`
+fix it; defaults are unchanged, so CI does not move (D-369).
+
+**The suite now runs, and it is 113 checks: 100 pass and 13 are stale visual
+baselines** that need a human (open item 46). Nothing else fails.
+
+**What the first run found — all of it invisible from the code:**
+
+| Defect | Where |
+|---|---|
+| A stale heading assertion, broken in the step-12 commit and uncatchable until now | `foundation.spec.ts` still expected "Welcome back, Ananya" after the parent fixtures were deleted (D-363) |
+| The product-shell wordmark link at **129×36**, on EVERY authenticated screen | `components/layout/product-shell.tsx` |
+| The auth-shell wordmark and "change role" links at **43** and **37** tall | `features/auth/auth-shell.tsx` |
+| The onboarding LANGUAGE radios, hit area **68×21** and **50×21** — the subject checkboxes beside them already had `min-h-control` | `features/onboarding/onboarding-form.tsx` |
+
+**No horizontal overflow anywhere.** Ten routes, two viewports, two languages —
+the check §12 asks for outright, and the Hindi axis is the one that would have
+broken it, since Devanagari runs longer for the same sentence.
+
+**The 44px rule is measured on the ACTIVATION AREA.** A checkbox wrapped in a
+label is measured by the label, because that is what a finger hits; an unwrapped
+16×16 control still fails, and every button and link is measured directly.
+Measuring the input alone would have demanded enormous checkboxes, which is not
+what the rule protects (D-370).
+
+**One fragility surfaced and was NOT fixed:** the image build downloads Google
+Fonts at build time, and two builds in this session failed on a network blip and
+succeeded unchanged on retry. Fixing it means self-hosting the fonts — a
+decision, not a patch. Open item 48, D-371.
 
 ### Step 13 — billing, closed 17 August 2026
 
@@ -254,7 +334,7 @@ because the CSRF verdict must not depend on who the caller claims to be.
 |---|---|
 | **A socket-level smoke test** - the only untested boundary in the backend. **Now the most valuable single day in the repository**: the Foxy chat UI ships against a harness that cannot tell incremental from buffered | 1 |
 | A Postman collection generated from the route definitions | 0.5 |
-| Frontend steps 14-15 — responsive pass on a real device · accessibility · 2 E2E specs | 7 |
+| Frontend step 15 — accessibility pass · the two end-to-end specs | 4 |
 | Remaining open items in section 7 | 3 |
 
 ### The wire boundary is the one thing three audits could not reach
@@ -664,7 +744,8 @@ Build order from `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` section 11. **Steps 0
 | ✅ 11 | **`progress` — 15 August 2026.** XP tiles, chapter-by-chapter evidence with a rank bar, recent sessions. Emptiness is NO SESSIONS rather than no chapters. History is a separate query that cannot take the XP figures down with it. **`EvidenceLabel` now takes the wire code and is TRANSLATED — D-354**, closing a hand-written English union that had been rendering English to Hindi readers on both dashboards | — |
 | ✅ 12 | **`parent-dashboard` — 16 August 2026.** Snapshot, digest, transcript and consent, as four independent queries. **The child-visibility notice renders before every branch** — §10.4's only bold requirement, and the two paths that show no conversation are tested specifically for it (D-359). A 403 reads as a state the child chose, not a fault (D-361). **The parent fixtures are deleted** rather than left beside the real screen (D-363) | — |
 | ✅ 13 | **`billing` — 17 August 2026.** Catalogue, current plan, checkout and cancel. **A new backend route was needed first**: `GET /billing/plans`, because `PLANS` lives in the module and a frontend holding its own copy of a PRICE advertises one figure and charges another (D-364). A school-paid seat is shown no price and no cancel button (D-368); a 409 says "you already have it" and never "try again" (D-367) | — |
-| ⬜ 14-15 | Responsive pass on a real device · accessibility · 2 E2E specs | 7 |
+| ✅ 14 | **Responsive pass — 18 August 2026.** A new `responsive.spec.ts`: ten routes × two viewports × two languages, asserting no horizontal overflow, plus the 44px rule on every control at 360px. **47 checks, and the first run found three real touch-target defects** (D-370). NO HORIZONTAL OVERFLOW ANYWHERE, in either language, at either width — the one thing §12 asks for outright | — |
+| ⬜ 15 | Accessibility pass · the two end-to-end specs | 4 |
 | | **Subtotal** | **~35** |
 
 **Steps 1-5 looked slow and were not.** They took one session and every screen after this one inherits: three states that already announce themselves correctly, a form field whose label and error are wired by construction, a dialog with a real focus trap, and a confirm flow that cannot be double-pressed.
@@ -881,8 +962,11 @@ Each was reported by the agent that found it and left deliberately, because it s
 | 34 | ✅ **CLOSED — 12 August.** Onboarding submitted `english`/`hindi` where the contract accepts `en`/`hi`, and offered grades 6-10 where the syllabus and the database CHECK run to 12. Both now come from the GENERATED constants, so the form cannot offer a value the profile refuses. The test that pinned the 6-10 list — asserting Grade 11 was absent — was protecting the defect, and now asserts Grade 12 is present | frontend | — |
 | 35 | **`UserProfile.role` widened to ten values** (D-293). No byte changes today, but a frontend `switch` on `user.role` that was exhaustive over two cases now needs a default | frontend | — |
 | ~~36~~ | ~~**The resend-verification endpoint has no client.**~~ **CLOSED 12 August 2026.** `VerifyPanel` offers it, with constant copy either way so the screen cannot become an enumeration oracle | frontend | done |
+| 49 | **`questions` has NO `hint_level_*` columns and NO `question_hi` column** — item 13 above recorded both as "NULL on every row", which was wrong: they are ABSENT from this schema. The contract sends `hintLevelsAvailable` on every question, so it is an array that can only ever be empty, and practice cannot be taken in Hindi at all despite the whole interface being bilingual. Needs a MIGRATION before any generation work has anywhere to land. Found by `npm run ops:status` (D-375) | backend | 0.5 d, before section 6 |
+| 50 | **639 chapter concepts, fully written, that no API serves.** `chapter_concepts` holds title, learning objective and explanation in English for all 639 rows across 129 chapters, and Hindi for 629 — the exact content a study walkthrough renders. There is no endpoint. This is the cheapest unshipped value in the product | backend + frontend | 2 h for the endpoint |
+| 48 | **The production image build downloads Google Fonts, so it needs the network and can fail for a reason nothing in the diff explains.** `next/font/google` fetches at BUILD time; two builds this session died with twelve `Can't resolve '@vercel/turbopack-next/internal/font/google/font'` errors and succeeded unchanged on retry. The fix is a DECISION rather than a patch: `next/font/local` with the two families' woff2 committed makes the build hermetic and offline-capable, at the cost of carrying font binaries and updating them by hand. CI has never run and will meet this eventually | frontend + ops | 0.5 d, with the decision |
 | 47 | **A student on a school-paid seat has nowhere to see that fact.** The billing screen ships under `(parent)`, because the contract is explicit that "nothing in this file says a parent pays" and the B2C-versus-school-pilot question is unresolved. Every billing endpoint resolves the subject from the SESSION, so a student route would work — it was not added rather than putting a fifth item in a mobile bottom navigation on a guess about who pays. Decide the model, then add the route | frontend + product | 0.5 d, with the answer |
-| 46 | **The parent visual baselines are stale by construction.** They were recorded against a fixture screen that no longer exists (D-363), and the four dashboard baselines from item 43 also moved when `EvidenceLabel` changed (D-354). None can be re-recorded without a human deciding what the approved look now is — and none of the four new routes (`/student/foxy`, `/student/practice`, `/student/progress`, and the rebuilt `/parent`) has a baseline at all | frontend | 0.5 d, with a human |
+| 46 | **TWELVE visual baselines are stale, now MEASURED rather than predicted — the suite ran on 18 August and 13 checks failed on screenshots alone.** `auth-login`, `auth-signup`, `onboarding-student`, `onboarding-parent`, `student-dashboard` and `parent-dashboard`, each in both languages. Three causes, all deliberate: the parent fixture screen no longer exists (D-363), `EvidenceLabel` changed (D-354), and the 44px fixes moved padding on the shells and the onboarding form (D-370). **None of the five NEW routes has a baseline at all.** Re-recording overwrites what somebody approved, so it needs a human They were recorded against a fixture screen that no longer exists (D-363), and the four dashboard baselines from item 43 also moved when `EvidenceLabel` changed (D-354). None can be re-recorded without a human deciding what the approved look now is — and none of the four new routes (`/student/foxy`, `/student/practice`, `/student/progress`, and the rebuilt `/parent`) has a baseline at all | frontend | 0.5 d, with a human |
 | 44 | **The hint ladder is contracted, unrouted and unpopulated.** `practice.contract.ts` defines `hintQuerySchema` and `hintResponseSchema`; `practice.routes.ts` registers nothing that serves them, and `hint_level_1..3` are NULL on all 3,791 source questions (item 13). The practice screen therefore offers no hint affordance — a button today would 404 to fetch content that does not exist. Needs the route AND the generation, in that order | backend + section 6 | with item 13 |
 | 45 | **The student dashboard is still fixtures, and now points at real screens.** `/student` renders `sampleProgress` and a hard-coded learner name beside navigation that leads to live practice and progress. The mission and the XP figures it should show are both already on the wire (`GET /practice/mission`, `GET /practice/progress`), so this is wiring rather than design | frontend | 0.5 d |
 | 41 | **The bundle-budget gate measures a file Next 16.3 does not emit.** `check-bundle-budget.mjs` reads `.next/app-build-manifest.json`; it is absent from a real build and `APP_BUILD_MANIFEST` is gone from Next's constants — only `client-reference-manifest` remains. Its ten unit tests pass against a SYNTHETIC `.next` the script's own author defined, so the shape was never checked against a build. Rebuilding it means reconstructing the App Router chunk graph from each route's `page_client-reference-manifest.js` | frontend | 0.5 d |

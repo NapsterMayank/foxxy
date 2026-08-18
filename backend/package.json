@@ -34,7 +34,8 @@
     "ops:env-contract": "tsx scripts/ops/env-contract-check.ts",
     "eval:retrieval:calibrate": "tsx --env-file-if-exists=.env eval/retrieval/calibrate.ts",
     "eval:retrieval:sparse": "tsx --env-file-if-exists=.env eval/retrieval/sparse-probe.ts",
-    "eval:retrieval:recall": "tsx --env-file-if-exists=.env eval/retrieval/sparse-recall.ts"
+    "eval:retrieval:recall": "tsx --env-file-if-exists=.env eval/retrieval/sparse-recall.ts",
+    "ops:status": "tsx --env-file-if-exists=.env scripts/ops/status-report.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

@@ -6940,3 +6940,162 @@ The screen ships under `(parent)` for the same unresolved question: the contract
 "nothing in this file says a parent pays". A student on a school-paid seat therefore has
 nowhere to see that fact yet, recorded as an open item rather than answered by adding a
 fifth item to a mobile bottom navigation on a guess about who pays.
+
+### D-369 · The browser suite's target is an environment variable, and that one line unblocked it
+
+`playwright.config.ts` had `baseURL: 'http://127.0.0.1:3000'` as a literal, and port 3000 on
+this machine is held by the backend's own `api` container. So the only way to run Playwright
+was to stop the backend — which the suite needs the moment it tests anything past a static
+page. That is why five screens (Foxy, practice, progress, the rebuilt parent dashboard,
+billing) had never once been opened in a browser.
+
+**Decision:** `PLAYWRIGHT_BASE_URL` overrides the target and `PLAYWRIGHT_NO_SERVER=1`
+suppresses the managed `webServer`, which would otherwise start a dev server alongside the
+container under test — `reuseExistingServer` cannot help, because it probes the URL it was
+given and that URL is now somebody else's. Defaults unchanged, so CI does not move.
+
+`tests/e2e/support/session.ts` carried the same literal for the language COOKIE, and a
+cookie is set FOR A URL: it was being planted on an origin the browser never visits, so every
+Hindi assertion in a redirected run would have silently tested English.
+
+**What the first run found**, immediately: a stale heading assertion (the parent fixtures were
+deleted in D-363 and this spec still expected "Welcome back, Ananya" — broken in that commit,
+uncatchable until now), and the touch-target defects in D-370.
+
+### D-370 · The 44px rule is measured on the activation area, and it found three real defects
+
+§12: "every interactive element is at least 44 by 44 pixels". The new responsive spec asserts
+it against what the browser laid out, not against the presence of a `min-h-control` class — an
+off-scale utility emits nothing and the element renders at its user-agent size, which is how
+the closed token scale produced eleven silent breakages when the spacing rule was switched on.
+
+**Decision on what to measure:** a control wrapped in a `<label>` is measured by the LABEL.
+A checkbox is 16×16 and always will be — that is the user-agent control — and what a finger
+hits is the label, because clicking it activates the control. Measuring the input alone
+reported six failures on the onboarding form and would have demanded enormous checkboxes,
+which is neither the standard nor what the rule protects. An UNWRAPPED 16×16 control still
+fails, and every button and link is still measured directly.
+
+**Three genuine violations, all found on the first run:**
+
+- the product-shell wordmark link, 129×36, on every authenticated screen
+- the auth-shell wordmark and "change role" links, 43 and 37 tall
+- the onboarding LANGUAGE radios, whose labels were 68×21 and 50×21 — the subject checkboxes
+  beside them already carried `min-h-control` and these did not
+
+All three are navigation or form controls on a phone, and none was visible to anybody
+reading the code.
+
+### D-371 · The production image build depends on reaching Google Fonts
+
+`next/font/google` downloads at BUILD time, so `docker build` fetches from Google inside the
+container. Two builds in this session failed with twelve `Can't resolve
+'@vercel/turbopack-next/internal/font/google/font'` errors and succeeded unchanged on retry —
+a network blip, not a code defect.
+
+Recorded rather than fixed, because the fix is a decision: self-host the two families
+(`next/font/local` plus the woff2 files committed) and the build becomes hermetic and
+offline-capable, at the cost of carrying font binaries in the repository and updating them by
+hand. Until then a deploy can fail for a reason nothing in the diff explains, and CI — which
+has never run — will meet it eventually.
+
+### D-372 · Changing a password requires the current one, even with a live session
+
+`POST /auth/change-password` did not exist: a signed-in user who wanted to rotate their
+password had to go through forgot-password and wait for an email.
+
+**Decision:** the endpoint requires `currentPassword` and verifies it against the stored
+hash. A cookie proves the browser signed in at some point; it does not prove the person at
+the keyboard is the account holder, and shared family devices are the normal case here —
+the entire parent-child link design assumes them. Without the check, whoever finds the
+laptop open locks the owner out.
+
+EVERY session is revoked, the caller's included, and the route clears the cookie. Sparing
+the current one would need the raw session token threaded into the service — putting a live
+credential into a signature that never needed one — and the security argument runs the other
+way anyway: people change passwords BECAUSE they believe someone else has one, and a change
+that leaves the other party signed in has not done the thing it was asked to do.
+
+Rejecting a new password equal to the current one uses `hasher.verify` against the stored
+hash rather than comparing the two inputs, because Argon2 salts every hash. Reporting
+success while changing nothing is the worst possible answer to somebody who believes they
+have just secured their account. Rate limit is 5/hour keyed by USER, not IP — the endpoint
+is an online guessing oracle, and an IP counter would punish everyone behind a school's
+single address.
+
+### D-373 · Guardian linking is code + OTP, and the student-approval model is removed
+
+The old flow was: student issues a code, parent submits it, the link sits `pending`, THE
+STUDENT APPROVES. It could never complete. **No endpoint exists through which a student can
+discover a pending link's id**, so `POST /links/:id/approve` was unreachable and every
+parent stayed pending forever. It surfaced only when the journey was walked end to end — the
+unit tests passed throughout, because each half worked in isolation.
+
+The already-working product solves it differently, and better. Its shape was adopted:
+
+- the code hand-off IS the consent — a student reading their code aloud is a deliberate act
+- the second factor protects the PARENT'S account: an OTP to their own verified address, so
+  a code overheard in a classroom is not enough
+- the link is created `approved`; there is no pending state on this path
+
+**Decision:** `POST /links/request-otp` and `POST /links/redeem` replace `POST /links/submit`
+and `POST /links/:id/approve`, which are deleted. Two reachable consent models would be
+worse than one broken one — somebody would eventually wire a screen to the wrong pair.
+`pending` REMAINS a valid status and every read still denies on it, because rows written by
+the old flow exist in live databases and a guard that stopped recognising them would
+silently grant access.
+
+Controls, matching the proven implementation: OTP stored as `sha256(otp‖challengeId)` and
+never in the clear; constant-time compare; ten-minute life; five wrong attempts then an hour's
+lock; **a resend replaces the secret but never resets the attempt counter**, which is the
+obvious way around any attempt cap; sixty-second resend cooldown; the address comes from the
+account and never from the request.
+
+`POST /links/request-otp` RETURNS AN IDENTICAL RESPONSE whether or not the code matched a
+student, and sends no email when it did not. The endpoint takes a six-character code, so a
+truthful "no such student" turns a 31^6 search into an enumeration of children.
+
+### D-374 · Link codes no longer expire
+
+A fifteen-minute TTL required the parent to be standing beside the child while the code was
+generated. That is not how a code reaches a parent: it is read out on a phone call, or sent
+home on a slip.
+
+**Decision:** `link_codes.expires_at` becomes nullable, NULL meaning "does not expire". The
+code stays single-use and one-per-student; what bounds somebody who merely LEARNS a code is
+now the OTP to the parent's mailbox rather than a countdown. A non-null value still expires,
+so every existing row keeps its meaning and the repository's expiry test still passes.
+
+**This broke `findActiveLinkCodeForStudent` and an existing test caught it.** The predicate
+was `expires_at > now`, which is NULL for a persistent code — not true — so the student's own
+screen could not see their own code and would have minted a replacement on every render. The
+fix is an explicit null branch, written out rather than optional-chained, because
+`row.expiresAt?.getTime() <= now` is `undefined <= number`, which is `false`, which would
+also accept the row — by accident, for the opposite reason.
+
+### D-375 · A status report that distinguishes wired, populated and real
+
+`npm run ops:status` drives the API as a signed-in student and parent, then reports content
+coverage from the database.
+
+**Why it exists:** "is it working?" has three answers that get confused. WIRED — the route
+answers. POPULATED — it returns rows rather than an empty list. REAL — the thing behind it is
+not a deterministic fake. A green health check answers only the first, which is exactly how
+D-226's mail outage stayed invisible: `mail.send` resolved, every probe was green, the
+breaker never opened, and nothing was ever delivered.
+
+**What its first run found**, none of which any existing check reported:
+
+- `questions` has NO `hint_level_*` columns and NO `question_hi` column. Not NULL — ABSENT.
+  The contract sends `hintLevelsAvailable` on every question, so it is an array that can only
+  ever be empty, and practice cannot be taken in Hindi at all. `PROGRESS.md` recorded both as
+  "NULL, needs generation"; they are a missing migration.
+- 639 chapter concepts with full explanations across 129 chapters, and NO API SERVES THEM.
+- 20 of 4,686 corpus chunks still have no embedding and are invisible to Foxy's search.
+- 0 of 2,741 questions tag a misconception, so `signals` and the parent digest have nothing
+  to name.
+
+It also found two things about itself worth keeping: a POST carrying `content-type:
+application/json` with no body is answered **500 rather than 400**, and signup's 3/hour
+per-IP limit is spent two at a time by the probe — reported as DENIED rather than crashed,
+because a working rate limiter must not read as a broken API.
