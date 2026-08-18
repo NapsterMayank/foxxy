@@ -4,7 +4,7 @@
 
 **Update rule:** this file is updated at the end of every working session, before stopping. If it disagrees with the code, the code wins and this file was not updated — fix it immediately. A stale progress file is worse than none, because it is trusted.
 
-Last updated: **18 August 2026**
+Last updated: **19 August 2026**
 
 ---
 
@@ -33,59 +33,79 @@ Last updated: **18 August 2026**
 | CI/CD | **BUILT, 10 August.** `.github/workflows/` — `ci.yml` (change detection · secret scan · infrastructure checks · `ci-gate` fan-in) calling per-app `backend-ci.yml` / `frontend-ci.yml` / `website-ci.yml`. A documentation-only change runs the secret scan and nothing else. Migrations are an EXPLICIT step, never on boot (D-145). **Eight gates, each proven to FAIL on a deliberate violation** — see §3 |
 | Backups | **BUILT AND DRILLED, 10 August.** Continuous WAL archiving plus a nightly base backup to a SECOND volume; `restore.sh`, `restore-drill.sh` and `drill-selftest.sh`. The drill was EXECUTED against a scratch database: PASS on a good backup, FAIL on a tampered one. Two real defects were found by running it (D-149) |
 | Alerting | **BUILT, 10 August.** `backend/scripts/ops/` — 11 rules over 9 signals read from `metrics_events`, split explicitly into what PAGES a human and what files a TICKET, delivered through the existing `notify-channel` port rather than a second notification path (D-147) |
-| Estimated remaining | **~80 days ≈ 16 weeks solo.** Backend is feature-complete and audited three times |
+| Estimated remaining | **~55 days ≈ 11 weeks solo.** Every build-order step 0-14 is closed on both sides; what remains is step 15, the pedagogy subset, and the open items in §7 |
 | Git | **9 commits**, latest `b6225f2`. Working tree clean. No remote configured - **CI has never executed a single job** across 184 test files |
 
 ---
 
 ## 2. THE NEXT ACTION
 
-> **Three things only the owner can supply. Everything else is unblocked, and the database hazard is now cleared.**
+> **Read this first: the three blockers this section listed for six days are
+> CLEARED. Foxy runs on a real model, mail is delivered through Google
+> Workspace, and the whole student journey has been driven through a browser.**
 
-1. **`LLM_API_KEY` in `backend/.env`.** Foxy runs on a scripted fake that does not read the prompt, so **answer quality is entirely unmeasured**. This also gates all content generation - hint ladders, misconception tags and Hindi questions are still at zero.
-2. **A git remote.** Four workflows exist and every gate was proven to fail locally, but **GitHub Actions has never executed a single job** across 184 test files.
-3. **Confirm the Foxy caps.** Set to `free: 20 / plus: 200` by default and now pinned to literals. They had drifted to 5000/9000, which is a 1.8x differentiator on a cap no student reaches - structurally a paid tier, commercially nothing.
+### What is verified working, end to end, in a browser — 19 August 2026
 
-### How to clear the three — exact commands
+Driven through the real UI against the real API, with every response recorded
+and the database checked before and after:
 
-Run from `D:/personal/foxxy`. Nothing here touches the database.
+| Journey | Evidence |
+|---|---|
+| Signup → **real verification email** → login | Delivered through Workspace SMTP to a real inbox |
+| Onboarding → grade, language, subjects | Persisted; the grade drives every later read |
+| **Study**: subject → chapter → concept walkthrough | 16 science chapters, "Chemical Reactions" read 1→5 |
+| Practice: mission → 6 answers → submit → result | `practice_responses` +12, `xp_ledger` +2, `chapter_mastery` +2 |
+| Progress | Reflects the session that was just finished |
+| **Foxy on a real model, with citations** | Two different questions, two different answers, `event: citation` → *Life Processes, ch. 5* |
+| **Foxy ABSTAINING rather than inventing** | `abstained=t, chunks=0, abstain_reason=below_threshold` |
+| Parent: code → OTP → linked | Real OTP to a real inbox; replay refused; challenge deleted |
+| Billing: plans, status | ₹299 / ₹2,990 served from the same table checkout reads |
+| English ⇄ Hindi | Every screen, including dates |
 
-**1. LLM key.** `backend/.env` is git-ignored; `backend/.env.example` is tracked, so never put the real value there (that mistake is D-096).
+`npm run ops:status` re-runs the machine-checkable half of that table any time.
 
-```bash
-# append to backend/.env  - do NOT edit .env.example
-echo 'LLM_API_KEY=sk-ant-...' >> backend/.env
+### The three things only the owner can still supply
 
-# prove the fake is gone: a real key makes this answer from the corpus
-cd backend && npm run dev
-# then, in a second shell:
-curl -s -X POST localhost:3000/foxy/ask   -H 'content-type: application/json' -H 'cookie: sid=<a real session>'   -d '{"question":"What is photosynthesis?","subject":"science","grade":"8"}' | head -40
-```
-The scripted fake ignores the prompt and returns a fixed string; a real key returns corpus citations. If the reply is identical for two different questions, the key did not load.
+1. **GitHub Actions billing.** Every run ends `startup_failure` in under two
+   seconds with no jobs created, and an eight-line workflow with a single `echo`
+   does the same — account-level, not a workflow defect. **CI has never executed
+   a single job across 187 test files.** https://github.com/settings/billing
+2. **A Razorpay account.** The adapter is written and unit-tested against a
+   recording fake; no real checkout has ever completed, so the HTTP half is
+   unproven — see open item 19.
+3. **Confirm the Foxy caps** (`free: 20 / plus: 200`). A commercial decision, and
+   a test pins the literals so changing them turns it red by design.
 
-**2. Git remote.** 184 test files, four workflows, zero CI runs ever.
+### The three worth doing first
 
-```bash
-gh repo create foxxy --private --source=. --remote=origin   # or: git remote add origin <url>
-git push -u origin main
-gh run list --limit 5     # first evidence CI can execute at all
-```
-Expect the first run to fail on something environmental (secrets, Node version, service containers). That failure is the point — it is unknown today.
+Ordered by what breaks if ignored.
 
-**3. Foxy caps.** One file, two literals.
+1. **The student dashboard is the last fixture screen — open item 51.** `/student`
+   still renders `sampleProgress` and a hard-coded name while Learn, Practice,
+   Progress, Foxy, Parent and Billing all read live data. It is the FIRST screen
+   after login, so it is the one a client sees first, and it is where "continue
+   where you left off" belongs. Half a day.
+2. **`questions` has no `hint_level_*` and no `question_hi` columns — open item
+   49.** Not NULL: ABSENT. The contract sends `hintLevelsAvailable` on every
+   question, so it is an array that can only ever be empty, and practice cannot
+   be taken in Hindi at all despite the whole interface being bilingual. A
+   migration must land before any generation work has anywhere to go.
+3. **Two things that look broken in a demo and are not.** The
+   "PREVIEW — sample information is shown while the product services are being
+   connected" banner on every screen, and question options that read
+   `A) … C) … D) … B)` because the letter prefix is baked into the corpus text
+   and then shuffled. Under an hour together.
 
-```bash
-grep -rn "FOXY_DAILY_CAP\|free: 20\|plus: 200" backend/src/shared/constants/
-```
-Confirm `free: 20 / plus: 200` or change both. They had drifted to 5000/9000 — a 1.8x gap on a ceiling no student reaches, which is a paid tier in name only. A test pins the literals, so changing them turns that test red **by design**: update the test in the same commit, never the constant alone.
+### The blockers that were cleared, and what each one unblocked
 
-### After those, the three worth doing first
-
-Ordered by what breaks if ignored, not by size.
-
-1. **Item 25 — the false degradation row.** `docs/04-RESILIENCE-PLAN.md` §6 promises keyword-only fallback; `backend/src/modules/retrieval/retrieval.service.ts:52-70` throws instead. §11 calls every row a testable requirement, so this is a stated guarantee with no test and contradicting code. **Decide which is true, then make the other match** — do not write a test against the doc without reading the service first.
-2. **Item 33 — `next build` fails on this machine. The bundler is NOT the cause — tested 12 August.** `kill EPERM` at worker teardown, Next 16.3 + Windows. `next build --webpack` (the 16.x spelling of `--no-turbopack`) fails **identically**, so the flag theory is dead. What the webpack run adds is a narrower window: it reaches "Collecting build traces" and completes it, then dies — later than the Turbopack run, which never gets that far. So compile, TypeScript, static generation and tracing ALL succeed, and the crash is in worker teardown after every artifact-producing phase. `.next/` is populated; `.next/standalone/` is never written, which is what the Dockerfile consumes. **Next avenue: the build-worker pool, not the bundler** — `experimental.webpackBuildWorker`/worker count, or run the build inside the Linux container the image uses anyway and stop treating a Windows-host build as the target.
-3. **Item 26 — read before touching the parent digest.** `recoveries` counts `answer_changed = true AND is_correct = true`, which immutable answers (D-281) made unsatisfiable. The metric will read zero. **That is the fix landing, not a regression** — the old numbers came from client testimony nothing verified.
+| Was blocked on | Cleared | What it unblocked |
+|---|---|---|
+| `LLM_API_KEY` | 17 Aug — the key was present as `ANTHROPIC_API_KEY`; the config reads `LLM_API_KEY`, which names the PORT and not the vendor | Foxy answers from the corpus with verified citations, and **abstains** when it cannot |
+| `VOYAGE_API_KEY` | Already set | Retrieval calibrated; `ABSTAIN_THRESHOLD` live at the measured 0.029877 |
+| SMTP | 17 Aug — Google Workspace app password | Verification, password reset, and the guardian-link OTP all deliver |
+| A git remote | 12 Aug | Nothing yet — CI still cannot start, see above |
+| `next build` on this machine | 12 Aug — the host was the cause | The image builds; the browser suite runs |
+| The browser suite could not run at all | 18 Aug — `playwright.config.ts` hardcoded port 3000, which the backend holds | 113 browser checks, and **four real defects on the first run** |
 
 ### The build is no longer a blocker — 12 August 2026
 
@@ -334,7 +354,7 @@ because the CSRF verdict must not depend on who the caller claims to be.
 |---|---|
 | **A socket-level smoke test** - the only untested boundary in the backend. **Now the most valuable single day in the repository**: the Foxy chat UI ships against a harness that cannot tell incremental from buffered | 1 |
 | A Postman collection generated from the route definitions | 0.5 |
-| Frontend step 15 — accessibility pass · the two end-to-end specs | 4 |
+| Frontend step 15 — accessibility pass · the two end-to-end specs | 3 |
 | Remaining open items in section 7 | 3 |
 
 ### The wire boundary is the one thing three audits could not reach
@@ -712,10 +732,10 @@ Build order from `docs/01-BACKEND-IMPLEMENTATION-PLAN.md` section 10.
 | ✅ 1-5 | Foundation, platform, identity, authz | — | — |
 | ✅ — | Resilience hardening | — | — |
 | ✅ 6 | **Corpus migration + `content` module** — module, migration `0001`, import script, all imported and verified | — | — |
-| ✅ 7 | `embed` **real adapter DONE** (Voyage, guarded, boot-checked — D-123); **`llm` real adapter DONE too** (Anthropic Messages API, guarded, boot-checked — D-170). Both are fully unit-tested against a mocked HTTP layer and NEITHER is ever called by a test | — | keys only: `VOYAGE_API_KEY` for calibration, `LLM_API_KEY` to run Foxy against a real model |
-| ✅ 8 | **`retrieval`** — module built, wired on the `ai` pool, no HTTP surface by design. Threshold ships `UNCALIBRATED` and INERT; the calibration harness is written | 0.5 | calibration blocked on `VOYAGE_API_KEY` only |
+| ✅ 7 | `embed` **real adapter DONE** (Voyage, guarded, boot-checked — D-123); **`llm` real adapter DONE too** (Anthropic Messages API, guarded, boot-checked — D-170). Both are fully unit-tested against a mocked HTTP layer and NEITHER is ever called by a test | — | **both keys are configured.** `LLM_API_KEY` was present as `ANTHROPIC_API_KEY`; the config names the PORT, not the vendor |
+| ✅ 8 | **`retrieval`** — module built, wired on the `ai` pool, no HTTP surface by design. **CALIBRATED and LIVE**: the abstain threshold is the measured 0.029877 and has been observed refusing a real question against a real model | — | — |
 | ✅ 9 | `learner` | — | — |
-| ✅ 10 | **`foxy`** — module, migration `0005_foxy`, five endpoints (one SSE), 203 tests. Guided interface: 3 modes × 6 fixed actions, no open chat (D-163). Abstention never calls the model and is a successful answer (D-165); citations are verified mid-stream and fabrications stripped before the student sees them (D-164); the safety classifier runs before the model (D-166); a trace row per turn, including abstentions. Runs on the SCRIPTED FAKE until a key exists | — | quality is blocked on `LLM_API_KEY` + threshold calibration; the module is not |
+| ✅ 10 | **`foxy`** — module, migration `0005_foxy`, five endpoints (one SSE), 203 tests. Guided interface: 3 modes × 6 fixed actions, no open chat (D-163). Abstention never calls the model and is a successful answer (D-165); citations are verified mid-stream and fabrications stripped before the student sees them (D-164); the safety classifier runs before the model (D-166); a trace row per turn, including abstentions. **RUNS ON THE REAL MODEL since 17 August** — answers from the corpus with verified citations, and ABSTAINS rather than inventing when retrieval finds nothing (observed live: `abstained=t, chunks=0`). The grounding rail has now been exercised against a real model, which it never had been | — | — |
 | ✅ 11 | **`practice`** — module, migration `0002`, 231 tests, atomic submission across two modules | — | — |
 | ✅ 12 | **`parent`** — module, migration `0003_parent`, six endpoints, the weekly digest seam filled into `notify`. **The transcript is now LIVE**: `0005_foxy` created the tables the catalogue probe was waiting for, so reads return `source: 'foxy'` rather than `not_yet_available` (D-171) | — | — |
 | ⬜ 13 | `billing` | 6 | Razorpay account |
@@ -745,7 +765,8 @@ Build order from `docs/02-FRONTEND-IMPLEMENTATION-PLAN.md` section 11. **Steps 0
 | ✅ 12 | **`parent-dashboard` — 16 August 2026.** Snapshot, digest, transcript and consent, as four independent queries. **The child-visibility notice renders before every branch** — §10.4's only bold requirement, and the two paths that show no conversation are tested specifically for it (D-359). A 403 reads as a state the child chose, not a fault (D-361). **The parent fixtures are deleted** rather than left beside the real screen (D-363) | — |
 | ✅ 13 | **`billing` — 17 August 2026.** Catalogue, current plan, checkout and cancel. **A new backend route was needed first**: `GET /billing/plans`, because `PLANS` lives in the module and a frontend holding its own copy of a PRICE advertises one figure and charges another (D-364). A school-paid seat is shown no price and no cancel button (D-368); a 409 says "you already have it" and never "try again" (D-367) | — |
 | ✅ 14 | **Responsive pass — 18 August 2026.** A new `responsive.spec.ts`: ten routes × two viewports × two languages, asserting no horizontal overflow, plus the 44px rule on every control at 360px. **47 checks, and the first run found three real touch-target defects** (D-370). NO HORIZONTAL OVERFLOW ANYWHERE, in either language, at either width — the one thing §12 asks for outright | — |
-| ⬜ 15 | Accessibility pass · the two end-to-end specs | 4 |
+| ⬜ 15 | Accessibility pass · the two end-to-end specs | 3 |
+| ✅ + | **`learn` — study, 19 August 2026.** NOT in the original build order, and it is the screen the product was missing: subject tiles → chapter list → a concept-by-concept walkthrough over the 639 rows the corpus import left stranded. URL-driven, so back, sharing and reopening all work. **It also fixes a real defect** — Foxy's subject `<select>` defaults to mathematics, so a science question asked from a fresh conversation retrieved against the maths corpus and abstained; arriving from a chapter carries `?subject=` and nothing is guessed (D-378). 20 tests | — |
 | | **Subtotal** | **~35** |
 
 **Steps 1-5 looked slow and were not.** They took one session and every screen after this one inherits: three states that already announce themselves correctly, a form field whose label and error are wired by construction, a dialog with a real focus trap, and a confirm flow that cannot be double-pressed.
@@ -894,10 +915,72 @@ rather than about a stub that was told to say no.
 
 ## 7. Open items and known gaps
 
+### The register, ranked — 19 August 2026
+
+Everything below is expanded in the tables that follow. This is the ranked view,
+because §7 has grown to fifty entries and a list that long stops being read.
+
+**Blocked on the owner — no amount of engineering clears these**
+
+| # | Issue | Cost of leaving it |
+|---|---|---|
+| — | **GitHub Actions billing.** Every run is `startup_failure` in under two seconds, account-level | 187 test files, 3,222 tests, and CI has NEVER run one of them |
+| 19 | **No Razorpay account** | The payment path has never completed once. Every checkout in this repository is a deterministic fake |
+| — | **Foxy caps** (`free: 20 / plus: 200`) unconfirmed | A commercial decision sitting at a default |
+
+**Will look broken to a client, cheap to fix**
+
+| # | Issue | Effort |
+|---|---|---|
+| 51 | **`/student` is the last fixture screen** — sample data on the first screen after login, while every other screen is live | 0.5 d |
+| 52 | **The "PREVIEW — sample information" banner** on every authenticated screen. It tells a viewer the product is not connected. It is | 15 min |
+| 53 | **Question options read `A) … C) … D) … B)`** — the letter prefix is baked into the corpus text, then shuffled | 1 h |
+| 43 | **63 of 137 chapter titles are placeholders** like "Part 2 - Chapter 1", now visible on the study browser | data fix |
+
+**Real correctness gaps**
+
+| # | Issue | Why it matters |
+|---|---|---|
+| 49 | **`questions` has NO `hint_level_*` and NO `question_hi` columns** — absent, not null | The contract promises `hintLevelsAvailable` the table cannot hold, and practice cannot be taken in Hindi at all |
+| 12 | **20 of 4,686 chunks have no embedding** | Invisible to Foxy's search. `VOYAGE_API_KEY` is now set, so this is just a backfill |
+| 20 | **Every account resolves to the `free` Foxy plan** | A paying customer gets the free daily cap |
+| 19b | **Foxy answer QUALITY is unmeasured** | The model is real now; no test grades what it says |
+| 46 | **13 stale visual baselines, none for the 6 newest routes** | Needs a human to approve the new look before re-recording |
+| 48 | **The image build downloads Google Fonts** | A deploy can fail on a network blip for a reason nothing in the diff explains |
+
+**Deliberate gaps, recorded so nobody rediscovers them**
+
+| # | Issue |
+|---|---|
+| 44 | The hint ladder is contracted, unrouted AND unpopulated — no hint UI ships |
+| 47 | A student on a school-paid seat has nowhere to see that fact |
+| 18 | Grade 7/8 maths concept graph has 3 cycles — two authoring schemes disagree |
+| 21 | The backup volume is on the same host as the data it protects |
+| 24 | The SSE proxy matcher is wider than the final route |
+
+### What this session changed about this list
+
+Four entries were **wrong**, not merely stale, and were corrected by running the
+system rather than reading it:
+
+- item 13 said the hint ladder and Hindi question text were "NULL on every row".
+  **The columns do not exist.** Found by `npm run ops:status` — now item 49.
+- item 50 said 639 chapter concepts were stranded. **Closed** — endpoint and two
+  screens shipped.
+- the guardian-link flow was recorded as working. **It could never complete**:
+  the student-approval step had no endpoint through which a student could reach
+  it. Rebuilt as code + OTP.
+- Foxy was recorded as blocked on `LLM_API_KEY`. **The key was already in `.env`
+  under another name.**
+
+And one defect existed that no entry described, because nothing in the test
+suite could see it: **the SSE route carried no CORS headers, so Foxy was blocked
+in every browser** while all 3,220 tests passed. See D-377.
+
 ### Agreed, not implemented
 | # | Item | Source | Effort |
 |---|---|---|---|
-| 19 | **`foxy`'s ANSWER QUALITY is entirely unmeasured, and no test in the suite can measure it.** Every foxy test runs against the DETERMINISTIC SCRIPTED FAKE, which does not read the prompt. That proves the pipeline — ordering, abstention, citation verification, streaming, the trace, every failure branch — and says NOTHING about whether an answer is correct, age-appropriate or well-grounded. Two things unblock it and neither is code: `LLM_API_KEY` (set it, and `createContainer` picks the real adapter with no other change), and `VOYAGE_API_KEY` for the retrieval calibration, without which `ABSTAIN_THRESHOLD` is INERT and **Foxy will effectively never abstain on a real corpus** — the grounding rail that the whole design rests on is present, wired, tested and currently set to a value that filters nothing | D-165, D-170; retrieval's `abstain-threshold.ts` | keys, then 1 d of eval |
+| ~~19~~ | **PARTLY CLOSED 17 August.** `LLM_API_KEY` is configured and Foxy answers from the corpus with verified citations; the abstention rail has been observed firing against a real model. What is STILL true is the second half: no test measures answer QUALITY, because every test runs against the deterministic fake. A quality eval is still a day of work and still unwritten. Original text: **`foxy`'s ANSWER QUALITY is entirely unmeasured, and no test in the suite can measure it.** Every foxy test runs against the DETERMINISTIC SCRIPTED FAKE, which does not read the prompt. That proves the pipeline — ordering, abstention, citation verification, streaming, the trace, every failure branch — and says NOTHING about whether an answer is correct, age-appropriate or well-grounded. Two things unblock it and neither is code: `LLM_API_KEY` (set it, and `createContainer` picks the real adapter with no other change), and `VOYAGE_API_KEY` for the retrieval calibration, without which `ABSTAIN_THRESHOLD` is INERT and **Foxy will effectively never abstain on a real corpus** — the grounding rail that the whole design rests on is present, wired, tested and currently set to a value that filters nothing | D-165, D-170; retrieval's `abstain-threshold.ts` | keys, then 1 d of eval |
 | 20 | **The daily usage limit is enforced per plan, but every account resolves to `free`** — and this is now the ONLY thing between a paying customer and the limits they paid for, because `billing` itself is wired. `app/routes.ts` still passes `readPlan: () => Promise.resolve(null)`, which the service reads as `free` (20 messages/day). **Deliberately not closed with the rest of the wiring**, because it is not a one-line bind: `foxy`'s `PlanReader` is `(studentUserId) => Promise<FoxyPlan | null>` and takes NO ACTOR, while `billing.getEntitlements(actor, subjectUserId)` requires one and runs `authoriseSubscription` on it. Binding them needs either a widened `PlanReader` or a deliberate system actor, plus a decision about how the billing catalogue (`free`/`monthly`/`yearly`) maps onto `FoxyPlan` (`free`/`plus`) — the honest mapping is `hasFeature(entitlements, 'foxy.unlimited')`, since that entitlement is named for exactly this. Guessing either half silently is how a customer pays and gets nothing | §8.5, D-175 | 1 h |
 | 21 | **The usage-counter day rolls over at UTC midnight, i.e. 05:30 IST.** Deliberate and imperfect: a timezone-aware key needs per-user timezone storage, which does not exist — the same gap D-069 records for job scheduling. 05:30 lands in the middle of nobody's study session, so it is the cheapest wrong answer available. Recorded so the next person changes it deliberately rather than discovering it | `foxy/domain/usage.ts` | with per-user timezones |
 | ~~22~~ | ~~**`0004_billing`'s journal `when` is BELOW `0003_parent`'s** (1786374108357 vs 1786700000000). That is exactly D-109: drizzle skips a migration whose recorded timestamp precedes the last applied ledger row, and reports "Migrations applied." while applying nothing.~~ **CLOSED 10 August.** Corrected to **1786750000000**. The defect was REPRODUCED first, on a scratch database primed to `0003`: `subscriptions` and `payment_events` absent, `0005` applied over the hole, exit code zero. Re-verified after the fix from empty and from a primed ledger — six ledger rows, both tables present. Enforced from now on by `tests/integration/migration-journal-order.test.ts`, proved to fire by reverting the value. **The round-trip test could not have caught it**: it applies by `idx` and never reads `when` | D-109, D-173, D-174 | done |
@@ -909,7 +992,7 @@ rather than about a stub that was told to say no.
 | 8 | **`audit_log` and `notifications` keep NULLABLE tenants, deliberately.** Neither is student-owned data reached through `assertCanAccess`, and — the deciding point — neither has a writer that knows a tenant: `audit_log` records system actions whose actor is null by design, and the in-app channel is handed a recipient and nothing else. A NOT NULL column whose only writer relies on the column default is theatre of exactly the kind D-073 rejects. **The mechanism when it is done:** resolve the tenant from the recipient / the actor as a scalar sub-select in the INSERT, and leave `audit_log` nullable for genuinely actor-less rows | D-084 | 2 h |
 | 9 | **Moving an account between tenants MUST revoke its sessions.** A student reaching their own data short-circuits the tenant lookup and trusts the session's tenant — safe today (the data moves with them, and a parent gets no short-circuit) but it makes session revocation a hard requirement of any account-moving code, the same way a password reset revokes sessions. Nothing moves accounts between tenants yet | D-083 | 1 h, with the feature |
 | 11 | **1,199 of 4,686 imported chunks are exact text duplicates** — the same NCERT passages ingested twice under two `chapter_title` conventions. The effective distinct corpus is **~3,487 chunks**, and duplicates compete for the same top-k slots (the manual vector query returned one passage twice in its top six). NOT deduplicated by the import, deliberately: which copy is canonical is a retrieval-quality decision that belongs with threshold calibration, where it can be measured | D-108 | 1 day, with step 8 |
-| 12 | **20 chunks carry a NULL embedding and are invisible to vector search.** Ids in `.corpus-extract/reports/chunks-without-embedding.txt`. They import with NULL and are reachable by full-text search; **no vector was fabricated.** Needs `VOYAGE_API_KEY` and the `embed` adapter | D-078 | 1 h, with step 7 |
+| 12 | **20 of 4,686 chunks carry a NULL embedding and are invisible to vector search** — re-confirmed by `npm run ops:status` on 18 August, so this is a live gap rather than a historical note. `VOYAGE_API_KEY` is now configured, so the only thing missing is running the backfill. Ids in `.corpus-extract/reports/chunks-without-embedding.txt`. They import with NULL and are reachable by full-text search; **no vector was fabricated.** Needs `VOYAGE_API_KEY` and the `embed` adapter | D-078 | 1 h, with step 7 |
 | ~~17~~ | ~~**`signals` cannot be constructed until `practice/index.ts` exports its anti-cheat floor.**~~ **CLOSED 10 August.** `practice/index.ts` now exports `MIN_AVERAGE_MS_PER_QUESTION`, `SAME_ANSWER_MIN_QUESTIONS`, `ANTI_CHEAT_REASONS` and `validateAttempt`, additively — `practice.service.ts` still imports them from `./domain/anti-cheat` directly and no check, threshold or ordering changed. **The no-default property is intact**: `signals`' `AntiCheatEdge` is still required, so a missing wiring is still a compile error rather than a second copy of `3_000`. The edge built in `buildModules` discards the FAILURE REASON on purpose — that belongs to `practice`, which writes it to `practice_sessions.invalid_reason` | D-131, D-177 | done |
 | 18 | **Grade 7 mathematics cannot produce a learning path, and the data is not corrupt.** Two authoring schemes — coarse `math_7_chN` and fine `m7.topic.detail` — are layered on the same chapters and disagree once projected onto chapters, producing 3 cycles. Both edges in each cycle are TRUE statements about concepts, so the code reports the closed path rather than dropping one. **Somebody has to decide which scheme wins for grades 7 and 8 maths** (the only two carrying the fine scheme; 21 and 19 rows). Until then `getGraphCoverage('7','mathematics').orderable` is false while coverage reads 15/15, and `canPlanFor` still works for the chapters not on a cycle | D-128 | half a day of authoring |
 | 19 | **9 of 137 chapters carry no `concept_graph` row at all** — grade 10 science 3, grade 9 science 2, grade 6 maths 2, grade 7 science 1, grade 10 maths 1. They are NAMED by `getGraphCoverage`, not just counted, so a caller can tell "this chapter is invisible to the graph" from "this chapter has no prerequisites" | D-129 | with item 18 |
@@ -964,6 +1047,8 @@ Each was reported by the agent that found it and left deliberately, because it s
 | ~~36~~ | ~~**The resend-verification endpoint has no client.**~~ **CLOSED 12 August 2026.** `VerifyPanel` offers it, with constant copy either way so the screen cannot become an enumeration oracle | frontend | done |
 | 49 | **`questions` has NO `hint_level_*` columns and NO `question_hi` column** — item 13 above recorded both as "NULL on every row", which was wrong: they are ABSENT from this schema. The contract sends `hintLevelsAvailable` on every question, so it is an array that can only ever be empty, and practice cannot be taken in Hindi at all despite the whole interface being bilingual. Needs a MIGRATION before any generation work has anywhere to land. Found by `npm run ops:status` (D-375) | backend | 0.5 d, before section 6 |
 | ~~50~~ | ~~**639 chapter concepts that no API serves.**~~ **CLOSED 18-19 August.** `GET /content/chapters/:id/concepts` (D-376) plus `/student/learn` and `/student/learn/[subject]/[chapter]` (D-378). The walkthrough renders title, learning objective, explanation, formula, example and common mistakes, one concept per screen, in both languages | done | done |
+| 52 | **The "PREVIEW — Sample information is shown while the product services are being connected" banner renders on every authenticated screen.** It was true when the shell was built and has been false since 12 August. On a demo it is the first thing a viewer reads, and it contradicts the live data beside it | frontend | 15 min |
+| 53 | **Question options carry their original letter prefix and are then shuffled**, so they render `A) … C) … D) … B)`. The prefix is part of the option TEXT in the corpus, not a rendering choice, so the fix is at import: strip a leading `^[A-D]\)\s*` from every option. Until then every practice screen looks broken to anyone who reads carefully | backend + data | 1 h |
 | 51 | **The student dashboard is the last fixture screen, and now the odd one out.** `/student` still renders `sampleProgress` and a hard-coded name while Learn, Practice, Progress, Foxy, Parent and Billing all read live data. It is also where "continue where you left off" belongs — the data exists (`/practice/progress` carries `lastPractisedAt` per chapter), and the only open question is where that read lives given `no-cross-feature-imports` (the D-356 question) | frontend | 0.5 d |
 | 50 | **639 chapter concepts, fully written, that no API serves.** `chapter_concepts` holds title, learning objective and explanation in English for all 639 rows across 129 chapters, and Hindi for 629 — the exact content a study walkthrough renders. There is no endpoint. This is the cheapest unshipped value in the product | backend + frontend | 2 h for the endpoint |
 | 48 | **The production image build downloads Google Fonts, so it needs the network and can fail for a reason nothing in the diff explains.** `next/font/google` fetches at BUILD time; two builds this session died with twelve `Can't resolve '@vercel/turbopack-next/internal/font/google/font'` errors and succeeded unchanged on retry. The fix is a DECISION rather than a patch: `next/font/local` with the two families' woff2 committed makes the build hermetic and offline-capable, at the cost of carrying font binaries and updating them by hand. CI has never run and will meet this eventually | frontend + ops | 0.5 d, with the decision |
@@ -1109,6 +1194,12 @@ per-chapter counts are in `.corpus-extract/reports/chapter-readiness.ndjson`.
 | 12 Aug 2026 | **Internationalisation — build-order step 5.** Both dictionaries (English is the SHAPE, `hi: Dictionary` makes a missing key a compile error), a dotted-path `TranslationKey` union so a typo fails the build, server and client translators sharing one implementation, the language switch, and Noto Sans Devanagari subset to `devanagari` with `preload: false` — so an English reader never downloads it. Every user-facing string migrated out of JSX; the `no-literal-jsx-text` rule now covers text nodes AND `aria-label`/`alt`/`placeholder`/`title`, proven by probe. **The visual-regression language axis is live**, plus a Hindi horizontal-overflow check — §10.7's four axes are finally all real. Closes open item 34: the onboarding form submitted `english`/`hindi` against a contract accepting `en`/`hi`, and offered grades 6-10 against a syllabus and a CHECK that run to 12; both now come from the generated constants. **A framework trap found and fixed: `LANGUAGE_COOKIE` was exported from a `'use client'` module, so the server's `cookies().get()` looked up a client reference, found nothing, and rendered `<html lang="en">` with Hindi content underneath** | 3,173 backend · 236 + 28 frontend |
 | 12 Aug 2026 | **Auth and onboarding on the live client — build-order steps 7-8.** Signup, login, verify, resend, forgot, reset, student onboarding and the parent link-code claim, all through the typed client. **Field errors come from the generated request schemas, because they cannot come from the response**: `toClientPayload()` sends `{ error: { code, message } }` and drops `details`, so no field is named on the wire — validating with the backend's own copied schema is the only way §5.6's "map onto the form" is reachable, and its rules cannot drift. **A 401 from `POST /auth/login` is a credential verdict, not an expired session** — same status, same code, so `ApiError` now carries the request path, the only thing that separates them; without it a wrong password cleared the query cache and reported a sign-out on the sign-in screen. **Six contract mismatches found, each of which would have failed against every backend build**: `identifier` vs `email`; an 8-character password rule against a 10-character contract; a six-digit verify code for an endpoint that only ever took a link token; English and Social Science offered where `SUBJECTS` is `['mathematics','science']`; a parent name nothing stores, posted nowhere; and `?next=` honoured verbatim, an open redirect via `//evil.example`. Then three defects in that same work, found by re-reading it: `noValidate` disarmed the terms checkbox, the post-login redirect trusted `?role=`, and "remember me" promised something no request could carry. D-344..D-347 | 3,173 backend · 252 + 28 frontend |
 | 12 Aug 2026 | **Open item 33 closed — and it was never Next.** The same source builds cleanly in `frontend/Dockerfile` on Linux and produces `.next/standalone`; a Windows-host build is simply not the target. Unblocking it ran the browser suite against a production build for the first time and immediately found four real defects: **`npm ci` refused to install on Linux** (`@emnapi/*` missing from a lockfile generated on Windows — the frontend image had therefore never built anywhere, and `frontend-ci.yml` would have failed on the same line); **`--success` and `--warning` fail WCAG AA on their own 10% tint** (4.38:1 and 4.32:1 — the token block asserted contrast against `--surface` and against white, and the badges are a tone on a tint of itself); **every auth screen scrolled sideways at 360px**; and **the bundle-budget gate reads a manifest Next 16.3 no longer emits**, its ten unit tests passing against a synthetic build. Also: first Lighthouse run ever — two auth screens over the LCP budget (item 42) — and sixteen new visual baselines, because the suite had been watching only the two dashboards nobody was changing. D-348..D-350 | 3,173 backend · 252 + 32 frontend |
+| 14 Aug 2026 | **The Foxy chat UI — build-order step 9.** The screen `useFoxyStream` was written for: start panel, transcript, streaming bubble, citations, six served action buttons, composer, usage line, retry. Four wire calls; the fifth — the SSE turn — stays inside the hook, so no buffered second way to take a turn can exist. Three defects found while building: a completed turn REFETCHED the transcript and rendered every finished answer twice (dedup impossible — a user message carries no server id, ever — so fixed at source with `refetchType: 'none'`, D-351); the open conversation lived in `useState`, so a refresh stranded the student's turns on the server (now `?session=`, D-352); and a failed `POST /foxy/sessions` reported "the answer stopped part way through", describing an event that had not happened (D-353) | 3,175 backend · 309 frontend |
+| 15 Aug 2026 | **Practice and progress — steps 10-11.** Mission → questions → result in one route, because splitting it would let the back button land inside a submitted session. Native radio groups, so "one option at a time" is the platform enforcing it. Per-question timing clamped into the contract's range — a backwards device clock or a tab left open over lunch would otherwise 400 the answer away over a number the student never saw. **`EvidenceLabel` was rendering untranslated English**, so a Hindi reader saw "Strong evidence" on their own progress and their child's; it now takes the generated wire code (D-354). The generated `EVIDENCE_LABELS` order is declaration order, not strength, so a bar built from it fills backwards (D-355). The boundary lint rule refused the progress feature importing practice's wire calls and was RIGHT: ownership follows the caller (D-356). `scorePercent` is on the wire and never rendered — a session score and a mastery percentage are indistinguishable to a child (D-357) | 3,175 backend · 378 frontend |
+| 16 Aug 2026 | **The parent dashboard — step 12.** Snapshot, digest, transcript and consent as four independent queries, so a failed panel still leaves the CONSENT controls reachable. **The child-visibility notice renders before every branch** — §10.4's only bold requirement — so the two paths that show no conversation still carry it (D-359). `not_yet_available` and an empty transcript get different sentences, because telling a parent their child has asked nothing when nobody can see it yet is a false statement about their child (D-360). A 403 means two things: on a GET the child revoked the link, on the revoke POST a stale page (D-361). The parent fixtures are deleted rather than left beside the real screen (D-363) | 3,175 backend · 414 frontend |
+| 17 Aug 2026 | **Billing — step 13 — and the backend route it needed.** `PLANS` lives in the module, so a billing screen could hard-code "₹299" or show nothing; `GET /billing/plans` serves the same table checkout reads (D-364). **One unknown entitlement rejected the WHOLE catalogue** — a closed enum meant an added feature blanked the pricing page; the feature list is now read as strings and everything that decides money stays strict (D-365). `checkoutUrl` is a plain `z.string()`, so it is checked before `location.assign` (D-366). A 409 says "you already have it", never "try again" — the thing they would retry is a payment (D-367). **SMTP configured through Google Workspace** and verification mail delivered to a real inbox for the first time; **`LLM_API_KEY` was already in `.env` as `ANTHROPIC_API_KEY`**, and once named correctly Foxy answered from the corpus with verified citations and ABSTAINED on a question it could not ground | 3,182 backend · 455 frontend |
+| 18 Aug 2026 | **The responsive pass, guardian linking rebuilt, and a status report.** One hardcoded `baseURL` had blocked the browser suite for six days — the backend holds port 3000 — and unblocking it found a stale assertion plus three touch-target defects, including the onboarding language radios at 68×21 (D-369, D-370). **Guardian linking could NEVER complete**: the student-approval step had no endpoint through which a student could reach a pending link's id, so every parent stayed pending forever. Rebuilt as code + OTP on the shape the working product uses, verified with a real OTP to a real inbox (D-373). Link codes no longer expire, which broke `findActiveLinkCodeForStudent` — and an existing test caught it (D-374). **`npm run ops:status`** separates WIRED from POPULATED from REAL, and its first run corrected two entries in this file: the hint ladder and Hindi question text are not NULL, the COLUMNS DO NOT EXIST (D-375) | 3,211 backend · 455 frontend |
+| 19 Aug 2026 | **Study, and the CORS bug that had blocked Foxy in every browser.** `GET /content/chapters/:id/concepts` serves the 639 concepts the corpus import left stranded (D-376), and `/student/learn` plus `/student/learn/[subject]/[chapter]` render them one idea at a time. **The SSE route carried no CORS headers** — it hijacks the reply, and `@fastify/cors` sets its headers in an `onSend` hook a hijacked reply never reaches — so every browser discarded every Foxy turn while all 3,220 tests passed. `app.inject` does not enforce CORS and curl does not either; it took driving the real UI to see it. Fixed, plus **the repository's first real-socket test** (D-377). The study screens also fix Foxy's subject dropdown defaulting to mathematics, which had a science question retrieving against the maths corpus and abstaining (D-378). Full journey re-driven in a browser: 13/13 steps, 15 endpoints, and the writes land | 3,222 backend · 475 frontend |
 
 ## 12. Update protocol
 
