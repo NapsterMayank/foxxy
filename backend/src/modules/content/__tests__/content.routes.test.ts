@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { LightMyRequestResponse } from 'fastify';
 import {
+  chapterConceptsResponseSchema,
   chapterResponseSchema,
   chaptersResponseSchema,
 } from '@/shared/contracts/content.contract';
@@ -126,6 +127,151 @@ describe('GET /api/v1/content/chapters/:id', () => {
   it('401s with no session', async () => {
     const id = await chapter();
     expect((await get(`/api/v1/content/chapters/${id}`)).statusCode).toBe(401);
+  });
+});
+
+describe('GET /api/v1/content/chapters/:id/concepts', () => {
+  /** Inserts a concept directly — there is no write path for content. */
+  async function concept(
+    chapterId: string,
+    fields: Partial<{
+      conceptNumber: number | null;
+      titleEn: string;
+      explanationEn: string | null;
+      commonMistakes: unknown;
+    }> = {},
+  ): Promise<void> {
+    await harness.postgres.client.query(
+      `insert into chapter_concepts
+         (chapter_id, concept_number, title_en, explanation_en, common_mistakes)
+       values ($1, $2, $3, $4, $5)`,
+      [
+        chapterId,
+        fields.conceptNumber === undefined ? 1 : fields.conceptNumber,
+        fields.titleEn ?? 'A concept',
+        fields.explanationEn === undefined ? 'An explanation.' : fields.explanationEn,
+        JSON.stringify(fields.commonMistakes ?? []),
+      ],
+    );
+  }
+
+  it('returns the chapter and its concepts together', async () => {
+    const id = await chapter();
+    await concept(id, { conceptNumber: 1, titleEn: 'Chemical Reactions' });
+
+    const response = await get(`/api/v1/content/chapters/${id}/concepts`, cookie);
+
+    expect(response.statusCode).toBe(200);
+    const body = chapterConceptsResponseSchema.parse(response.json());
+    // BOTH, from one call — a screen rendering concepts without the chapter
+    // would show an unnamed list for the length of a second round trip.
+    expect(body.chapter.id).toBe(id);
+    expect(body.concepts).toHaveLength(1);
+    expect(body.concepts[0]?.titleEn).toBe('Chemical Reactions');
+    expect(body.concepts[0]?.explanationEn).toBe('An explanation.');
+  });
+
+  /*
+   * THE ORDERING RULE, AND THE REASON IT IS ASSERTED.
+   *
+   * `concept_number` is nullable and the source repeats values, so it cannot be
+   * trusted alone. Postgres sorts NULLs FIRST on an ascending sort, which would
+   * open a chapter's walkthrough on whichever concepts the import failed to
+   * number — a defect nobody would see until a student met one of those ten
+   * chapters.
+   */
+  it('orders by concept number, with unnumbered concepts last', async () => {
+    const id = await chapter();
+    await concept(id, { conceptNumber: 2, titleEn: 'Second' });
+    await concept(id, { conceptNumber: null, titleEn: 'Unnumbered' });
+    await concept(id, { conceptNumber: 1, titleEn: 'First' });
+
+    const body = chapterConceptsResponseSchema.parse(
+      (await get(`/api/v1/content/chapters/${id}/concepts`, cookie)).json(),
+    );
+
+    expect(body.concepts.map((entry) => entry.titleEn)).toEqual(['First', 'Second', 'Unnumbered']);
+  });
+
+  /*
+   * A walkthrough that reshuffles under a student mid-chapter is worse than one
+   * in an imperfect order, so duplicate numbers break the tie on `id` rather
+   * than on whatever the planner returns.
+   */
+  it('is stable across requests when numbers repeat', async () => {
+    const id = await chapter();
+    await concept(id, { conceptNumber: 1, titleEn: 'A' });
+    await concept(id, { conceptNumber: 1, titleEn: 'B' });
+    await concept(id, { conceptNumber: 1, titleEn: 'C' });
+
+    const first = chapterConceptsResponseSchema.parse(
+      (await get(`/api/v1/content/chapters/${id}/concepts`, cookie)).json(),
+    );
+    const second = chapterConceptsResponseSchema.parse(
+      (await get(`/api/v1/content/chapters/${id}/concepts`, cookie)).json(),
+    );
+
+    expect(first.concepts.map((entry) => entry.id)).toEqual(
+      second.concepts.map((entry) => entry.id),
+    );
+  });
+
+  /*
+   * Ten of the 137 chapters have no concepts. That is content missing, not a
+   * chapter missing — a 404 would be a false statement about the chapter.
+   */
+  it('returns an empty list for a chapter with no concepts, not a 404', async () => {
+    const id = await chapter();
+
+    const response = await get(`/api/v1/content/chapters/${id}/concepts`, cookie);
+
+    expect(response.statusCode).toBe(200);
+    expect(chapterConceptsResponseSchema.parse(response.json()).concepts).toEqual([]);
+  });
+
+  it('404s for a withdrawn chapter rather than listing its concepts', async () => {
+    const id = await chapter({ isActive: false });
+    await concept(id);
+
+    expect((await get(`/api/v1/content/chapters/${id}/concepts`, cookie)).statusCode).toBe(404);
+  });
+
+  it('400s on an id that is not a uuid', async () => {
+    expect((await get('/api/v1/content/chapters/not-a-uuid/concepts', cookie)).statusCode).toBe(400);
+  });
+
+  it('401s with no session', async () => {
+    const id = await chapter();
+    expect((await get(`/api/v1/content/chapters/${id}/concepts`)).statusCode).toBe(401);
+  });
+
+  /*
+   * `common_mistakes` is `jsonb NOT NULL DEFAULT '[]'`, so it cannot be null —
+   * but jsonb can hold anything, and a row written by something other than this
+   * application should cost one concept its list rather than the whole chapter a
+   * 500.
+   */
+  it('survives a common_mistakes value that is not an array of strings', async () => {
+    const id = await chapter();
+    await concept(id, { commonMistakes: { not: 'an array' } });
+
+    const response = await get(`/api/v1/content/chapters/${id}/concepts`, cookie);
+
+    expect(response.statusCode).toBe(200);
+    expect(chapterConceptsResponseSchema.parse(response.json()).concepts[0]?.commonMistakes).toEqual(
+      [],
+    );
+  });
+
+  it('keeps the strings when the list is well formed', async () => {
+    const id = await chapter();
+    await concept(id, { commonMistakes: ['forgets to balance', 'reverses the arrow'] });
+
+    const body = chapterConceptsResponseSchema.parse(
+      (await get(`/api/v1/content/chapters/${id}/concepts`, cookie)).json(),
+    );
+
+    expect(body.concepts[0]?.commonMistakes).toEqual(['forgets to balance', 'reverses the arrow']);
   });
 });
 

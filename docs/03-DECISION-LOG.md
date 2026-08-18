@@ -7099,3 +7099,58 @@ It also found two things about itself worth keeping: a POST carrying `content-ty
 application/json` with no body is answered **500 rather than 400**, and signup's 3/hour
 per-IP limit is spent two at a time by the probe — reported as DENIED rather than crashed,
 because a working rate limiter must not read as a broken API.
+
+### D-376 · GET /content/chapters/:id/concepts — the study walkthrough
+
+`chapter_concepts` has held 639 rows since the corpus import — every one with an English
+explanation, 629 with Hindi — and no endpoint served them. The content was written,
+imported, indexed and stranded.
+
+**Decision:** one route returning the chapter AND its concepts together, because a screen
+that rendered concepts without the chapter would show an unnamed list for the length of a
+second round trip.
+
+Three things the ordering forced. `concept_number` is nullable and the source repeats
+values, so it cannot be trusted alone: Postgres sorts NULLs FIRST ascending, which would
+open a chapter's walkthrough on whichever concepts the import failed to number. It is
+`asc nulls last`, with `id` as a tie-break so the order does not change between two
+requests — a walkthrough that reshuffles under a student mid-chapter is worse than one in an
+imperfect order. Both are asserted.
+
+A chapter with NO concepts is a 200 with `[]`, not a 404. Ten of the 137 have none, and that
+is content missing rather than a chapter missing. `getChapter` runs FIRST rather than in
+parallel, so a withdrawn chapter 404s before the concept read and timing cannot leak its
+existence. `commonMistakes` is narrowed rather than cast: the column is `jsonb NOT NULL
+DEFAULT '[]'`, but jsonb can hold anything, and a malformed row should cost one concept its
+list rather than the whole chapter a 500.
+
+### D-377 · The SSE route lost its CORS headers, and every browser blocked Foxy
+
+`POST /foxy/sessions/:id/messages` HIJACKS the reply so it can push frames to the socket.
+`@fastify/cors` sets its headers in an `onSend` hook, and a hijacked reply never reaches
+`onSend`. So the product's ONE streaming endpoint went out with no
+`access-control-allow-origin` while every other route had one, and **every browser discarded
+every Foxy turn before a single frame reached the application.**
+
+All 3,220 tests passed throughout. `app.inject` does not enforce CORS and does not surface
+headers written straight to the raw socket; curl does not enforce CORS either; and every
+backend test is one or the other. It took driving the real UI against the real API — the
+exact blind spot §5 of PROGRESS.md names as "the wire boundary is the one thing three audits
+could not reach".
+
+**Decision:** an `onRequest` hook in `plugins/cors.ts`, scoped to the SSE path, sets the
+headers on `reply.raw`. Node MERGES headers set that way with the ones passed to
+`writeHead`, so they survive the hijack. The hook is scoped so no ordinary route gets a
+second copy, and the allow-list stays in `plugins/cors.ts` — the route must not learn it, or
+there would be two places deciding which origins may read.
+
+**And a socket-level test, the first in the repository.** `foxy.sse-socket.test.ts` listens
+on an ephemeral port and speaks real HTTP, because the assertion cannot be made any other
+way. It also asserts the negative — an origin that is not allow-listed gets no headers —
+since a hook that echoed whatever arrived would be the reflected-origin policy
+`plugins/cors.ts` explicitly refuses to be.
+
+Writing it cost one wrong turn worth recording: the CORS allow-list and the CSRF origin
+allow-list are DIFFERENT lists (D-082 split them deliberately), and asserting against
+`HARNESS_ORIGIN` — which is `APP_URL`, not `CORS_READ_ORIGINS` — makes a correct
+implementation look broken.

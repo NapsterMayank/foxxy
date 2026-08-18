@@ -3,7 +3,7 @@ import { NotFoundError } from '@/platform/errors/index';
 import type { Logger } from '@/platform/logger/index';
 import type { ChapterListQuery } from '@/shared/contracts/content.contract';
 import type { ContentRepository } from './content.repository';
-import type {
+import type { ConceptRecord,
   ChapterRecord,
   ChunkRecord,
   ContentActor,
@@ -53,6 +53,17 @@ export const DEFAULT_QUESTION_LIMIT = 20;
 export interface ContentService {
   listChapters(actor: ContentActor, query: ChapterListQuery): Promise<ChapterRecord[]>;
   getChapter(actor: ContentActor, chapterId: string): Promise<ChapterRecord>;
+  /**
+   * A chapter and its concepts — the study walkthrough.
+   *
+   * Returns BOTH, from one call, because a screen that rendered concepts
+   * without the chapter would have to fetch the title separately and would show
+   * an unnamed list for the length of that round trip.
+   */
+  getChapterConcepts(
+    actor: ContentActor,
+    chapterId: string,
+  ): Promise<{ chapter: ChapterRecord; concepts: ConceptRecord[] }>;
   /**
    * PRACTICE questions. NEVER returns a held-out question — see the file note.
    */
@@ -122,6 +133,30 @@ export function createContentService(deps: ContentServiceDeps): ContentService {
         });
       }
       return chapter;
+    },
+
+    /**
+     * The chapter, then its concepts.
+     *
+     * `getChapter` FIRST AND DELIBERATELY, rather than querying both in
+     * parallel: it is the call that enforces the 404 on a withdrawn or
+     * non-existent chapter, and running the concept read alongside it would
+     * leak the existence of a chapter this caller may not have — a `[]` for an
+     * unknown id and a `[]` for a real chapter with no concepts are the same
+     * response, but the timing is not.
+     *
+     * A chapter with NO concepts is a legitimate 200 with an empty list. Ten of
+     * the 137 chapters have none, and that is content missing rather than a
+     * chapter missing — the caller shows "nothing to read here yet", which is
+     * true, instead of a 404, which is not.
+     */
+    async getChapterConcepts(
+      actor: ContentActor,
+      chapterId: string,
+    ): Promise<{ chapter: ChapterRecord; concepts: ConceptRecord[] }> {
+      const chapter = await this.getChapter(actor, chapterId);
+      const concepts = await repository.findConceptsForChapter(chapterId);
+      return { chapter, concepts };
     },
 
     async getQuestionsForChapter(

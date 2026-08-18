@@ -33,4 +33,40 @@ export async function registerCors(app: FastifyInstance, options: CorsOptions): 
     exposedHeaders: ['x-request-id', 'retry-after'],
     maxAge: 600,
   });
+
+  /**
+   * ==========================================================================
+   * THE STREAMING ROUTE NEEDS ITS CORS HEADERS SET ON THE RAW SOCKET.
+   *
+   * `@fastify/cors` adds them in an `onSend` hook. `foxy`'s message route
+   * HIJACKS the reply — it owns the socket so it can push SSE frames — and a
+   * hijacked reply never reaches `onSend`. So the product's ONE streaming
+   * endpoint went out with no `access-control-allow-origin` while every other
+   * route had one, and every browser blocked every Foxy turn.
+   *
+   * Nothing caught it. `app.inject` does not enforce CORS, curl does not either,
+   * and the backend tests are all one or the other. It took driving the real UI
+   * against the real API.
+   *
+   * `reply.raw.setHeader` survives the hijack because Node MERGES headers set
+   * this way with the ones passed to `writeHead`. The hook is scoped to the SSE
+   * path so no ordinary route gets a second copy of these headers.
+   *
+   * The allow-list lives HERE and only here — the route must not learn it, or
+   * there would be two places that decide which origins may read.
+   * ==========================================================================
+   */
+  const allowed = new Set(options.origins);
+  const SSE_PATH = /^\/api\/v\d+\/foxy\/sessions\/[^/]+\/messages$/;
+
+  app.addHook('onRequest', async (request, reply) => {
+    const origin = request.headers.origin;
+    if (origin === undefined || !allowed.has(origin)) return;
+    if (!SSE_PATH.test(request.url.split('?')[0] ?? '')) return;
+
+    reply.raw.setHeader('access-control-allow-origin', origin);
+    reply.raw.setHeader('access-control-allow-credentials', 'true');
+    // Without `vary`, a cache could serve one origin's response to another.
+    reply.raw.setHeader('vary', 'Origin');
+  });
 }

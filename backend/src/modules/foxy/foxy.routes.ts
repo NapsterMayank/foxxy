@@ -1,3 +1,4 @@
+import type { OutgoingHttpHeaders } from 'node:http';
 import type { FastifyInstance, FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
 import type {
   FoxyCapabilitiesResponse,
@@ -171,13 +172,59 @@ export function registerFoxyRoutes(app: FastifyInstance, deps: FoxyRoutesDeps): 
 }
 
 /**
+ * The staged headers this stream must not lose.
+ *
+ * NAMED EXPLICITLY rather than copying everything `reply.getHeaders()` holds.
+ * A blanket copy would carry `content-length` onto a response that has no
+ * length and would drag along whatever a future plugin happens to stage — this
+ * list says what the stream depends on, and a reader can check it.
+ *
+ * `vary` travels with the CORS pair because a cached response that ignored
+ * `Origin` would be served to the wrong origin.
+ */
+const CARRIED_HEADERS = [
+  'access-control-allow-origin',
+  'access-control-allow-credentials',
+  'access-control-expose-headers',
+  'vary',
+] as const;
+
+/**
  * Writes a frame stream to the socket, and ends it exactly once.
  *
  * Extracted so the handler above stays three lines and so this — the only piece
  * of genuinely delicate transport code in the module — is readable on its own.
  */
 async function streamTurn(reply: FastifyReply, frames: AsyncIterable<FoxyFrameLike>): Promise<void> {
-  reply.raw.writeHead(200, { ...SSE_HEADERS });
+  /*
+   * ========================================================================
+   * THE HEADERS FASTIFY ALREADY STAGED ARE CARRIED OVER, AND OMITTING THEM
+   * BROKE FOXY IN EVERY BROWSER.
+   *
+   * `reply.raw.writeHead` writes to the Node socket directly, so it discards
+   * everything the plugin chain had set on `reply` — including
+   * `access-control-allow-origin` and `access-control-allow-credentials` from
+   * the CORS plugin. Every other route in the product gets those for free
+   * because Fastify serialises the reply; this one does not, because it
+   * hijacks the socket.
+   *
+   * The result was a product whose ONE streaming endpoint was blocked by the
+   * browser while every other endpoint worked. It was invisible to the whole
+   * test suite: `app.inject` never enforces CORS, and curl does not either. It
+   * took driving the real UI against the real API to see it.
+   *
+   * `content-length` and `content-encoding` are dropped: a stream has neither,
+   * and a stale length would truncate it. `SSE_HEADERS` is spread LAST so the
+   * streaming content-type wins over anything staged earlier.
+   * ========================================================================
+   */
+  const staged: OutgoingHttpHeaders = {};
+  for (const name of CARRIED_HEADERS) {
+    const value = reply.getHeader(name);
+    if (typeof value === 'string') staged[name] = value;
+  }
+
+  reply.raw.writeHead(200, { ...staged, ...SSE_HEADERS });
   // Fastify must stop managing this response: it owns the socket from here.
   reply.hijack();
 

@@ -86,3 +86,53 @@ export type ChapterResponse = z.infer<typeof chapterResponseSchema>;
 
 export const chaptersResponseSchema = z.object({ chapters: z.array(chapterSchema) });
 export type ChaptersResponse = z.infer<typeof chaptersResponseSchema>;
+
+/**
+ * ===========================================================================
+ * A CONCEPT — one step of a chapter's walkthrough.
+ *
+ * `chapter_concepts` has held 639 of these since the corpus import, every one
+ * with an English explanation and 629 with Hindi, and until now NO ENDPOINT
+ * SERVED THEM. The content was written, imported, indexed and stranded.
+ *
+ * ---------------------------------------------------------------------------
+ * BILINGUAL FIELDS ARE SENT AS PAIRS, NOT RESOLVED ON THE SERVER.
+ *
+ * `parent.contract.ts` sends `{ en, hi }` because its prose is generated per
+ * child and both halves are guaranteed. Here the Hindi is CORPUS CONTENT and
+ * `explanationHi` is genuinely absent for some rows, so the pair is
+ * `hi: string | null` and the client falls back — the same shape `chapterSchema`
+ * above already uses for `titleHi`, and for the same reason.
+ *
+ * Resolving language on the server would need the request to carry it, and the
+ * one place that already knows a reader's language is the client.
+ *
+ * ---------------------------------------------------------------------------
+ * `commonMistakes` IS AN ARRAY AND NEVER NULL. The column is `jsonb NOT NULL
+ * DEFAULT '[]'` precisely so that "none recorded" has one representation; the
+ * wire keeps that promise rather than reintroducing the choice.
+ * ===========================================================================
+ */
+export const chapterConceptSchema = z.object({
+  id: z.string().uuid(),
+  /**
+   * Ordinal within the chapter, and NULLABLE because the source repeats and
+   * omits them. The client orders by the array it is given, not by this number.
+   */
+  conceptNumber: z.number().int().nullable(),
+  titleEn: z.string(),
+  titleHi: z.string().nullable(),
+  learningObjective: z.string().nullable(),
+  explanationEn: z.string().nullable(),
+  explanationHi: z.string().nullable(),
+  exampleContent: z.string().nullable(),
+  keyFormula: z.string().nullable(),
+  commonMistakes: z.array(z.string()),
+});
+export type ChapterConcept = z.infer<typeof chapterConceptSchema>;
+
+export const chapterConceptsResponseSchema = z.object({
+  chapter: chapterSchema,
+  concepts: z.array(chapterConceptSchema),
+});
+export type ChapterConceptsResponse = z.infer<typeof chapterConceptsResponseSchema>;

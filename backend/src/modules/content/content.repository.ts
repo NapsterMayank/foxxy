@@ -1,8 +1,8 @@
-import { and, asc, eq, inArray, type SQL } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from '@/platform/db/index';
 import { schema } from '@/platform/db/index';
 import type { BloomLevel, Difficulty, Grade } from '@/shared/constants/curriculum';
-import type {
+import type { ConceptRecord,
   ChapterFilter,
   ChapterRecord,
   ChunkRecord,
@@ -17,7 +17,7 @@ import type {
  * from a `*.repository.ts` file.
  */
 
-const { chapters, questions, ragChunks } = schema;
+const { chapterConcepts, chapters, questions, ragChunks } = schema;
 
 export type ContentDbHandle = DbHandle;
 
@@ -164,6 +164,8 @@ function toChunkRecord(row: ChunkRow): ChunkRecord {
 export interface ContentRepository {
   listChapters(filter: ChapterFilter): Promise<ChapterRecord[]>;
   findChapterById(id: string): Promise<ChapterRecord | null>;
+  /** A chapter's concepts, in reading order. Empty when none are recorded. */
+  findConceptsForChapter(chapterId: string): Promise<ConceptRecord[]>;
   /** `pool` is required. See the note on `QuestionPool`. */
   findQuestions(query: QuestionQuery, pool: QuestionPool): Promise<QuestionRecord[]>;
   findChunksByIds(ids: readonly string[]): Promise<ChunkRecord[]>;
@@ -200,6 +202,50 @@ export function createContentRepository(handle: ContentDbHandle): ContentReposit
         .limit(filter.limit);
 
       return rows.map(toChapterRecord);
+    },
+
+    /**
+     * ORDERED BY `concept_number`, WITH NULLS LAST AND A STABLE TIE-BREAK.
+     *
+     * The column is nullable and the source repeats values, so it cannot be
+     * trusted as a sort key on its own: Postgres puts NULLs first by default on
+     * an ascending sort, which would open a chapter's walkthrough on whichever
+     * concepts the import failed to number. `nulls last` puts them at the end
+     * where they read as an appendix, and `id` breaks ties so the order does not
+     * change between two requests — a walkthrough that reshuffles under a
+     * student mid-chapter is worse than one in an imperfect order.
+     *
+     * Inactive concepts are excluded unconditionally, for the same reason
+     * `listChapters` excludes withdrawn chapters.
+     */
+    async findConceptsForChapter(chapterId: string): Promise<ConceptRecord[]> {
+      const rows = await db
+        .select()
+        .from(chapterConcepts)
+        .where(and(eq(chapterConcepts.chapterId, chapterId), eq(chapterConcepts.isActive, true)))
+        .orderBy(sql`${chapterConcepts.conceptNumber} asc nulls last`, chapterConcepts.id);
+
+      return rows.map((row) => ({
+        id: row.id,
+        conceptNumber: row.conceptNumber,
+        titleEn: row.titleEn,
+        titleHi: row.titleHi,
+        learningObjective: row.learningObjective,
+        explanationEn: row.explanationEn,
+        explanationHi: row.explanationHi,
+        exampleContent: row.exampleContent,
+        keyFormula: row.keyFormula,
+        /*
+         * `common_mistakes` is `jsonb NOT NULL DEFAULT '[]'`, so the column
+         * cannot be null — but it is `jsonb`, which means the TYPE is `unknown`
+         * and a row written by something other than this application could hold
+         * an object or a number. Narrowed rather than cast: a bad row becomes an
+         * empty list on one concept instead of a 500 on the whole chapter.
+         */
+        commonMistakes: Array.isArray(row.commonMistakes)
+          ? row.commonMistakes.filter((entry): entry is string => typeof entry === 'string')
+          : [],
+      }));
     },
 
     async findChapterById(id: string): Promise<ChapterRecord | null> {

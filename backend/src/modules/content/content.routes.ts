@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
 import type {
+  ChapterConceptsResponse,
   Chapter,
   ChapterResponse,
   ChaptersResponse,
@@ -66,6 +67,42 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRoutesD
     const { id } = parseInput(contentSchemas.chapterIdParam, request.params);
     const chapter = await deps.service.getChapter(requireActor(request), id);
     const body: ChapterResponse = { chapter: toChapter(chapter) };
+    return reply.status(200).send(body);
+  });
+
+  /**
+   * ======================================================================
+   * §8.3 — a chapter's CONCEPTS, which is the study walkthrough.
+   *
+   * `chapter_concepts` has held 639 of these since the corpus import — every
+   * one with an English explanation, 629 with Hindi — and no endpoint served
+   * them. The content was written, imported, indexed and stranded; this route
+   * is the whole of what was missing.
+   *
+   * The BILINGUAL FIELDS GO OUT AS PAIRS rather than resolved: the Hindi here
+   * is corpus content and is genuinely absent on some rows, so the client
+   * falls back, exactly as it already does for `titleHi` on a chapter.
+   * ======================================================================
+   */
+  app.get(`${API_PREFIX}/content/chapters/:id/concepts`, authenticated, async (request, reply) => {
+    const { id } = parseInput(contentSchemas.chapterIdParam, request.params);
+    const { chapter, concepts } = await deps.service.getChapterConcepts(requireActor(request), id);
+
+    const body: ChapterConceptsResponse = {
+      chapter: toChapter(chapter),
+      concepts: concepts.map((concept) => ({
+        id: concept.id,
+        conceptNumber: concept.conceptNumber,
+        titleEn: concept.titleEn,
+        titleHi: concept.titleHi,
+        learningObjective: concept.learningObjective,
+        explanationEn: concept.explanationEn,
+        explanationHi: concept.explanationHi,
+        exampleContent: concept.exampleContent,
+        keyFormula: concept.keyFormula,
+        commonMistakes: [...concept.commonMistakes],
+      })),
+    };
     return reply.status(200).send(body);
   });
 }

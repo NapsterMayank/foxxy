@@ -96,3 +96,23 @@ export interface QuestionQuery {
   readonly subjectCode: string;
   readonly limit: number;
 }
+
+/**
+ * One concept of a chapter, as this module reads it.
+ *
+ * Mirrors `chapterConceptSchema` on the wire. It is a separate declaration
+ * because the module type may one day carry fields the wire must not — the same
+ * separation `QuestionRecord` keeps, and for the same reason.
+ */
+export interface ConceptRecord {
+  readonly id: string;
+  readonly conceptNumber: number | null;
+  readonly titleEn: string;
+  readonly titleHi: string | null;
+  readonly learningObjective: string | null;
+  readonly explanationEn: string | null;
+  readonly explanationHi: string | null;
+  readonly exampleContent: string | null;
+  readonly keyFormula: string | null;
+  readonly commonMistakes: readonly string[];
+}

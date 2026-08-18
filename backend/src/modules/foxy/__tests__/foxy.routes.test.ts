@@ -188,6 +188,19 @@ describe('POST /api/v1/foxy/sessions/:id/messages — the stream', () => {
     // being a stream — perfect in development, broken in production.
     expect(response.headers['x-accel-buffering']).toBe('no');
 
+    /*
+     * THE CORS HEADERS ARE ASSERTED IN `foxy.sse-socket.test.ts`, NOT HERE.
+     *
+     * They cannot be checked through `app.inject`: this route hijacks the reply
+     * and writes to the raw socket, which light-my-request does not surface —
+     * and inject does not enforce CORS in the first place. An assertion here
+     * would fail against a correct implementation, which is worse than none.
+     *
+     * That blind spot is not academic. It hid a build in which this endpoint
+     * carried no `access-control-allow-origin` at all, so every browser blocked
+     * every Foxy turn while all 3,220 tests stayed green.
+     */
+
     const frames = parseFrames(response.body);
     expect(frames.some((frame) => frame.event === 'token')).toBe(true);
     expect(frames.at(-1)?.event).toBe('done');
