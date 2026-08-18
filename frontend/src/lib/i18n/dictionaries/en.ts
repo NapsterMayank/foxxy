@@ -91,6 +91,15 @@ export const en = {
     navLearn2: 'Study',
     navFoxy: 'Ask Foxy',
     navBilling: 'Plan',
+
+    /*
+     * The header identity, which is a LINK to the profile and not a sixth
+     * navigation item. Mobile navigation is already five columns wide, and
+     * open item 47 records the last time a sixth was refused on a guess about
+     * who the screen belongs to. A profile is reached from your own name.
+     */
+    identityAction: 'View and edit your profile',
+    identityUnknown: 'Your account',
   },
 
   auth: {
@@ -435,6 +444,55 @@ export const en = {
     loading: 'Loading your progress',
     errorTitle: 'Progress could not load',
     retryAction: 'Try again',
+  },
+
+  /**
+   * The profile screen — `GET`/`PATCH /me/profile`.
+   *
+   * THE BOARD IS NOT HERE BECAUSE IT IS NOT EDITABLE. The contract omits it
+   * from the PATCH on purpose: changing a board re-points the entire syllabus
+   * a student sees, which is a migration rather than a profile edit. A label
+   * for a field nobody can change is a label somebody will later attach an
+   * input to.
+   *
+   * `languageHint` exists because there are TWO languages on this product and
+   * this screen only sets one of them. The switch in the header changes what
+   * THIS INTERFACE is written in, on this device, and is stored in a cookie.
+   * The field below tells the server which language to answer in — Foxy's
+   * replies, a parent's digest, the sentences the backend composes. Somebody
+   * who changes one and expects the other to follow has been misled by us, so
+   * the screen says which is which.
+   */
+  profileScreen: {
+    eyebrow: 'Your account',
+    title: 'Your profile',
+    description: 'The name we call you, the class you are studying, and the language we answer in.',
+
+    displayNameLabel: 'Display name',
+    displayNameHint: 'This is the name Foxy and your parent see.',
+    gradeLabel: 'Grade',
+    gradeOption: 'Grade {grade}',
+    languageLabel: 'Language we answer in',
+    languageHint: 'Foxy and your reports use this. To change the language of this screen, use the switch at the top.',
+    boardLabel: 'Board',
+    boardNote: 'Your board is set when your account is created and cannot be changed here.',
+
+    action: 'Save changes',
+    unchangedHint: 'Change something to save.',
+    saved: 'Your profile is updated.',
+
+    errorDisplayNameRequired: 'Enter the name you want to be called.',
+    errorGradeRequired: 'Choose your grade.',
+    errorLanguageRequired: 'Choose a language.',
+    errorGeneric: 'Your profile could not be saved. Try again.',
+    errorConflict: 'Your profile changed somewhere else. Reload and try again.',
+
+    loading: 'Loading your profile',
+    errorTitle: 'Your profile could not load',
+    retryAction: 'Try again',
+    missingTitle: 'No profile yet',
+    missingDescription: 'Finish setting up your account and your profile will appear here.',
+    missingAction: 'Set up my account',
   },
 
   /**

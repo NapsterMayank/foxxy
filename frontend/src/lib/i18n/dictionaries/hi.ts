@@ -103,6 +103,9 @@ export const hi: Dictionary = {
     navLearn2: 'अध्ययन',
     navFoxy: 'Foxy से पूछें',
     navBilling: 'योजना',
+
+    identityAction: 'अपनी प्रोफ़ाइल देखें और बदलें',
+    identityUnknown: 'आपका खाता',
   },
 
   auth: {
@@ -392,6 +395,40 @@ export const hi: Dictionary = {
     loading: 'आपकी प्रगति खुल रही है',
     errorTitle: 'प्रगति खुल नहीं सकी',
     retryAction: 'फिर कोशिश करें',
+  },
+
+  profileScreen: {
+    eyebrow: 'आपका खाता',
+    title: 'आपकी प्रोफ़ाइल',
+    description:
+      'आपको किस नाम से बुलाया जाए, आप किस कक्षा में हैं, और हम किस भाषा में उत्तर दें।',
+
+    displayNameLabel: 'दिखने वाला नाम',
+    displayNameHint: 'यही नाम Foxy और आपके अभिभावक को दिखता है।',
+    gradeLabel: 'कक्षा',
+    gradeOption: 'कक्षा {grade}',
+    languageLabel: 'उत्तर की भाषा',
+    languageHint:
+      'Foxy और आपकी रिपोर्ट इसी भाषा में आएँगी। इस स्क्रीन की भाषा बदलने के लिए ऊपर दिए बटन का उपयोग करें।',
+    boardLabel: 'बोर्ड',
+    boardNote: 'बोर्ड खाता बनते समय तय होता है और यहाँ से नहीं बदला जा सकता।',
+
+    action: 'बदलाव सहेजें',
+    unchangedHint: 'सहेजने के लिए कुछ बदलें।',
+    saved: 'आपकी प्रोफ़ाइल अपडेट हो गई।',
+
+    errorDisplayNameRequired: 'वह नाम लिखें जिससे आपको बुलाया जाए।',
+    errorGradeRequired: 'अपनी कक्षा चुनें।',
+    errorLanguageRequired: 'एक भाषा चुनें।',
+    errorGeneric: 'आपकी प्रोफ़ाइल सहेजी नहीं जा सकी। फिर कोशिश करें।',
+    errorConflict: 'आपकी प्रोफ़ाइल कहीं और बदल गई है। पेज दोबारा खोलकर कोशिश करें।',
+
+    loading: 'आपकी प्रोफ़ाइल खुल रही है',
+    errorTitle: 'आपकी प्रोफ़ाइल खुल नहीं सकी',
+    retryAction: 'फिर कोशिश करें',
+    missingTitle: 'अभी कोई प्रोफ़ाइल नहीं',
+    missingDescription: 'अपना खाता सेट करना पूरा करें, फिर आपकी प्रोफ़ाइल यहाँ दिखेगी।',
+    missingAction: 'मेरा खाता सेट करें',
   },
 
   parentDashboard: {

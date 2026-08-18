@@ -18,6 +18,21 @@ interface ProductShellProps {
   navigation: readonly ProductNavigationItem[];
   roleLabel: string;
   userName: string;
+  /**
+   * The header identity, when the caller has a real one to render.
+   *
+   * A SLOT RATHER THAN A NAME, because the name is not knowable here. This is
+   * a server component; the session cookie belongs to `api.<domain>` and never
+   * reaches the Next server (see `session-gate.tsx`), so anything derived from
+   * the signed-in user has to be fetched in the browser by a client component
+   * the caller supplies. `src/components/**` may not import a feature — the
+   * `no-cross-feature-imports` rule — and this is how the shell gets feature
+   * data without depending on a feature.
+   *
+   * `userName` remains for the callers that have not been given one yet, and
+   * is what the avatar and the label fall back to.
+   */
+  identity?: ReactNode;
 }
 
 function NavigationLink({ href, isCurrent = false, label, marker }: ProductNavigationItem) {
@@ -68,7 +83,13 @@ function Brand({ t }: { t: Translator }) {
   );
 }
 
-export async function ProductShell({ children, navigation, roleLabel, userName }: ProductShellProps) {
+export async function ProductShell({
+  children,
+  identity,
+  navigation,
+  roleLabel,
+  userName,
+}: ProductShellProps) {
   const t = await getServerT();
 
   return (
@@ -87,17 +108,21 @@ export async function ProductShell({ children, navigation, roleLabel, userName }
           <div className="flex items-center gap-3">
             {/* Reachable from every screen, not buried in a settings page. */}
             <LanguageSwitch className="hidden sm:inline-flex" />
-            <div className="hidden text-right sm:block">
-              <p className="text-sm font-semibold text-ink">{userName}</p>
-              <p className="text-xs text-muted">{roleLabel}</p>
-            </div>
-            <span
-              aria-label={`${userName}, ${roleLabel}`}
-              className="grid size-avatar place-items-center rounded-full bg-brand-subtle text-sm font-extrabold text-brand-strong"
-              role="img"
-            >
-              {userName.slice(0, 1)}
-            </span>
+            {identity ?? (
+              <>
+                <div className="hidden text-right sm:block">
+                  <p className="text-sm font-semibold text-ink">{userName}</p>
+                  <p className="text-xs text-muted">{roleLabel}</p>
+                </div>
+                <span
+                  aria-label={`${userName}, ${roleLabel}`}
+                  className="grid size-avatar place-items-center rounded-full bg-brand-subtle text-sm font-extrabold text-brand-strong"
+                  role="img"
+                >
+                  {userName.slice(0, 1)}
+                </span>
+              </>
+            )}
           </div>
         </div>
       </header>
