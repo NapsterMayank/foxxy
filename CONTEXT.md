@@ -8,15 +8,16 @@ the ranked issue register; this file is the 30-second version.
 
 ## Current task
 
-**Next: the student dashboard — open item 51.** `/student` is the LAST fixture
-screen. It shows `sampleProgress` and a hard-coded name while Learn, Practice,
-Progress, Foxy, Parent and Billing all read live data, and it is the first screen
-a client sees after login. It is also where "continue where you left off" belongs:
-`/practice/progress` already carries `lastPractisedAt` per chapter.
+**No fixture screens remain.** 19 August closed items 45 and 51: `/student` reads
+mission, ledger and profile, and `/student/profile` is the first client
+`PATCH /me/profile` has ever had. The header shows the real display name.
 
-The one open design question is where that read lives, since
-`no-cross-feature-imports` stops the dashboard importing `features/progress`.
-Resolve it the way D-356 did — ownership follows the caller.
+**Next, in cost order:** item 52 (the false PREVIEW banner on every
+authenticated screen, 15 min), item 53 (option letter prefixes shuffled into
+`A) … C) … D) … B)`, 1 h, at import), item 49 (`questions` has no
+`hint_level_*` and no `question_hi` columns — a migration before any generation
+work), then item 46's visual baselines, which now need a human for two more
+routes.
 
 ## How to run it
 
@@ -41,6 +42,13 @@ Then **http://localhost:3001**, sign in as `demo@alfanumrik.com` /
 a fake. Run it before believing anything in this file.
 
 ## Key decisions from this session
+
+- **A profile you can edit, and a header that reads it** (D-379). The PATCH
+  sends only the fields that changed; a 404 is unfinished onboarding, not a
+  failure; `ProductShell` takes an `identity` SLOT because a server component
+  cannot read the session cookie.
+- **The dashboard is live and the week strip is gone** (D-380). No endpoint
+  carries a streak, so the decoration was deleted rather than faked.
 
 - **Guardian linking is code + OTP** (D-373). The old student-approval model
   could never complete — no endpoint gave a student the pending link's id.

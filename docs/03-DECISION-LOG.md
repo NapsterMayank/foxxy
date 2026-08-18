@@ -7185,3 +7185,64 @@ with nothing to press ends the session.
 
 The chapter NUMBER leads and the title follows: students are told "do chapter 6", and 63 of
 the 137 titles are placeholders the number has to carry.
+
+### D-379 · A profile you can edit, and a header that reads it
+
+`PATCH /me/profile` shipped with the learner module and no client ever called it. A student
+chose a display name, a grade and a preferred language once, during onboarding, and could
+never change any of them again. The contract was complete; the screen did not exist.
+
+**Decision:** `/student/profile`, reached from the student's own name in the header rather
+than from a sixth navigation item — mobile navigation is five columns wide, and item 47
+records the last time a sixth was refused on a guess about who a screen belongs to.
+
+**It sends the difference, not the form.** Correcting a spelling sends `{ displayName }`
+alone. Posting every field on every save rewrites values nobody touched, and that write is
+indistinguishable in the audit trail from a student who deliberately changed their class.
+The same fact disables the button while nothing differs: the contract refuses an empty
+PATCH, so there is no request to make.
+
+**A 404 is not an error on this screen.** It means onboarding was never finished — one
+click away — so it renders the empty state pointing there, with no retry, because retrying
+a 404 produces the same 404.
+
+**`ProductShell` gained an `identity` SLOT, not a name.** The shell is a server component and
+the session cookie is host-only on `api.<domain>`, so nothing about the signed-in user can be
+read there (the same fact that killed the Next proxy check `session-gate.tsx` records). A client
+component supplies it, `src/components/**` may not import a feature, and the layout — which
+may — passes it in. It shares the profile screen's query key, so the header shows the new
+name the moment a save lands, with no second fetch.
+
+The language field carries a hint, because the product has two language settings and this is
+only one of them: the header switch sets the language of the INTERFACE, on this device, in a
+cookie; this field sets the language the SERVER answers in. Neither is wrong, and a screen
+that did not say which was which would be.
+
+### D-380 · The student dashboard is live, and the week strip is gone
+
+`/student` was the last fixture screen and the first one a client saw after signing in:
+`sampleProgress`, a learner called Aarav, a chapter called "Fractions in everyday life", and
+a week of five squares with four filled.
+
+**Decision:** three reads — `/practice/mission`, `/practice/progress`, `/me/profile` — of
+which only the mission gates the render. The ledger fills tiles and one sentence and arrives
+when it arrives; the profile supplies a name, and its absence produces "Hello" rather than
+somebody else's name.
+
+**The week strip was deleted rather than wired.** No endpoint carries a streak. Practice
+history has sessions and dates, and turning those into "four learning days" is a product
+decision nobody has taken — inventing one in the client to keep a decoration is exactly how
+the fixture arrived.
+
+**"Where you left off" is the newest `lastPractisedAt`,** which `/practice/progress` has
+carried since it was built. It links to `/student/practice` and not to a chapter-specific
+URL, because that route takes no chapter parameter; a link that looks deeper than it is
+would be the next fixture to remove.
+
+**The dashboard owns its own wire calls** rather than importing practice's or the profile's —
+`no-cross-feature-imports` asking the D-356 question again, answered the same way: ownership
+follows the caller. Paths, generated schemas and cache keys are shared, so the duplication
+costs nothing at runtime and the dashboard and the progress screen resolve to one fetch.
+
+`student.greeting` lost its time of day: "Good afternoon" was rendered at every hour to
+every user.
