@@ -651,6 +651,31 @@ describe('adaptive serving', () => {
 });
 
 // ===========================================================================
+// A SESSION THAT ENDED EARLY IS SCORED AGAINST WHAT IT SERVED — Task 6
+// ===========================================================================
+
+describe('submitSession — scores against what was served, not the target', () => {
+  it('scores a session that ended early against what it served, not its target', async () => {
+    // The chapter holds two questions and the student asked for five. Scoring
+    // two correct answers out of a target of five would report 40% for a
+    // faultless attempt, and the anti-cheat count rule would fail it outright.
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy', 'easy']);
+
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 5,
+    });
+    const first = await answerCorrectly(account, session.id, session.questions[0]!, 10_000);
+    await answerCorrectly(account, session.id, first.nextQuestion!, 10_000);
+
+    const result = await harness.practice.service.submitSession(actorOf(account), session.id);
+
+    expect(result.questionCount).toBe(2);
+    expect(result.scorePercent).toBe(100);
+  });
+});
+
+// ===========================================================================
 // A VALID SUBMISSION WRITES EVERY TABLE
 // ===========================================================================
 

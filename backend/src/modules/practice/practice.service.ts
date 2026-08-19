@@ -1182,6 +1182,14 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
       }
 
       const answers = orderedAnswers(session);
+
+      /*
+       * THE SERVED COUNT, NOT THE TARGET. A chapter that ran dry ends a session
+       * early (Task 5); scoring those answers against a target that was never
+       * reachable reports a faultless attempt as a failure, and trips the
+       * anti-cheat count rule on top. The target governs how many questions are
+       * SERVED; this governs what the student is scored on.
+       */
       const questionCount = session.questionIds.length;
 
       const now = clock.now();
