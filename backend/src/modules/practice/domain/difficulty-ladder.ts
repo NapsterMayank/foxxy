@@ -131,8 +131,6 @@ export function pickRungWithFallback(wanted: Rung, available: ReadonlySet<Rung>)
     }
   }
 
-  if (candidates.length === 0) return null;
-
   candidates.sort((a, b) => a.distance - b.distance);
-  return candidates[0].rung;
+  return candidates.at(0)?.rung ?? null;
 }
