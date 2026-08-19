@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MIN_CREDIBLE_ANSWER_MS, TIME_TARGET_MS } from '../time-targets';
-import { classifyAnswer } from '../difficulty-ladder';
+import { classifyAnswer, pickRungWithFallback, rungAfter, startingRung } from '../difficulty-ladder';
 
 describe('TIME_TARGET_MS', () => {
   it('rises with difficulty and is stated in milliseconds', () => {
@@ -49,5 +49,87 @@ describe('classifyAnswer', () => {
   it('treats exactly the floor as credible', () => {
     expect(classifyAnswer({ isCorrect: true, timeSpentMs: MIN_CREDIBLE_ANSWER_MS, targetMs: target }))
       .toBe('qualifying');
+  });
+});
+
+describe('startingRung', () => {
+  it('starts a student who has shown nothing on easy', () => {
+    expect(startingRung(null)).toBe('easy');
+    expect(startingRung('not_assessed')).toBe('easy');
+    expect(startingRung('needs_another_session')).toBe('easy');
+  });
+
+  it('meets a developing student in the middle and a strong one at the top', () => {
+    expect(startingRung('developing')).toBe('medium');
+    expect(startingRung('strong')).toBe('hard');
+  });
+});
+
+describe('rungAfter', () => {
+  it('holds the starting rung when nothing has been answered', () => {
+    expect(rungAfter('medium', [])).toBe('medium');
+  });
+
+  it('steps up after two consecutive qualifying answers, not one', () => {
+    expect(rungAfter('easy', ['qualifying'])).toBe('easy');
+    expect(rungAfter('easy', ['qualifying', 'qualifying'])).toBe('medium');
+  });
+
+  it('needs two more to step again, because the streak resets on a step', () => {
+    expect(rungAfter('easy', ['qualifying', 'qualifying', 'qualifying'])).toBe('medium');
+    expect(rungAfter('easy', ['qualifying', 'qualifying', 'qualifying', 'qualifying']))
+      .toBe('hard');
+  });
+
+  it('steps down on a single wrong answer, from anywhere', () => {
+    expect(rungAfter('hard', ['wrong'])).toBe('medium');
+    expect(rungAfter('medium', ['wrong'])).toBe('easy');
+  });
+
+  it('breaks a qualifying streak with a wrong answer', () => {
+    expect(rungAfter('medium', ['qualifying', 'wrong', 'qualifying'])).toBe('easy');
+  });
+
+  it('steps down after two consecutive slow answers, not one', () => {
+    expect(rungAfter('hard', ['slow'])).toBe('hard');
+    expect(rungAfter('hard', ['slow', 'slow'])).toBe('medium');
+  });
+
+  it('does not step down for slow answers that are not consecutive', () => {
+    expect(rungAfter('hard', ['slow', 'qualifying', 'slow'])).toBe('hard');
+  });
+
+  it('clamps at both ends', () => {
+    expect(rungAfter('hard', ['qualifying', 'qualifying'])).toBe('hard');
+    expect(rungAfter('easy', ['wrong', 'wrong', 'wrong'])).toBe('easy');
+  });
+
+  it('lets a discounted answer move nothing and break nothing', () => {
+    // Under three seconds: no evidence either way. It must not step the ladder,
+    // and it must not destroy a streak the student legitimately built.
+    expect(rungAfter('easy', ['qualifying', 'discounted', 'qualifying'])).toBe('medium');
+    expect(rungAfter('medium', ['discounted', 'discounted', 'discounted'])).toBe('medium');
+  });
+
+  it('is a total function of the sequence, so replaying gives the same answer', () => {
+    const classes = ['qualifying', 'qualifying', 'wrong', 'slow', 'slow'] as const;
+    expect(rungAfter('easy', classes)).toBe(rungAfter('easy', classes));
+    expect(rungAfter('easy', classes)).toBe('easy');
+  });
+});
+
+describe('pickRungWithFallback', () => {
+  it('takes what was asked for when it is there', () => {
+    expect(pickRungWithFallback('medium', new Set(['easy', 'medium', 'hard']))).toBe('medium');
+  });
+
+  it('falls to the nearest rung when the chapter has none of the wanted one', () => {
+    expect(pickRungWithFallback('hard', new Set(['easy', 'medium']))).toBe('medium');
+    expect(pickRungWithFallback('easy', new Set(['medium', 'hard']))).toBe('medium');
+    expect(pickRungWithFallback('medium', new Set(['hard']))).toBe('hard');
+  });
+
+  it('says so plainly when the chapter has nothing left', () => {
+    expect(pickRungWithFallback('medium', new Set())).toBeNull();
   });
 });
