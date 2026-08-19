@@ -41,8 +41,6 @@ export const hi: Dictionary = {
     brandPrefix: 'Alfa',
     brandSuffix: 'numrik',
     loading: 'पृष्ठ खुल रहा है',
-    preview: 'झलक',
-    sampleData: 'नमूना जानकारी',
     languageLabel: 'भाषा',
     english: 'English',
     hindi: 'हिन्दी',
@@ -90,10 +88,8 @@ export const hi: Dictionary = {
   },
 
   shell: {
-    previewTitle: 'झलक',
-    previewNote: 'सेवाएँ जुड़ने तक यहाँ नमूना जानकारी दिखाई जा रही है।',
-    studentRole: 'विद्यार्थी झलक',
-    parentRole: 'अभिभावक झलक',
+    studentRole: 'विद्यार्थी',
+    parentRole: 'अभिभावक',
     navLearn: 'सीखें',
     navProgress: 'प्रगति',
     navPractice: 'अभ्यास',
@@ -242,11 +238,6 @@ export const hi: Dictionary = {
     intro: 'बिना किसी रैंकिंग या तुलना के, हाल की पढ़ाई का शांत और प्रमाण-आधारित सारांश देखें।',
     updatesEyebrow: 'हाल की जानकारी',
     updatesTitle: 'पढ़ाई की गतिविधि',
-  },
-
-  progress: {
-    eyebrow: 'सीखने के प्रमाण',
-    sampleLabel: 'नमूना प्रगति',
   },
 
   /** चार प्रमाण-लेबल — §9.1। कोई प्रतिशत नहीं, केवल शब्द। */

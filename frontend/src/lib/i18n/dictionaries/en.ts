@@ -29,8 +29,6 @@ export const en = {
     brandPrefix: 'Alfa',
     brandSuffix: 'numrik',
     loading: 'Loading page',
-    preview: 'Preview',
-    sampleData: 'Sample data',
     languageLabel: 'Language',
     english: 'English',
     hindi: 'हिन्दी',
@@ -78,10 +76,13 @@ export const en = {
   },
 
   shell: {
-    previewTitle: 'Preview',
-    previewNote: 'Sample information is shown while the product services are being connected.',
-    studentRole: 'Student preview',
-    parentRole: 'Parent preview',
+    /*
+     * "Student", not "Student preview" — item 52 again, one line over. The
+     * word was honest while these screens rendered fixtures and became a
+     * claim about the product that its own data contradicted.
+     */
+    studentRole: 'Student',
+    parentRole: 'Parent',
     navLearn: 'Learn',
     navProgress: 'Progress',
     navPractice: 'Practice',
@@ -259,11 +260,6 @@ export const en = {
     intro: 'See a calm, evidence-based summary of recent learning without ranking or comparison.',
     updatesEyebrow: 'Recent updates',
     updatesTitle: 'Learning activity',
-  },
-
-  progress: {
-    eyebrow: 'Learning evidence',
-    sampleLabel: 'Sample progress',
   },
 
   /**

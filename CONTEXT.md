@@ -12,8 +12,7 @@ the ranked issue register; this file is the 30-second version.
 mission, ledger and profile, and `/student/profile` is the first client
 `PATCH /me/profile` has ever had. The header shows the real display name.
 
-**Next, in cost order:** item 52 (the false PREVIEW banner on every
-authenticated screen, 15 min), item 53 (option letter prefixes shuffled into
+**Next, in cost order:** item 53 (option letter prefixes shuffled into
 `A) … C) … D) … B)`, 1 h, at import), item 49 (`questions` has no
 `hint_level_*` and no `question_hi` columns — a migration before any generation
 work), then item 44 (the hint ladder: contracted, unrouted, unpopulated).
@@ -54,6 +53,8 @@ a fake. Run it before believing anything in this file.
 - **The browser suite got fixtures** (D-382). `stubStudentData` in
   `tests/e2e/support/session.ts`, frozen in time. All 14 visual baselines
   re-recorded; 126 browser checks pass.
+- **Every "preview" claim is deleted** (D-383) — the banner, both role labels,
+  the parent header name, and the dead `ProgressSummary`.
 - **Guardian linking is code + OTP** (D-373). The old student-approval model
   could never complete — no endpoint gave a student the pending link's id.
 - **The SSE route had no CORS headers** (D-377), so Foxy was blocked in every
@@ -71,6 +72,8 @@ a fake. Run it before believing anything in this file.
   holding thousands. Use `count(*)`.
 - **The CORS allow-list and the CSRF origin allow-list are different lists**
   (D-082). Asserting against the wrong one makes correct code look broken.
+- **`playwright --update-snapshots` can pass without rewriting anything**
+  (D-383). Delete `visual.spec.ts-snapshots/` and regenerate, then run clean.
 - **A test fixture must satisfy the response schema.** `apiRequest` validates
   everything; a non-UUID id in a fixture renders as "nothing works".
 - **Signup is rate limited 3/hour per IP.** Clear it in dev with

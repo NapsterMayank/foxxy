@@ -97,6 +97,20 @@ describe('ProductShell', () => {
     expect(screen.getByRole('img', { name: 'Aarav, Student' })).toHaveTextContent('A');
   });
 
+  it('makes no claim that the product is a preview', async () => {
+    /*
+     * The sidebar card said "Sample information is shown while the product
+     * services are being connected" on every authenticated screen. It was true
+     * when the shell was built and false from 12 August, and it sat beside the
+     * live data contradicting it (open item 52). This test exists so it cannot
+     * come back with a screen that is genuinely unfinished — the honest place
+     * for that is on the screen itself, not on every screen forever.
+     */
+    await renderShell();
+    expect(screen.queryByText(/preview/i)).toBeNull();
+    expect(screen.queryByText(/sample/i)).toBeNull();
+  });
+
   it('lays the mobile bar out from the number of items, not a hardcoded count', async () => {
     // Adding a third link must not leave two columns and an overflow.
     const { container } = await renderShell([

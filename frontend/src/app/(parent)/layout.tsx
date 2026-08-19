@@ -15,7 +15,7 @@ export default async function ParentLayout({ children }: Readonly<{ children: Re
   return (
     <div data-theme="parent">
       <SessionGate role="parent">
-        <ProductShell navigation={navigation} roleLabel={t('shell.parentRole')} userName={t('shell.parentRole')}>
+        <ProductShell navigation={navigation} roleLabel={t('shell.parentRole')} userName={t('shell.identityUnknown')}>
           {children}
         </ProductShell>
       </SessionGate>

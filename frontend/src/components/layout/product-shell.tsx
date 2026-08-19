@@ -134,10 +134,14 @@ export async function ProductShell({
               <NavigationLink key={item.href} {...item} />
             ))}
           </nav>
-          <div className="mt-8 rounded-card border border-brand/15 bg-brand-subtle p-4">
-            <p className="text-xs font-bold uppercase tracking-widest text-brand">{t('shell.previewTitle')}</p>
-            <p className="mt-2 text-sm leading-6 text-muted">{t('shell.previewNote')}</p>
-          </div>
+          {/*
+            NO PREVIEW CARD. It said "Sample information is shown while the
+            product services are being connected", which was true when this
+            shell was built and false from 12 August, when the screens went
+            live one after another. It sat in the sidebar of every
+            authenticated page, contradicting the real data beside it, and on
+            a demo it was the first thing a viewer read (open item 52).
+          */}
         </aside>
 
         <main className="min-w-0 flex-1 px-4 pb-nav pt-6 sm:px-6 sm:pt-8 lg:px-8 lg:pb-12">{children}</main>

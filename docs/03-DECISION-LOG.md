@@ -7281,3 +7281,33 @@ re-record without looking.
 `foundation.spec.ts` was asserting the heading "Good afternoon, Aarav" — a fixture name and a
 time of day that no longer exist. That assertion had been stale since the dashboard went live
 and passed anyway, because it was only ever run against the fixture screen.
+
+### D-383 · Every "preview" claim is gone, and `--update-snapshots` cannot be trusted to rewrite
+
+The sidebar card said "Sample information is shown while the product services are being
+connected" on every authenticated screen. True when the shell was built; false from 12 August,
+as the screens went live one after another. On a demo it was the first thing a viewer read, and
+it contradicted the live data beside it (item 52).
+
+Deleting it turned up three more of the same claim, all of them stale for the same reason:
+
+- **`shell.studentRole` / `parentRole` were "Student preview" and "Parent preview"** — rendered
+  under the name in the header and in every navigation's accessible label.
+- **The parent layout passed that label as the USER NAME**, so the header read "Parent preview"
+  where a person's name belongs. It is now `identityUnknown` ("Your account"), the same fallback
+  the student header uses before its profile arrives. A parent has no learner profile to read a
+  name from — there is no parent profile endpoint anywhere in the backend.
+- **`ProgressSummary`** — the "Sample progress" card — had NO CALLER left once the dashboard
+  went live. A dead component whose only remaining job was to carry the word "sample". Deleted
+  with its test and its dictionary keys.
+
+A shell test now asserts the words "preview" and "sample" appear nowhere in the shell, so this
+cannot return quietly. The honest place for an unfinished-screen notice is that screen, not
+every screen forever.
+
+**THE TRAP WORTH RECORDING.** `playwright test --update-snapshots` reported "60 passed" and did
+not rewrite a single baseline, twice, against a build that had genuinely changed — verified
+afterwards by deleting one file and regenerating it, which produced a different hash. Do not
+read a passing `--update-snapshots` run as "the baselines are current". **Delete the snapshot
+directory and regenerate**, then run the suite again clean to prove the new files are what the
+app renders. That is what was done here: 28 files, then 126 browser checks green against them.
