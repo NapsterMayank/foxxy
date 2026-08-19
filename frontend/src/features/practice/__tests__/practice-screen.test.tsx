@@ -79,7 +79,7 @@ const Q2_QUESTION = question(Q2, 'What gas do leaves take in?', [
   'Helium',
 ]);
 
-function sessionWith(questions: ReturnType<typeof question>[]) {
+function sessionWith(questions: ReturnType<typeof question>[], targetQuestionCount = 2) {
   return {
     session: {
       id: SESSION_ID,
@@ -88,6 +88,7 @@ function sessionWith(questions: ReturnType<typeof question>[]) {
       submittedAt: null,
       answeredCount: 0,
       questions,
+      targetQuestionCount,
     },
   };
 }
@@ -410,6 +411,24 @@ describe('advancing on the question the server chose', () => {
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/submit'))).toBe(true);
     });
+  });
+
+  /*
+   * Controller ruling on the task-7 review: the total shown before the first
+   * answer must be the session's OWN `targetQuestionCount`, not a guess
+   * inferred from today's mission — a session can outlive the mission that
+   * started it. Mission fetch fails outright here, so there is no mission
+   * data of any kind to fall back to.
+   */
+  it('shows the true target before any answer, with no mission data available', async () => {
+    openSession();
+    route({
+      mission: () => json({ error: { code: 'INTERNAL_ERROR', message: 'x' } }, 500),
+      session: () => json(sessionWith([Q1_QUESTION], 6)),
+    });
+    render(<PracticeScreen />);
+
+    expect(await screen.findByText('Question 1 of 6')).toBeInTheDocument();
   });
 });
 

@@ -168,6 +168,15 @@ export const practiceSessionSchema = z.object({
   questions: z.array(practiceQuestionSchema),
   /** How many of them have an answer recorded so far. */
   answeredCount: z.number().int(),
+  /**
+   * How many questions this session is MEANT to have.
+   *
+   * `questions` carries only what has been SERVED, so its length is progress,
+   * not length. A client that needs a total before the first answer reads this
+   * — the alternative was inferring one from today's mission, which is a
+   * different number the moment a session outlives the mission that started it.
+   */
+  targetQuestionCount: z.number().int(),
 });
 export type PracticeSession = z.infer<typeof practiceSessionSchema>;
 

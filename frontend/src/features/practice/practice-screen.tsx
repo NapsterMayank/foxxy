@@ -68,17 +68,15 @@ export function PracticeScreen() {
    */
   const [currentQuestion, setCurrentQuestion] = useState<PracticeQuestion | null>(null);
   /*
-   * PROGRESS AS OF THE START OF THE CURRENTLY DISPLAYED QUESTION. The session
-   * response no longer carries a target length (only the answer result does),
-   * so this is what carries `answeredCount` / `questionCount` forward across an
-   * `advance()` for the question that has not been answered yet — the session's
-   * own `answeredCount` is a one-time snapshot from the GET and never refetched
-   * mid-session (see `usePracticeSession`'s `staleTime: Infinity`).
+   * ANSWERED-SO-FAR, AS OF THE START OF THE CURRENTLY DISPLAYED QUESTION. The
+   * session's own `answeredCount` is a one-time snapshot from the GET and
+   * never refetched mid-session (see `usePracticeSession`'s
+   * `staleTime: Infinity`), so this is what carries the count forward across
+   * an `advance()` for a question that has not been answered yet. The
+   * session's `targetQuestionCount` needs no such carrying: it is fixed for
+   * the whole session, so it is read straight off `session.data` below.
    */
-  const [progress, setProgress] = useState<{
-    readonly answeredCount: number;
-    readonly questionCount: number;
-  } | null>(null);
+  const [progress, setProgress] = useState<{ readonly answeredCount: number } | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [results, setResults] = useState<Readonly<Record<string, AnswerResult>>>({});
   const [summary, setSummary] = useState<SubmissionResult | null>(null);
@@ -152,18 +150,22 @@ export function PracticeScreen() {
   const isLast = result !== null && result.nextQuestion === null;
 
   /*
-   * BEFORE THIS QUESTION'S OWN RESULT ARRIVES, the display reads the progress
-   * carried forward from the question before it (or the session's snapshot, for
-   * the very first question). Once answered, `result.answeredCount` /
-   * `result.questionCount` — server truth — take over directly, which is also
-   * why the number on screen does not jump when the "Next" button is pressed:
+   * BEFORE THIS QUESTION'S OWN RESULT ARRIVES, the number on screen reads the
+   * count carried forward from the question before it (or the session's
+   * snapshot, for the very first question). Once answered, `result.
+   * answeredCount` — server truth — takes over directly, which is also why
+   * the number does not jump when the "Next" button is pressed:
    * `result.answeredCount` already counts the question being displayed.
+   *
+   * The total does not need any of that: `targetQuestionCount` is fixed for
+   * the whole session and the session response carries it from the start —
+   * unlike `answeredCount`, there is no "before the first answer" gap to fall
+   * back for (Task 7 fix-up: this used to guess from the day's mission, which
+   * is a different number the moment a session outlives it).
    */
   const priorAnsweredCount = progress?.answeredCount ?? session.data.session.answeredCount;
-  const priorQuestionCount =
-    progress?.questionCount ?? mission.data?.mission?.suggestedQuestionCount ?? priorAnsweredCount + 1;
   const questionNumber = result?.answeredCount ?? priorAnsweredCount + 1;
-  const questionCount = result?.questionCount ?? priorQuestionCount;
+  const questionCount = session.data.session.targetQuestionCount;
 
   function answer(): void {
     if (selectedIndex === null) return;
@@ -199,7 +201,7 @@ export function PracticeScreen() {
       });
       return;
     }
-    setProgress({ answeredCount: result.answeredCount, questionCount: result.questionCount });
+    setProgress({ answeredCount: result.answeredCount });
     setCurrentQuestion(result.nextQuestion);
     setSelectedIndex(null);
     setQuestionShownAt(Date.now());

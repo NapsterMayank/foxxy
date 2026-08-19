@@ -362,6 +362,39 @@ describe('adaptive serving', () => {
     expect(session.questions).toHaveLength(1);
   });
 
+  /*
+   * The client cannot show a true "of N" before the first answer without this
+   * — `AnswerResult.questionCount` is the only other place the target lives,
+   * and it does not exist until an answer has been submitted. `questions`
+   * only ever carries what has been SERVED, so its length is progress, not a
+   * total, and must not be read as one.
+   */
+  it('reports the target it was started with, and it does not move as questions are served', async () => {
+    const { account, chapterId } = await seedStudentWithDifficulties([
+      'easy',
+      'easy',
+      'medium',
+      'hard',
+    ]);
+
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 4,
+    });
+    expect(started.targetQuestionCount).toBe(4);
+    expect(started.questions).toHaveLength(1);
+
+    const fetched = await harness.practice.service.getSession(actorOf(account), started.id);
+    expect(fetched.targetQuestionCount).toBe(4);
+
+    await answerCorrectly(account, started.id, started.questions[0]!, 10_000);
+
+    const afterAnswer = await harness.practice.service.getSession(actorOf(account), started.id);
+    // Still 4 — serving a second question changes `questions`/`answeredCount`,
+    // never the target it was created with.
+    expect(afterAnswer.targetQuestionCount).toBe(4);
+  });
+
   it('serves the next question on the answer, and steps up after two quick correct ones', async () => {
     const { account, chapterId } = await seedStudentWithDifficulties([
       'easy',

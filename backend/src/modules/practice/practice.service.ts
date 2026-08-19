@@ -357,6 +357,7 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         toQuestionView(question, shuffleFor(session, question.id, question.options.length)),
       ),
       answeredCount: Object.keys(session.answers).length,
+      targetQuestionCount: session.targetQuestionCount,
     };
   }
 
