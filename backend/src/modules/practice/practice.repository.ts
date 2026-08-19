@@ -203,12 +203,25 @@ export interface PracticeRepository {
    *
    * `question_ids` grows by one and `option_order` gains exactly the one new
    * key — every earlier question's map is untouched. `where submitted_at is
-   * null` is the same guard `saveAnswers` carries, and the same answer:
+   * null` is the same guard `saveAnswers` carries, and the same answer.
    *
-   * Returns false when the session was submitted between the read that chose
-   * this question and this write — the same race `saveAnswers` guards against.
-   * The caller (`submitAnswer`) refuses with a `ConflictError` when this
-   * returns false, exactly as it does for a lost `saveAnswers` race.
+   * ALSO REFUSES WHEN `questionId` IS ALREADY IN `question_ids` — the fix for
+   * the review's Finding 1. Two `submitAnswer` calls in flight for the SAME
+   * open question both pass the "not yet answered" check (harmless: both
+   * write an identical answer), and without this second condition both would
+   * go on to choose and append the SAME next question: `array_append` does
+   * not deduplicate, so `question_ids` held it twice — a direct violation of
+   * "never served twice" — and the SECOND merge silently overwrote the
+   * shuffle map the first client was already rendering, translating that
+   * client's next tap through the wrong map. The condition is evaluated by
+   * Postgres inside the row lock the `UPDATE` already takes, so the second of
+   * two genuinely concurrent callers re-checks it against the FIRST caller's
+   * committed row rather than against a stale read — no separate compare-and-
+   * set is needed.
+   *
+   * Returns false when the session was submitted, OR this question was
+   * already served, between the read that chose it and this write. The
+   * caller (`submitAnswer`) refuses with a `ConflictError` either way.
    */
   appendServedQuestion(
     sessionId: string,
@@ -390,7 +403,15 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
           updatedAt: now,
         })
         .where(
-          and(eq(practiceSessions.id, sessionId), sql`${practiceSessions.submittedAt} is null`),
+          and(
+            eq(practiceSessions.id, sessionId),
+            sql`${practiceSessions.submittedAt} is null`,
+            // NEVER TWICE. Re-checked under the row lock the UPDATE already
+            // takes, so a second concurrent caller sees the FIRST caller's
+            // committed `question_ids` rather than the stale array it itself
+            // read — see the interface doc for the failure this closes.
+            sql`not (${practiceSessions.questionIds} @> array[${questionId}]::uuid[])`,
+          ),
         )
         .returning({ id: practiceSessions.id });
       return rows.length > 0;

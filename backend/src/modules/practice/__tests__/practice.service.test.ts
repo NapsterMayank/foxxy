@@ -399,26 +399,66 @@ describe('adaptive serving', () => {
   });
 
   it('does not step the ladder when the wanted difficulty is simply absent', async () => {
-    // A chapter with no hard questions must not read as a student who cannot
-    // handle them. The fallback serves medium; the rung stays where it was.
+    /**
+     * A DISCRIMINATING FIXTURE — review round 1, Finding 2.
+     *
+     * The first version of this test used a MEDIUM-ONLY pool with
+     * `evidence: 'strong'` (wants `hard`). That fixture is vacuous:
+     * `STEP_UP['hard'] = 'hard'`, so a BROKEN implementation that lets the
+     * fallback write back to the ladder converges on the exact same observed
+     * sequence (`medium, medium, medium`, three question ids) as the correct
+     * one — the ladder "moving" to `medium` and immediately re-stepping to
+     * `hard` is invisible from outside, because `hard` was already the
+     * ceiling. The test could not fail no matter which implementation ran.
+     *
+     * This fixture has EASY and HARD, no MEDIUM, with `evidence: 'developing'`
+     * (wants `medium`, absent every time it is asked). Two quick correct
+     * answers:
+     *
+     *   CORRECT (fallback never touches the ladder): the ladder replays as
+     *   medium -> medium -> hard (it only steps on the SECOND qualifying
+     *   answer). `medium` is never available, so draws 1 and 2 both fall back
+     *   to `easy` (the tie-break between equidistant `easy`/`hard`, pinned by
+     *   Task 2). Draw 3 wants `hard` — no fallback needed, since `hard` IS in
+     *   the pool. Observed: easy, easy, HARD.
+     *
+     *   BROKEN (a fallback draw is mistaken for where the ladder now stands):
+     *   after drawing `easy` for the content gap, the ladder is dragged down
+     *   to `easy` instead of staying at `medium`. One qualifying answer from
+     *   `easy` is not two, so it stays at `easy` and draws `easy` again — same
+     *   as correct, so this alone doesn't discriminate. The SECOND qualifying
+     *   answer is what does: from a ladder wrongly sitting at `easy`, two
+     *   qualifying answers step it to `medium` — available nowhere in this
+     *   pool — so the fallback draws `easy` a THIRD time. Observed: easy,
+     *   easy, EASY.
+     *
+     * The two sequences diverge at the third draw and only there — exactly
+     * the "moved or didn't" question this test exists to answer.
+     */
     const { account, chapterId } = await seedStudentWithDifficulties(
-      ['medium', 'medium', 'medium'],
-      { evidence: 'strong' },
+      ['easy', 'easy', 'hard', 'hard'],
+      { evidence: 'developing' },
     );
 
     const session = await harness.practice.service.startSession(actorOf(account), {
       chapterId,
       questionCount: 3,
     });
-    // `strong` wants `hard`; the chapter has none, so the fallback serves medium.
-    expect(session.questions[0]?.difficulty).toBe('medium');
+    // `developing` wants `medium`; the chapter has none, so the fallback
+    // (tied between `easy` and `hard`) serves `easy`.
+    expect(session.questions[0]?.difficulty).toBe('easy');
 
     const first = await answerCorrectly(account, session.id, session.questions[0]!, 5_000);
-    const second = await answerCorrectly(account, session.id, first.nextQuestion!, 5_000);
+    // One qualifying answer is not two — the ladder is still at `medium`,
+    // still absent, so the fallback serves `easy` again.
+    expect(first.nextQuestion?.difficulty).toBe('easy');
 
-    // The ladder never moved off `hard` — the fallback drew medium both times
-    // rather than recording the content gap as a judgement about the student.
-    expect(second.nextQuestion?.difficulty).toBe('medium');
+    const second = await answerCorrectly(account, session.id, first.nextQuestion!, 5_000);
+    // THE DISCRIMINATING ASSERTION. `hard` here is only reachable if the
+    // ladder stepped medium -> hard, which is only possible if it was still
+    // AT medium going into this answer — i.e. the two `easy` draws above
+    // never moved it.
+    expect(second.nextQuestion?.difficulty).toBe('hard');
 
     const { rows } = await harness.postgres.client.query<{ question_ids: string[] }>(
       `select question_ids from practice_sessions where id = $1`,
@@ -494,6 +534,119 @@ describe('adaptive serving', () => {
       harness.clock.now(),
     );
     expect(appended).toBe(false);
+  });
+
+  it('refuses to append a question that is already in question_ids — review round 1, Finding 1', async () => {
+    // The second half of `appendServedQuestion`'s guard: not just "was this
+    // session submitted", but "is this question already served". Proved
+    // directly and DETERMINISTICALLY here (no timing dependency) before the
+    // genuinely concurrent version below: the SAME not-yet-served question is
+    // appended twice back to back, and the second call must be refused.
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy', 'easy', 'easy']);
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 3,
+    });
+
+    const { rows: poolRows } = await harness.postgres.client.query<{ id: string }>(
+      `select id from questions where chapter_id = $1 and id <> $2`,
+      [chapterId, session.questions[0]!.id],
+    );
+    const nextQuestionId = poolRows[0]!.id;
+
+    const repository = createPracticeRepository(harness.container.poolFor('practice'));
+    const now = harness.clock.now();
+
+    const firstAppend = await repository.appendServedQuestion(session.id, nextQuestionId, [0], now);
+    expect(firstAppend).toBe(true); // A genuinely NEW question — the guard's positive case.
+
+    const secondAppend = await repository.appendServedQuestion(
+      session.id,
+      nextQuestionId,
+      [1, 0],
+      now,
+    );
+    expect(secondAppend).toBe(false); // Same id, now already present — refused.
+
+    const { rows } = await harness.postgres.client.query<{ question_ids: string[] }>(
+      `select question_ids from practice_sessions where id = $1`,
+      [session.id],
+    );
+    expect(rows[0]!.question_ids).toHaveLength(2); // [first, nextQuestionId] — not three.
+    expect(rows[0]!.question_ids.filter((id) => id === nextQuestionId)).toHaveLength(1);
+  });
+
+  it('never lets two concurrent answers to the SAME open question append the next one twice — Finding 1', async () => {
+    /**
+     * THE FAILURE SCENARIO FROM THE REVIEW, END TO END.
+     *
+     * Two `submitAnswer` calls in flight for the SAME open question both pass
+     * the "not yet answered" check and both write an identical answer to
+     * `saveAnswers` — harmless. Before the fix, both would then go on to
+     * `chooseQuestion` and `appendServedQuestion` for the SAME next question:
+     * `array_append` does not deduplicate, so `question_ids` held it twice,
+     * and the SECOND merge silently overwrote the first client's shuffle map
+     * out from under it.
+     *
+     * `random: () => 0.5` (the harness default) makes `chooseQuestion` pick
+     * deterministically, so both concurrent calls draw the SAME candidate —
+     * the exact collision the fix has to survive, not a coin flip that might
+     * dodge it.
+     *
+     * `Promise.all` fires both `submitAnswer` calls together; each does
+     * several real awaits against Postgres (`readMastery`, `readQuestions`,
+     * `appendServedQuestion`, …), so the event loop genuinely interleaves
+     * them rather than running one to completion before the other starts.
+     */
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy', 'easy', 'easy']);
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 3,
+    });
+    const question = session.questions[0]!;
+
+    harness.clock.advanceMs(10_000);
+    const outcomes = await Promise.allSettled([
+      harness.practice.service.submitAnswer(actorOf(account), session.id, {
+        questionId: question.id,
+        selectedIndex: correctPositionOf(question),
+        timeSpentMs: 10_000,
+        hintLevelUsed: 0,
+      }),
+      harness.practice.service.submitAnswer(actorOf(account), session.id, {
+        questionId: question.id,
+        selectedIndex: correctPositionOf(question),
+        timeSpentMs: 10_000,
+        hintLevelUsed: 0,
+      }),
+    ]);
+
+    // Exactly one caller actually served the next question; the other lost
+    // the race and was refused with a conflict — never both succeeding with
+    // the same id, and never both silently landing.
+    const fulfilled = outcomes.filter(
+      (outcome): outcome is PromiseFulfilledResult<AnswerResult> => outcome.status === 'fulfilled',
+    );
+    const rejected = outcomes.filter(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
+    );
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBeInstanceOf(ConflictError);
+
+    const { rows } = await harness.postgres.client.query<{
+      question_ids: string[];
+      option_order: Record<string, number[]>;
+    }>(`select question_ids, option_order from practice_sessions where id = $1`, [session.id]);
+
+    // NO DUPLICATE. `question_ids` is [first, next] — two entries, not three.
+    expect(rows[0]!.question_ids).toHaveLength(2);
+    expect(new Set(rows[0]!.question_ids).size).toBe(2);
+
+    // ONE UNTOUCHED MAP. The winner's `nextQuestion` id has exactly the map
+    // it was served with — never silently replaced by a second merge.
+    const nextId = fulfilled[0]!.value.nextQuestion!.id;
+    expect(rows[0]!.option_order[nextId]).toBeDefined();
   });
 });
 

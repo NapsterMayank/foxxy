@@ -1101,7 +1101,13 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
           );
           const order = [...buildShuffle(chosen.options.length, fractions)];
 
-          // THE SAME `where submitted_at is null` GUARD `saveAnswers` CARRIES.
+          // THE SAME `where submitted_at is null` GUARD `saveAnswers` CARRIES,
+          // PLUS a guard of its own: `appendServedQuestion` also refuses when
+          // `chosen.id` is already in `question_ids`. That second condition is
+          // what a losing caller hits when two answers to the SAME open
+          // question raced each other here and both drew the same next
+          // question — without it, the loser's append would have gone through
+          // a second time and duplicated the id.
           const appended = await repository.appendServedQuestion(
             session.id,
             chosen.id,
@@ -1109,8 +1115,10 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
             clock.now(),
           );
           if (!appended) {
-            throw new ConflictError('This session has already been submitted.', {
-              message: 'Serving the next question lost a race with submission',
+            throw new ConflictError('This question has already moved on.', {
+              message:
+                'Serving the next question lost a race — the session was submitted, or ' +
+                'another answer in flight for the same question already served it',
             });
           }
 
