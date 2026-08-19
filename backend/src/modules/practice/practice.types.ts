@@ -194,6 +194,15 @@ export interface SessionRecord {
   readonly chapterId: string;
   readonly tenantId: string;
   readonly questionIds: readonly string[];
+  /**
+   * How many questions this session is MEANT to have (Task 5).
+   *
+   * `questionIds` grows one at a time as `submitAnswer` serves the next
+   * question, so its length is PROGRESS, not the target. This is the target —
+   * `AnswerResult.questionCount` reports it, and `submitAnswer` compares
+   * `questionIds.length` against it to decide whether the session is done.
+   */
+  readonly targetQuestionCount: number;
   /** `{ [questionId]: presentationIndex -> canonicalIndex }`. */
   readonly optionOrder: Readonly<Record<string, readonly number[]>>;
   readonly answers: Readonly<Record<string, RecordedAnswer>>;

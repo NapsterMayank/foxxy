@@ -110,7 +110,10 @@ async function seed(): Promise<{ account: HarnessAccount; chapterId: string }> {
 const ANSWER_TIME_MS = 12_000;
 
 /**
- * Answers every question of a session through the HTTP surface.
+ * Answers every question of a session through the HTTP surface, walking
+ * `nextQuestion` off each answer — Task 5. A session now arrives with only
+ * its FIRST question; the rest come back one at a time as the answer that
+ * scored the one before them, and `null` ends the walk.
  *
  * THE CLOCK MOVES BY THE TIME BEING CLAIMED. `submitSession` clamps the claimed
  * total to `now - started_at` from the injected clock, so a session that claims
@@ -120,17 +123,20 @@ const ANSWER_TIME_MS = 12_000;
 async function answerAll(
   sessionId: string,
   cookie: string,
-  questions: readonly { id: string; questionText: string; options: string[] }[],
+  firstQuestions: readonly { id: string; questionText: string; options: string[] }[],
 ): Promise<void> {
-  for (const question of questions) {
+  let question = firstQuestions[0] ?? null;
+  while (question !== null) {
     const canonical = /correct=(\d)/.exec(question.questionText)?.[1] ?? '0';
     const position = question.options.findIndex((option) => option.endsWith(`option ${canonical}`));
     harness.clock.advanceMs(ANSWER_TIME_MS);
-    await post(
+    const response = await post(
       `/api/v1/practice/sessions/${sessionId}/answers`,
       { questionId: question.id, selectedIndex: position, timeSpentMs: ANSWER_TIME_MS },
       cookie,
     );
+    const result = answerResultResponseSchema.parse(response.json()).result;
+    question = result.nextQuestion;
   }
 }
 
@@ -183,7 +189,10 @@ describe('POST /practice/sessions', () => {
     expect(response.statusCode).toBe(201);
     const parsed = practiceSessionResponseSchema.safeParse(response.json());
     expect(parsed.success).toBe(true);
-    expect(parsed.success && parsed.data.session.questions).toHaveLength(4);
+    // A session now arrives with its FIRST question, not the whole target —
+    // Task 5. Every question after it comes back as `nextQuestion` on the
+    // answer that scores the one before it.
+    expect(parsed.success && parsed.data.session.questions).toHaveLength(1);
   });
 
   it('rejects a malformed body with a 400', async () => {

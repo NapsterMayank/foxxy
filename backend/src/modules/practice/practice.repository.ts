@@ -69,6 +69,7 @@ interface SessionRow {
   chapterId: string;
   tenantId: string;
   questionIds: string[];
+  targetQuestionCount: number;
   optionOrder: unknown;
   answers: unknown;
   startedAt: Date;
@@ -95,6 +96,7 @@ function toSessionRecord(row: SessionRow): SessionRecord {
     chapterId: row.chapterId,
     tenantId: row.tenantId,
     questionIds: row.questionIds,
+    targetQuestionCount: row.targetQuestionCount,
     optionOrder: (row.optionOrder ?? {}) as Record<string, number[]>,
     answers: (row.answers ?? {}) as Record<string, RecordedAnswer>,
     startedAt: row.startedAt,
@@ -193,6 +195,25 @@ export interface PracticeRepository {
   saveAnswers(
     sessionId: string,
     answers: Readonly<Record<string, RecordedAnswer>>,
+    now: Date,
+  ): Promise<boolean>;
+
+  /**
+   * Appends one served question and its shuffle to a session in flight (Task 5).
+   *
+   * `question_ids` grows by one and `option_order` gains exactly the one new
+   * key — every earlier question's map is untouched. `where submitted_at is
+   * null` is the same guard `saveAnswers` carries, and the same answer:
+   *
+   * Returns false when the session was submitted between the read that chose
+   * this question and this write — the same race `saveAnswers` guards against.
+   * The caller (`submitAnswer`) refuses with a `ConflictError` when this
+   * returns false, exactly as it does for a lost `saveAnswers` race.
+   */
+  appendServedQuestion(
+    sessionId: string,
+    questionId: string,
+    optionOrder: readonly number[],
     now: Date,
   ): Promise<boolean>;
 
@@ -345,6 +366,29 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
       const rows = await db
         .update(practiceSessions)
         .set({ answers, updatedAt: now })
+        .where(
+          and(eq(practiceSessions.id, sessionId), sql`${practiceSessions.submittedAt} is null`),
+        )
+        .returning({ id: practiceSessions.id });
+      return rows.length > 0;
+    },
+
+    async appendServedQuestion(
+      sessionId: string,
+      questionId: string,
+      optionOrder: readonly number[],
+      now: Date,
+    ): Promise<boolean> {
+      // The one new key, merged in rather than replacing the column — every
+      // earlier question's shuffle map survives untouched.
+      const merge = JSON.stringify({ [questionId]: [...optionOrder] });
+      const rows = await db
+        .update(practiceSessions)
+        .set({
+          questionIds: sql`array_append(${practiceSessions.questionIds}, ${questionId}::uuid)`,
+          optionOrder: sql`${practiceSessions.optionOrder} || ${merge}::jsonb`,
+          updatedAt: now,
+        })
         .where(
           and(eq(practiceSessions.id, sessionId), sql`${practiceSessions.submittedAt} is null`),
         )

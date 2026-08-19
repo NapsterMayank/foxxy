@@ -282,7 +282,19 @@ async function chapterSummary(chapterId: string): Promise<ChapterSummary | null>
 }
 
 interface Wiring {
-  readonly practice: PracticeService;
+  /**
+   * ANSWERS AND STARTS SESSIONS — never barrier-gated.
+   *
+   * Task 5 made `startSession` and `submitAnswer` call `readMastery` too, to
+   * pick the next question off the ladder. Those calls happen one student at a
+   * time inside `playSession`, sequentially, BEFORE the concurrent phase this
+   * file exists to create — gating them on the same barrier as `submit` would
+   * trip it during single-threaded setup, long before the two or three real
+   * submissions ever race.
+   */
+  readonly setup: PracticeService;
+  /** SUBMITS SESSIONS — the only calls the barrier below actually gates. */
+  readonly submit: PracticeService;
   readonly learner: LearnerService;
 }
 
@@ -305,36 +317,38 @@ function wire(barrier: Barrier | null): Wiring {
     readTenantOfStudent: (studentUserId: string) => tenantOfUser(studentUserId),
   });
 
-  const practice = createPracticeService({
-    repository: createPracticeRepository(handle),
-    clock,
-    logger,
-    readQuestions: (_actor, query) => questionsOfChapter(query.chapterId),
-    readChapter: (_actor, chapterId) => chapterSummary(chapterId),
-    listChapters: () => Promise.resolve([]),
-    readStudentContext: () => Promise.resolve({ grade: '8', subjects: ['science'] }),
+  function makePractice(gated: boolean): PracticeService {
+    return createPracticeService({
+      repository: createPracticeRepository(handle),
+      clock,
+      logger,
+      readQuestions: (_actor, query) => questionsOfChapter(query.chapterId),
+      readChapter: (_actor, chapterId) => chapterSummary(chapterId),
+      listChapters: () => Promise.resolve([]),
+      readStudentContext: () => Promise.resolve({ grade: '8', subjects: ['science'] }),
 
-    /**
-     * THE BARRIER SITS HERE. This is the last thing a submission does before
-     * `withTransaction`, so holding every party at this line guarantees they
-     * all computed their mastery step from the same stored value — the exact
-     * precondition of the lost update — and then race into their transactions
-     * together.
-     */
-    readMastery: async (actor, studentUserId): Promise<readonly MasterySnapshot[]> => {
-      const rows = await learner.getMastery(actor, studentUserId);
-      if (barrier !== null) await barrier.arrive();
-      return rows;
-    },
+      /**
+       * THE BARRIER SITS HERE, on the `submit` INSTANCE ONLY. This is the last
+       * thing a submission does before `withTransaction`, so holding every
+       * party at this line guarantees they all computed their mastery step
+       * from the same stored value — the exact precondition of the lost
+       * update — and then race into their transactions together.
+       */
+      readMastery: async (actor, studentUserId): Promise<readonly MasterySnapshot[]> => {
+        const rows = await learner.getMastery(actor, studentUserId);
+        if (gated && barrier !== null) await barrier.arrive();
+        return rows;
+      },
 
-    writeMastery: (actor, input) => learner.updateMastery(actor, input),
-    readTenantOfStudent: (studentUserId: string) => tenantOfUser(studentUserId),
-    // Constant, so the option order is fixed and every assertion below is about
-    // concurrency rather than about which option moved where.
-    random: () => 0.5,
-  });
+      writeMastery: (actor, input) => learner.updateMastery(actor, input),
+      readTenantOfStudent: (studentUserId: string) => tenantOfUser(studentUserId),
+      // Constant, so the option order is fixed and every assertion below is
+      // about concurrency rather than about which option moved where.
+      random: () => 0.5,
+    });
+  }
 
-  return { practice, learner };
+  return { setup: makePractice(false), submit: makePractice(true), learner };
 }
 
 /**
@@ -351,6 +365,10 @@ const CORRECT_OPTION_SUFFIX = ' option 0';
 /**
  * Starts a session on `chapterId` and answers every question, correctly or
  * wrongly as asked.
+ *
+ * WALKS `nextQuestion` (Task 5): the session arrives with one question, and
+ * every one after it is whatever the previous answer returns. `practice` here
+ * is always the UNGATED `setup` instance — see `Wiring`'s note on why.
  */
 async function playSession(
   practice: PracticeService,
@@ -363,7 +381,8 @@ async function playSession(
     questionCount: QUESTIONS_PER_SESSION,
   });
 
-  for (const question of session.questions) {
+  let question = session.questions[0] ?? null;
+  while (question !== null) {
     const correctPosition = question.options.findIndex((option) =>
       option.endsWith(CORRECT_OPTION_SUFFIX),
     );
@@ -375,12 +394,13 @@ async function playSession(
       ? correctPosition
       : (correctPosition + 1) % question.options.length;
 
-    await practice.submitAnswer(fixture.actor, session.id, {
+    const result = await practice.submitAnswer(fixture.actor, session.id, {
       questionId: question.id,
       selectedIndex,
       timeSpentMs: TIME_PER_QUESTION_MS,
       hintLevelUsed: 0,
     });
+    question = result.nextQuestion;
   }
 
   return session.id;
@@ -449,18 +469,18 @@ describe('D-241 — two concurrent submissions on ONE chapter produce TWO EMA st
     );
 
     const barrier = createBarrier(2);
-    const { practice } = wire(barrier);
+    const { setup, submit } = wire(barrier);
 
-    const firstSession = await playSession(practice, fixture, chapterId, false);
-    const secondSession = await playSession(practice, fixture, chapterId, false);
+    const firstSession = await playSession(setup, fixture, chapterId, false);
+    const secondSession = await playSession(setup, fixture, chapterId, false);
 
     clock.advanceMs(SESSION_WALL_CLOCK_MS);
 
     // GENUINELY CONCURRENT: launched together, never awaited in turn, and held
     // at the barrier until both have read the same prior mastery.
     const results = await Promise.all([
-      practice.submitSession(fixture.actor, firstSession),
-      practice.submitSession(fixture.actor, secondSession),
+      submit.submitSession(fixture.actor, firstSession),
+      submit.submitSession(fixture.actor, secondSession),
     ]);
 
     expect(results.map((result) => result.scorePercent)).toEqual([0, 0]);
@@ -485,15 +505,15 @@ describe('D-241 — two concurrent submissions on ONE chapter produce TWO EMA st
     );
 
     const barrier = createBarrier(2);
-    const { practice } = wire(barrier);
+    const { setup, submit } = wire(barrier);
 
-    const a = await playSession(practice, fixture, chapterId, false);
-    const b = await playSession(practice, fixture, chapterId, false);
+    const a = await playSession(setup, fixture, chapterId, false);
+    const b = await playSession(setup, fixture, chapterId, false);
     clock.advanceMs(SESSION_WALL_CLOCK_MS);
 
     await Promise.all([
-      practice.submitSession(fixture.actor, a),
-      practice.submitSession(fixture.actor, b),
+      submit.submitSession(fixture.actor, a),
+      submit.submitSession(fixture.actor, b),
     ]);
 
     // The loser retried rather than silently overwriting, and said so.
@@ -517,15 +537,15 @@ describe('D-241 — two concurrent submissions on ONE chapter produce TWO EMA st
     );
 
     const barrier = createBarrier(2);
-    const { practice } = wire(barrier);
+    const { setup, submit } = wire(barrier);
 
-    const a = await playSession(practice, fixture, chapterId, false);
-    const b = await playSession(practice, fixture, chapterId, false);
+    const a = await playSession(setup, fixture, chapterId, false);
+    const b = await playSession(setup, fixture, chapterId, false);
     clock.advanceMs(SESSION_WALL_CLOCK_MS);
 
     await Promise.all([
-      practice.submitSession(fixture.actor, a),
-      practice.submitSession(fixture.actor, b),
+      submit.submitSession(fixture.actor, a),
+      submit.submitSession(fixture.actor, b),
     ]);
 
     const responses = await sql(
@@ -577,17 +597,17 @@ describe('D-242 — concurrent submissions cannot jointly exceed the daily XP ca
     );
 
     const barrier = createBarrier(3);
-    const { practice } = wire(barrier);
+    const { setup, submit } = wire(barrier);
 
     const sessionIds: string[] = [];
     for (const chapterId of fixture.chapterIds) {
-      sessionIds.push(await playSession(practice, fixture, chapterId, true));
+      sessionIds.push(await playSession(setup, fixture, chapterId, true));
     }
 
     clock.advanceMs(SESSION_WALL_CLOCK_MS);
 
     const results = await Promise.all(
-      sessionIds.map((id) => practice.submitSession(fixture.actor, id)),
+      sessionIds.map((id) => submit.submitSession(fixture.actor, id)),
     );
 
     // Every session really did score full marks — otherwise the cap was never
@@ -627,15 +647,15 @@ describe('D-242 — concurrent submissions cannot jointly exceed the daily XP ca
     );
 
     const barrier = createBarrier(3);
-    const { practice } = wire(barrier);
+    const { setup, submit } = wire(barrier);
 
     const sessionIds: string[] = [];
     for (const chapterId of fixture.chapterIds) {
-      sessionIds.push(await playSession(practice, fixture, chapterId, true));
+      sessionIds.push(await playSession(setup, fixture, chapterId, true));
     }
     clock.advanceMs(SESSION_WALL_CLOCK_MS);
 
-    await Promise.all(sessionIds.map((id) => practice.submitSession(fixture.actor, id)));
+    await Promise.all(sessionIds.map((id) => submit.submitSession(fixture.actor, id)));
 
     // Four rows: the seeded one plus one per session, INCLUDING the zero-value
     // ones. "Awarded nothing" and "never submitted" must not look the same.
@@ -655,16 +675,16 @@ describe('D-242 — concurrent submissions cannot jointly exceed the daily XP ca
     );
 
     const barrier = createBarrier(3);
-    const { practice } = wire(barrier);
+    const { setup, submit } = wire(barrier);
 
     const sessionIds: string[] = [];
     for (const chapterId of fixture.chapterIds) {
-      sessionIds.push(await playSession(practice, fixture, chapterId, true));
+      sessionIds.push(await playSession(setup, fixture, chapterId, true));
     }
     clock.advanceMs(SESSION_WALL_CLOCK_MS);
 
     const results = await Promise.all(
-      sessionIds.map((id) => practice.submitSession(fixture.actor, id)),
+      sessionIds.map((id) => submit.submitSession(fixture.actor, id)),
     );
 
     expect(results.map((result) => result.xpAwarded)).toEqual([0, 0, 0]);
