@@ -7311,3 +7311,84 @@ afterwards by deleting one file and regenerating it, which produced a different 
 read a passing `--update-snapshots` run as "the baselines are current". **Delete the snapshot
 directory and regenerate**, then run the suite again clean to prove the new files are what the
 app renders. That is what was done here: 28 files, then 126 browser checks green against them.
+
+### D-384 · A session serves one question at a time, chosen as it goes
+
+Adaptive practice needs to know, before it draws the second question, whether the first was
+answered well and quickly — which means the difficulty a session serves cannot be fixed at
+`startSession`. The plan's original shape, and the one considered here, was a FROZEN SET: draw
+all `questionCount` questions up front, at whatever difficulty the student's mastery implied
+that day, and let the student work through them in order.
+
+**Decision:** `startSession` serves exactly one question, and `submitAnswer` returns the next
+one — chosen from the ladder replayed over every answer given in this session so far — or
+`null` when the target length is reached or the chapter has nothing left to serve. The client
+holds one question, not a list.
+
+**The frozen set was rejected because it cannot adapt to what it exists to adapt to.** A
+mastery snapshot taken at `startSession` describes the student BEFORE today's session, not
+during it — a student who answers the first three questions right has told the ladder
+something a set drawn a minute earlier cannot act on. Freezing the set would mean the
+"adaptive" system only ever adapts across sessions, on yesterday's evidence, while today's six
+questions run at one fixed difficulty regardless of how the student is actually doing — which
+is the exact behaviour this work exists to replace.
+
+`AnswerResult.questionCount` and `SubmissionResult.questionCount` carry different numbers on
+purpose. The first is the session's TARGET, read once by a progress indicator; the second is
+what was actually SERVED, read once the session is over. They differ only when a chapter runs
+dry before the target is reached, and a comment sits at both call sites saying so — the two
+fields looking identical is exactly how a future reader "fixes" one of them into a duplicate.
+
+### D-385 · The ladder is derived from the session, not stored on it
+
+Once a session serves one question at a time, something has to decide, after every answer,
+which difficulty to draw next. The considered alternative was a `current_rung` column on
+`practice_sessions`, updated in place as each answer lands — the obvious shape, and the one
+that matches how `mastery_score` already works.
+
+**Decision:** `classifyAnswer` and `rungAfter` (`domain/difficulty-ladder.ts`) are pure
+functions with no I/O. `rungAfter` is called on every question served, REPLAYING the session's
+answers-so-far into a rung: two qualifying answers in a row step it up, one wrong answer or two
+slow-but-correct ones step it down, and nothing else moves it. `startingRung` reads the
+student's evidence label from `chapter_mastery`, so a first session starts where nobody can
+fail on arrival.
+
+**A stored rung was rejected as a second source of truth for a number a twenty-item loop
+computes for free.** A session holds at most twenty answers; replaying them is not the
+expensive path a cache would be justified against. What a stored column buys instead is a
+place for the rung and the answers to disagree — a retried write that updates the column but
+not the response, or a migration that touches one and not the other, produces a session whose
+rows say one thing and whose `current_rung` says another, and nothing would notice until a
+teacher screen reads the wrong one. The replay cannot drift, because it has nothing to drift
+from.
+
+**The three-second floor is not a tuning knob.** `MIN_CREDIBLE_ANSWER_MS` (3,000ms) sits ahead
+of the correctness check in `classifyAnswer`: an answer given faster tells the ladder nothing,
+including when it is right, and is classified `discounted` rather than `qualifying` or `wrong`
+— it is recorded and counted, and it moves nothing. Removing the floor, or letting a fast
+correct answer step the rung up, would teach a student the fastest way to a harder question is
+to stop reading it, which is the same failure `anti-cheat.ts` already zeroes a whole attempt
+for at the same threshold. A ladder that rewarded exactly the behaviour the anti-cheat system
+exists to catch would have been fighting itself.
+
+### D-386 · `time_target_ms` is frozen onto the response, not read from the constant
+
+`TIME_TARGET_MS` (`domain/time-targets.ts` — easy 30s, medium 45s, hard 60s) is what
+`classifyAnswer` compares an answer's `timeSpentMs` against to decide `qualifying` versus
+`slow`. The considered alternative was reading it live: store nothing, and have any later query
+join `practice_responses.authored_difficulty` against the current constant.
+
+**Decision:** `practice_responses.time_target_ms` records the target that was actually in
+force for the difficulty a question was served at, at the moment it was served — the same
+freeze `authored_difficulty` already applies to the difficulty itself, for the same reason.
+
+**A live join was rejected because tuning the constants would rewrite history.** These targets
+are a first guess, not a measured floor, and they will move once real timing data exists. A
+live join means that the day `TIME_TARGET_MS.easy` changes from 30 seconds to 25, every
+response ever recorded at `easy` is retroactively reclassified — an answer that qualified in
+March starts reading as `slow` in a report run in April, with nothing about March having
+changed. That is precisely the mistake `authored_difficulty`'s own comment already warns
+against for the difficulty column, and a pace column that ignored the warning one field over
+would have reintroduced it. The frozen value is what makes the pace query in `PROGRESS.md`
+trustworthy at all: `avg(time_spent_ms) <= avg(time_target_ms)` means something stable only if
+`time_target_ms` cannot move under an already-recorded row.

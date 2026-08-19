@@ -609,6 +609,58 @@ corpus was re-counted after all of this and is byte-identical: 137 chapters,
 4,686 chunks, 2,741 questions, 639 concepts, 176 edges, 57 patterns, 773 held
 out.
 
+### Adaptive practice difficulty — 19 August 2026
+
+Migration `0008_adaptive_practice`: `practice_sessions.target_question_count`
+and `practice_responses.time_target_ms`. A session now serves ONE question at
+a time — `startSession` returns the first, `submitAnswer` returns the next,
+chosen from the ladder off the answers given so far, and `null` once the
+target is reached or the chapter runs dry (D-384). The ladder itself —
+`domain/difficulty-ladder.ts` — is pure: two qualifying answers in a row step
+the rung up, a wrong answer or two slow ones step it down, and an answer under
+`MIN_CREDIBLE_ANSWER_MS` (three seconds) moves nothing at all. It is REPLAYED
+from the session's own responses on every question served rather than stored
+on the row (D-385). `TIME_TARGET_MS` (`domain/time-targets.ts` — easy 30s,
+medium 45s, hard 60s) is frozen onto `practice_responses.time_target_ms` at
+the moment each question is served, so retuning the targets later cannot
+rewrite what "fast" meant for an answer already on the books (D-386). A drawn
+difficulty the chapter cannot supply falls back to the NEAREST available
+one without moving the ladder — a content gap must never be read as a
+judgement about the student.
+
+Proved end to end against a real Postgres, over HTTP:
+`backend/tests/integration/practice.integration.test.ts` walks a session up
+the ladder, asserts every stored response carries `time_target_ms` equal to
+`TIME_TARGET_MS[authored_difficulty]`, and — the assertion that actually
+proves the ladder moved rather than merely ran — asserts the difficulties
+served are not all the same one.
+
+**The pace query**, for the first person who needs it rather than
+reinventing it. The ladder's path through a session is `authored_difficulty`
+in `created_at` order — there is no column for it, because the rung is
+derived, not stored (D-385):
+
+```sql
+SELECT r.authored_difficulty,
+       count(*)                                                    AS answers,
+       round(avg(r.time_spent_ms) / 1000.0, 1)                     AS avg_seconds,
+       round(avg(r.time_target_ms) / 1000.0, 1)                    AS target_seconds,
+       round(100.0 * avg((r.time_spent_ms <= r.time_target_ms
+                          AND r.is_correct)::int), 0)              AS pct_qualifying
+FROM practice_responses r
+JOIN practice_sessions s ON s.id = r.session_id
+WHERE r.student_user_id = $1 AND s.chapter_id = $2
+GROUP BY r.authored_difficulty;
+```
+
+**Not yet decided: whether a hinted correct answer counts as qualifying.**
+Item 44's hint ladder is still contracted, unrouted and unpopulated — see the
+note beside it in section 7 — but the day it ships, `classifyAnswer` will need
+an answer to a question this session never had to ask: does a correct answer
+given after a hint step the rung up the same as one given cold, or does the
+hint only save the streak from a step down? Nothing in `difficulty-ladder.ts`
+takes a hint level today.
+
 ### Deployment, CI/CD, backups and alerting — 10 August 2026
 
 Resilience plan §5, §7, §8, §11, §12 and §13, and the CI/CD and pipeline
@@ -736,6 +788,7 @@ Build order from `docs/01-BACKEND-IMPLEMENTATION-PLAN.md` section 10.
 | ✅ 9 | `learner` | — | — |
 | ✅ 10 | **`foxy`** — module, migration `0005_foxy`, five endpoints (one SSE), 203 tests. Guided interface: 3 modes × 6 fixed actions, no open chat (D-163). Abstention never calls the model and is a successful answer (D-165); citations are verified mid-stream and fabrications stripped before the student sees them (D-164); the safety classifier runs before the model (D-166); a trace row per turn, including abstentions. **RUNS ON THE REAL MODEL since 17 August** — answers from the corpus with verified citations, and ABSTAINS rather than inventing when retrieval finds nothing (observed live: `abstained=t, chunks=0`). The grounding rail has now been exercised against a real model, which it never had been | — | — |
 | ✅ 11 | **`practice`** — module, migration `0002`, 231 tests, atomic submission across two modules | — | — |
+| ✅ + | **Adaptive practice difficulty — 19 August 2026.** Sessions serve ONE question at a time and the difficulty served moves on the answers actually given, not on a set fixed at `startSession` (D-384). The ladder — two qualifying answers step up, one wrong or two slow step down, an answer under three seconds moves nothing — is REPLAYED from the session's own responses rather than stored (D-385). `practice_responses.time_target_ms` freezes the pace target in force when each question was served, so retuning `TIME_TARGET_MS` cannot rewrite what "fast" meant for an answer already on the books (D-386). Migration `0008_adaptive_practice`. Proved end to end against a real Postgres: `tests/integration/practice.integration.test.ts` walks a session through the HTTP surface, asserts every stored response carries the target for the difficulty it was served at, and asserts the difficulties served are not all identical | — | — |
 | ✅ 12 | **`parent`** — module, migration `0003_parent`, six endpoints, the weekly digest seam filled into `notify`. **The transcript is now LIVE**: `0005_foxy` created the tables the catalogue probe was waiting for, so reads return `source: 'foxy'` rather than `not_yet_available` (D-171) | — | — |
 | ⬜ 13 | `billing` | 6 | Razorpay account |
 | ⬜ 14 | `notify` | 3 | Resend key |
@@ -1054,7 +1107,7 @@ Each was reported by the agent that found it and left deliberately, because it s
 | 48 | **The production image build downloads Google Fonts, so it needs the network and can fail for a reason nothing in the diff explains.** `next/font/google` fetches at BUILD time; two builds this session died with twelve `Can't resolve '@vercel/turbopack-next/internal/font/google/font'` errors and succeeded unchanged on retry. The fix is a DECISION rather than a patch: `next/font/local` with the two families' woff2 committed makes the build hermetic and offline-capable, at the cost of carrying font binaries and updating them by hand. CI has never run and will meet this eventually | frontend + ops | 0.5 d, with the decision |
 | 47 | **A student on a school-paid seat has nowhere to see that fact.** The billing screen ships under `(parent)`, because the contract is explicit that "nothing in this file says a parent pays" and the B2C-versus-school-pilot question is unresolved. Every billing endpoint resolves the subject from the SESSION, so a student route would work — it was not added rather than putting a fifth item in a mobile bottom navigation on a guess about who pays. Decide the model, then add the route | frontend + product | 0.5 d, with the answer |
 | ~~46~~ | ✅ **CLOSED — 19 August 2026, re-recorded on the operator's instruction.** All fourteen baselines now exist and pass a clean run: the twelve stale ones plus `student-profile` in both languages at both widths. **Recording them needed a fixture change first** — `/student` reads three endpoints now, and with no backend behind the browser suite an unstubbed read renders the error state, which has no `h1` and is not worth a baseline. `support/session.ts` gained `stubStudentData`, frozen in time so a rendered date cannot fail a screenshot next month. `foundation.spec.ts` asserted the heading "Good afternoon, Aarav", which is now "Hello, Meera"; `responsive.spec.ts` gained the profile route. **126 browser checks pass, 8 skipped** | frontend | done |
-| 44 | **The hint ladder is contracted, unrouted and unpopulated.** `practice.contract.ts` defines `hintQuerySchema` and `hintResponseSchema`; `practice.routes.ts` registers nothing that serves them, and `hint_level_1..3` are NULL on all 3,791 source questions (item 13). The practice screen therefore offers no hint affordance — a button today would 404 to fetch content that does not exist. Needs the route AND the generation, in that order | backend + section 6 | with item 13 |
+| 44 | **The hint ladder is contracted, unrouted and unpopulated.** `practice.contract.ts` defines `hintQuerySchema` and `hintResponseSchema`; `practice.routes.ts` registers nothing that serves them, and `hint_level_1..3` are NULL on all 3,791 source questions (item 13). The practice screen therefore offers no hint affordance — a button today would 404 to fetch content that does not exist. Needs the route AND the generation, in that order. **Also needs an answer the difficulty ladder does not have yet** (19 August): does a correct answer given after a hint count as `qualifying` the same as one given cold, or does the hint only protect against a step down? `classifyAnswer` takes no hint level today | backend + section 6 | with item 13 |
 | ~~45~~ | ~~**The student dashboard is still fixtures, and now points at real screens.**~~ **CLOSED 19 August 2026 — the same work as item 51, which restated it.** See D-380 | frontend | done |
 | 41 | **The bundle-budget gate measures a file Next 16.3 does not emit.** `check-bundle-budget.mjs` reads `.next/app-build-manifest.json`; it is absent from a real build and `APP_BUILD_MANIFEST` is gone from Next's constants — only `client-reference-manifest` remains. Its ten unit tests pass against a SYNTHETIC `.next` the script's own author defined, so the shape was never checked against a build. Rebuilding it means reconstructing the App Router chunk graph from each route's `page_client-reference-manifest.js` | frontend | 0.5 d |
 | 42 | **LCP is over budget on two auth screens.** First Lighthouse run ever (12 August, against the container): `/` passes; `/login?role=student` 2870 ms and `/onboarding?role=student` 2873 ms against a 2500 ms budget. TBT and CLS pass everywhere. The two numbers being within 3 ms of each other points at something shared in `AuthShell`, not at either page. **One run, not the median of three the config asserts, and on developer hardware** — treat as a signal, not the verdict | frontend | 0.5 d |

@@ -8,15 +8,24 @@ the ranked issue register; this file is the 30-second version.
 
 ## Current task
 
-**No fixture screens remain.** 19 August closed items 45 and 51: `/student` reads
-mission, ledger and profile, and `/student/profile` is the first client
-`PATCH /me/profile` has ever had. The header shows the real display name.
+**Adaptive practice difficulty is built, proved end to end, and documented.**
+A session now serves one question at a time and the difficulty served moves on
+the answers actually given — up on two quick correct answers, down on one
+wrong or two slow ones, unmoved by anything under three seconds. Migration
+`0008_adaptive_practice`. `tests/integration/practice.integration.test.ts`
+walks a real session through the HTTP surface against a real Postgres and
+proves both halves: every stored response carries the pace target for the
+difficulty it was served at, and the difficulties served are not all the same
+one. Both suites are green; the 14 visual baselines are re-recorded for the
+changed practice screen and pass clean on a second run.
 
 **Next, in cost order:** item 53 (option letter prefixes shuffled into
 `A) … C) … D) … B)`, 1 h, at import), item 49 (`questions` has no
 `hint_level_*` and no `question_hi` columns — a migration before any generation
-work), then item 44 (the hint ladder: contracted, unrouted, unpopulated).
-Item 46's baselines are done.
+work), then item 44 (the hint ladder: contracted, unrouted, unpopulated — and
+now it also owes the difficulty ladder an answer, since `classifyAnswer` takes
+no hint level today and a hinted correct answer's effect on the rung is
+undecided).
 
 ## How to run it
 
@@ -42,6 +51,17 @@ a fake. Run it before believing anything in this file.
 
 ## Key decisions from this session
 
+- **A session serves one question at a time, chosen as it goes** (D-384). A
+  frozen set drawn at `startSession` cannot adapt to the answers it exists to
+  adapt to — `AnswerResult.questionCount` is the target, `SubmissionResult`'s
+  is what was actually served, and they differ only when a chapter runs dry.
+- **The ladder is replayed from the session's answers, never stored** (D-385).
+  Two qualifying answers step it up, one wrong or two slow step it down, and
+  the three-second floor is not negotiable — `anti-cheat.ts` already zeroes an
+  attempt for exactly that behaviour.
+- **`time_target_ms` is frozen onto the response** (D-386), so retuning
+  `TIME_TARGET_MS` cannot rewrite what "fast" meant for an answer already on
+  the books. The pace query lives in `PROGRESS.md` beside the practice section.
 - **A profile you can edit, and a header that reads it** (D-379). The PATCH
   sends only the fields that changed; a 404 is unfinished onboarding, not a
   failure; `ProductShell` takes an `identity` SLOT because a server component
