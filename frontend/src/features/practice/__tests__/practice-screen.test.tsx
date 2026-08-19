@@ -78,15 +78,27 @@ const Q2_QUESTION = question(Q2, 'What gas do leaves take in?', [
   'Nitrogen',
   'Helium',
 ]);
+/** A third served question, for the resume tests below. */
+const Q3 = '55555555-5555-4555-8555-555555555555';
+const Q3_QUESTION = question(Q3, 'Where does a plant store its food?', [
+  'Fruit',
+  'Petal',
+  'Pollen',
+  'Sepal',
+]);
 
-function sessionWith(questions: ReturnType<typeof question>[], targetQuestionCount = 2) {
+function sessionWith(
+  questions: ReturnType<typeof question>[],
+  targetQuestionCount = 2,
+  answeredCount = 0,
+) {
   return {
     session: {
       id: SESSION_ID,
       chapterId: mission.mission.chapterId,
       startedAt: '2026-08-15T09:00:00.000Z',
       submittedAt: null,
-      answeredCount: 0,
+      answeredCount,
       questions,
       targetQuestionCount,
     },
@@ -484,6 +496,55 @@ describe('the result', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'This practice session is no longer available.',
     );
+  });
+});
+
+describe('resuming a session after a refresh', () => {
+  /*
+   * =========================================================================
+   * REVIEW ROUND 2, FINDING 3 — the resume used to land on `questions[0]`.
+   *
+   * The session id is in the URL, so a refresh, a back-navigation or an app
+   * restart re-enters the screen with no in-memory question. Falling back to
+   * the FIRST served question put an already-answered question on screen, and
+   * every route forward from it was a 409: answers cannot be changed (D-281)
+   * and the Next button does not exist until an answer lands.
+   *
+   * The serving loop guarantees at most ONE served question is unanswered, so
+   * the open one is the LAST served — which is what the client must show.
+   * =========================================================================
+   */
+  it('shows the last served question, not the first, when some are already answered', async () => {
+    openSession();
+    route({
+      session: () => json(sessionWith([Q1_QUESTION, Q2_QUESTION, Q3_QUESTION], 3, 2)),
+    });
+    render(<PracticeScreen />);
+
+    expect(await screen.findByText('Where does a plant store its food?')).toBeInTheDocument();
+    expect(screen.queryByText('Which part of a plant makes food?')).not.toBeInTheDocument();
+    expect(screen.queryByText('What gas do leaves take in?')).not.toBeInTheDocument();
+    // Two answered, so the one on screen is the third.
+    expect(screen.getByText('Question 3 of 3')).toBeInTheDocument();
+  });
+
+  it('offers to finish rather than re-showing a question when everything served is answered', async () => {
+    openSession();
+    route({
+      session: () => json(sessionWith([Q1_QUESTION, Q2_QUESTION], 2, 2)),
+    });
+    render(<PracticeScreen />);
+
+    const finish = await screen.findByRole('button', { name: 'Finish and see my result' });
+    // Nothing is re-served: neither answered question is on screen.
+    expect(screen.queryByText('Which part of a plant makes food?')).not.toBeInTheDocument();
+    expect(screen.queryByText('What gas do leaves take in?')).not.toBeInTheDocument();
+    // And the load did not submit by itself — a session is finished by a tap.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/submit'))).toBe(false);
+
+    fireEvent.click(finish);
+
+    expect(await screen.findByText('Session complete')).toBeInTheDocument();
   });
 });
 

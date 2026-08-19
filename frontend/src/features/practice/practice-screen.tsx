@@ -133,9 +133,62 @@ export function PracticeScreen() {
     );
   }
 
-  const question = currentQuestion ?? session.data.session.questions[0] ?? null;
+  /*
+   * ===========================================================================
+   * RESUMING: THE OPEN QUESTION IS THE LAST ONE SERVED, NEVER THE FIRST.
+   *
+   * The session id is in the URL, so a refresh, a back-navigation or an app
+   * restart mid-session re-enters here with `currentQuestion` back to `null`.
+   * This used to fall back to `questions[0]` — a question that has already been
+   * answered on any session past its first — and every route forward from it
+   * was a 409: the answer endpoint refuses a second answer (D-281) and there is
+   * no Next button until an answer lands.
+   *
+   * The serving loop is what makes the right question identifiable from what
+   * the client already holds: `questions` carries exactly what has been SERVED,
+   * and at most ONE served question is ever unanswered. So
+   * `answeredCount === questions.length` means everything served is answered —
+   * there is nothing to show and the session is ready to submit — and otherwise
+   * the open one is the last served.
+   * ===========================================================================
+   */
+  const served = session.data.session.questions;
+  const everythingServedIsAnswered =
+    served.length > 0 && session.data.session.answeredCount >= served.length;
+  const question = currentQuestion ?? (everythingServedIsAnswered ? null : (served.at(-1) ?? null));
 
   if (question === null) {
+    if (everythingServedIsAnswered) {
+      // Resumed with every served question answered. Submitting is the only
+      // thing left, and it is the student's tap rather than a render-time
+      // side effect — a session must not be finished by a page load.
+      return (
+        <div className="space-y-4">
+          <p className="text-sm leading-body text-ink">{t('practice.resumeReadyDescription')}</p>
+          <Button
+            disabled={submitMutation.isPending}
+            onClick={() => {
+              submitMutation.mutate(sessionId, {
+                onSuccess: (response) => {
+                  setSummary(response.result);
+                },
+              });
+            }}
+          >
+            {t('practice.finishAction')}
+          </Button>
+          {submitMutation.error === null ? null : (
+            <p className="text-sm font-semibold text-danger" role="alert">
+              {practiceErrorMessage(submitMutation.error, t, {
+                conflict: 'practice.errorSubmitConflict',
+                fallback: 'practice.errorGeneric',
+              })}
+            </p>
+          )}
+        </div>
+      );
+    }
+
     // An empty session is a server-side condition, not a student one. It has no
     // recovery on this screen beyond starting again elsewhere.
     return (
@@ -145,6 +198,13 @@ export function PracticeScreen() {
       />
     );
   }
+
+  /*
+   * The same question, bound AFTER the null check above so the handlers below
+   * can read it. A closure cannot re-derive a narrowing made by an early
+   * return in the branchy block above it.
+   */
+  const openQuestion: PracticeQuestion = question;
 
   const result = results[question.id] ?? null;
   const isLast = result !== null && result.nextQuestion === null;
@@ -174,7 +234,7 @@ export function PracticeScreen() {
       {
         sessionId: sessionId ?? '',
         answer: {
-          questionId: question.id,
+          questionId: openQuestion.id,
           selectedIndex,
           timeSpentMs: elapsedMsBetween(questionShownAt, Date.now()),
           hintLevelUsed: 0,

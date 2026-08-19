@@ -15,6 +15,16 @@ import { defineConfig } from 'vitest/config';
  * the files it matches; overlapping patterns make it ambiguous which floor
  * applies, and an ambiguous gate is one people argue with instead of fix.
  *
+ * A GLOB'S FLOOR IS A GROUP TOTAL, NOT A PER-FILE OR PER-DIRECTORY ONE — and
+ * the `text` reporter's table invites exactly that misreading. Vitest pools
+ * every file a glob matches and compares the pooled percentage, so the
+ * feature-lib glob below is judged on all seven feature `lib` directories at
+ * once (95.4% statements as this is written), not on the 93.75% one of them
+ * happens to show in the table. A directory below the floor is therefore not
+ * on its own evidence of anything, and it is not evidence the gate is off:
+ * raising this floor to 100 fails `npm run test:coverage` with exit 1 and the
+ * glob named in the message, which is how to check that it is armed.
+ *
  * Two areas the plan's table does not name get a floor anyway, stated here
  * rather than left to the global default:
  *   `src/lib/api`      the typed client and the error table — the error table
