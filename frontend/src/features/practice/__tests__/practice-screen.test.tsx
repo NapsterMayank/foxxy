@@ -50,35 +50,64 @@ const mission = {
   },
 };
 
-const sessionBody = {
-  session: {
-    id: SESSION_ID,
-    chapterId: mission.mission.chapterId,
-    startedAt: '2026-08-15T09:00:00.000Z',
-    submittedAt: null,
-    answeredCount: 0,
-    questions: [
-      {
-        id: Q1,
-        questionText: 'Which part of a plant makes food?',
-        options: ['Root', 'Leaf', 'Stem', 'Flower'],
-        difficulty: 'medium',
-        bloomLevel: 'understand',
-        hintLevelsAvailable: [],
-      },
-      {
-        id: Q2,
-        questionText: 'What gas do leaves take in?',
-        options: ['Oxygen', 'Carbon dioxide', 'Nitrogen', 'Helium'],
-        difficulty: 'medium',
-        bloomLevel: 'remember',
-        hintLevelsAvailable: [],
-      },
-    ],
-  },
-};
+/*
+ * ONE FIXTURE QUESTION EACH — a session now arrives with a single question,
+ * not the whole set, so `sessionWith` below takes exactly the ones that are
+ * "on the wire so far" rather than the full plan.
+ */
+function question(id: string, questionText: string, options: string[]) {
+  return {
+    id,
+    questionText,
+    options,
+    difficulty: 'medium',
+    bloomLevel: 'understand',
+    hintLevelsAvailable: [],
+  };
+}
 
-function answerBody(questionId: string, isCorrect: boolean) {
+const Q1_QUESTION = question(Q1, 'Which part of a plant makes food?', [
+  'Root',
+  'Leaf',
+  'Stem',
+  'Flower',
+]);
+const Q2_QUESTION = question(Q2, 'What gas do leaves take in?', [
+  'Oxygen',
+  'Carbon dioxide',
+  'Nitrogen',
+  'Helium',
+]);
+
+function sessionWith(questions: ReturnType<typeof question>[]) {
+  return {
+    session: {
+      id: SESSION_ID,
+      chapterId: mission.mission.chapterId,
+      startedAt: '2026-08-15T09:00:00.000Z',
+      submittedAt: null,
+      answeredCount: 0,
+      questions,
+    },
+  };
+}
+
+const sessionBody = sessionWith([Q1_QUESTION]);
+
+/**
+ * `nextQuestion` is the whole point of Task 7: `null` means the session is
+ * over, and anything else is the question the server has decided to serve
+ * next — the client shows it only once this same call resolves.
+ */
+function answerBody(
+  questionId: string,
+  isCorrect: boolean,
+  overrides: {
+    nextQuestion?: ReturnType<typeof question> | null;
+    answeredCount?: number;
+    questionCount?: number;
+  } = {},
+) {
   return {
     result: {
       questionId,
@@ -87,8 +116,9 @@ function answerBody(questionId: string, isCorrect: boolean) {
       explanation: 'Leaves hold the chlorophyll.',
       decision: isCorrect ? 'advance' : 'remediate_general',
       misconceptionCode: null,
-      answeredCount: 1,
-      questionCount: 2,
+      answeredCount: overrides.answeredCount ?? 1,
+      questionCount: overrides.questionCount ?? 2,
+      nextQuestion: overrides.nextQuestion ?? null,
     },
   };
 }
@@ -151,9 +181,23 @@ function route(
        * matched a result and the finish button never appeared — the screen
        * keys answers by question id, and a fake that ignores the id cannot
        * exercise that.
+       *
+       * The default `nextQuestion` walks Q1 -> Q2 -> null, so the two-question
+       * journey (answer, "Next question", answer, "Finish and see my result")
+       * works out of the box for tests that do not care what is served next.
        */
       return Promise.resolve(
-        (handlers.answer ?? (() => json(answerBody(String(sent.questionId), false))))(),
+        (
+          handlers.answer ??
+          (() =>
+            json(
+              answerBody(String(sent.questionId), false, {
+                nextQuestion: sent.questionId === Q1 ? Q2_QUESTION : null,
+                answeredCount: sent.questionId === Q1 ? 1 : 2,
+                questionCount: 2,
+              }),
+            ))
+        )(),
       );
     }
     if (target.includes('/submit')) {
@@ -323,6 +367,49 @@ describe('answering', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Check my answer' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('answers cannot be changed');
+  });
+});
+
+describe('advancing on the question the server chose', () => {
+  /*
+   * The session arrives with ONE question. The next one comes back on the
+   * answer, so the client never holds a question the student has not reached
+   * — no local list to walk, no prefetch ahead of the answer that produces it.
+   */
+  it('moves on to the question the server chose, without asking for the set up front', async () => {
+    openSession();
+    route({
+      answer: () =>
+        json(
+          answerBody(Q1, true, { nextQuestion: Q2_QUESTION, answeredCount: 1, questionCount: 6 }),
+        ),
+    });
+    render(<PracticeScreen />);
+
+    expect(await screen.findByText(Q1_QUESTION.questionText)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Leaf' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check my answer' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Next question' }));
+
+    expect(await screen.findByText(Q2_QUESTION.questionText)).toBeInTheDocument();
+  });
+
+  it('submits when the server says there is no next question', async () => {
+    openSession();
+    route({
+      answer: () =>
+        json(answerBody(Q1, true, { nextQuestion: null, answeredCount: 1, questionCount: 1 })),
+    });
+    render(<PracticeScreen />);
+
+    fireEvent.click(await screen.findByRole('radio', { name: 'Leaf' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check my answer' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Finish and see my result' }));
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/submit'))).toBe(true);
+    });
   });
 });
 

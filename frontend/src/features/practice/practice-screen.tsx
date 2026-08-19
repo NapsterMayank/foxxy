@@ -4,7 +4,11 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useState } from 'react';
 import { EmptyState, ErrorState, LoadingState } from '@/components/patterns/states';
 import { Button } from '@/components/ui/button';
-import type { AnswerResult, SubmissionResult } from '@/lib/api/generated/contracts/practice.contract';
+import type {
+  AnswerResult,
+  PracticeQuestion,
+  SubmissionResult,
+} from '@/lib/api/generated/contracts/practice.contract';
 import { useT } from '@/lib/i18n/i18n-provider';
 import { AnswerFeedback } from './components/answer-feedback';
 import { MissionCard } from './components/mission-card';
@@ -56,7 +60,25 @@ export function PracticeScreen() {
   const answerMutation = useSubmitAnswer();
   const submitMutation = useSubmitPracticeSession();
 
-  const [currentIndex, setCurrentIndex] = useState(0);
+  /*
+   * THE CURRENT QUESTION, NOT AN INDEX INTO A LIST THE CLIENT NEVER HOLDS.
+   * A session now arrives with ONE question; each answer's response carries the
+   * next one the server chose (or `null` when the session is over). `null` here
+   * means "still on the question the session was seeded with".
+   */
+  const [currentQuestion, setCurrentQuestion] = useState<PracticeQuestion | null>(null);
+  /*
+   * PROGRESS AS OF THE START OF THE CURRENTLY DISPLAYED QUESTION. The session
+   * response no longer carries a target length (only the answer result does),
+   * so this is what carries `answeredCount` / `questionCount` forward across an
+   * `advance()` for the question that has not been answered yet — the session's
+   * own `answeredCount` is a one-time snapshot from the GET and never refetched
+   * mid-session (see `usePracticeSession`'s `staleTime: Infinity`).
+   */
+  const [progress, setProgress] = useState<{
+    readonly answeredCount: number;
+    readonly questionCount: number;
+  } | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [results, setResults] = useState<Readonly<Record<string, AnswerResult>>>({});
   const [summary, setSummary] = useState<SubmissionResult | null>(null);
@@ -113,10 +135,9 @@ export function PracticeScreen() {
     );
   }
 
-  const questions = session.data.session.questions;
-  const question = questions[currentIndex];
+  const question = currentQuestion ?? session.data.session.questions[0] ?? null;
 
-  if (question === undefined) {
+  if (question === null) {
     // An empty session is a server-side condition, not a student one. It has no
     // recovery on this screen beyond starting again elsewhere.
     return (
@@ -128,10 +149,24 @@ export function PracticeScreen() {
   }
 
   const result = results[question.id] ?? null;
-  const isLast = currentIndex === questions.length - 1;
+  const isLast = result !== null && result.nextQuestion === null;
+
+  /*
+   * BEFORE THIS QUESTION'S OWN RESULT ARRIVES, the display reads the progress
+   * carried forward from the question before it (or the session's snapshot, for
+   * the very first question). Once answered, `result.answeredCount` /
+   * `result.questionCount` — server truth — take over directly, which is also
+   * why the number on screen does not jump when the "Next" button is pressed:
+   * `result.answeredCount` already counts the question being displayed.
+   */
+  const priorAnsweredCount = progress?.answeredCount ?? session.data.session.answeredCount;
+  const priorQuestionCount =
+    progress?.questionCount ?? mission.data?.mission?.suggestedQuestionCount ?? priorAnsweredCount + 1;
+  const questionNumber = result?.answeredCount ?? priorAnsweredCount + 1;
+  const questionCount = result?.questionCount ?? priorQuestionCount;
 
   function answer(): void {
-    if (question === undefined || selectedIndex === null) return;
+    if (selectedIndex === null) return;
 
     answerMutation.mutate(
       {
@@ -152,7 +187,11 @@ export function PracticeScreen() {
   }
 
   function advance(): void {
-    if (isLast) {
+    if (result === null) return;
+
+    // `nextQuestion === null` means the target length was reached or the
+    // chapter has nothing left to serve — the client submits on seeing it.
+    if (result.nextQuestion === null) {
       submitMutation.mutate(sessionId ?? '', {
         onSuccess: (response) => {
           setSummary(response.result);
@@ -160,7 +199,8 @@ export function PracticeScreen() {
       });
       return;
     }
-    setCurrentIndex((index) => index + 1);
+    setProgress({ answeredCount: result.answeredCount, questionCount: result.questionCount });
+    setCurrentQuestion(result.nextQuestion);
     setSelectedIndex(null);
     setQuestionShownAt(Date.now());
   }
@@ -174,8 +214,8 @@ export function PracticeScreen() {
         onAnswer={answer}
         onSelect={setSelectedIndex}
         question={question}
-        questionCount={questions.length}
-        questionNumber={currentIndex + 1}
+        questionCount={questionCount}
+        questionNumber={questionNumber}
         result={result}
         selectedIndex={selectedIndex}
       />
