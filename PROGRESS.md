@@ -80,17 +80,12 @@ and the database checked before and after:
 
 Ordered by what breaks if ignored.
 
-1. **The student dashboard is the last fixture screen — open item 51.** `/student`
-   still renders `sampleProgress` and a hard-coded name while Learn, Practice,
-   Progress, Foxy, Parent and Billing all read live data. It is the FIRST screen
-   after login, so it is the one a client sees first, and it is where "continue
-   where you left off" belongs. Half a day.
-2. **`questions` has no `hint_level_*` and no `question_hi` columns — open item
+1. **`questions` has no `hint_level_*` and no `question_hi` columns — open item
    49.** Not NULL: ABSENT. The contract sends `hintLevelsAvailable` on every
    question, so it is an array that can only ever be empty, and practice cannot
    be taken in Hindi at all despite the whole interface being bilingual. A
    migration must land before any generation work has anywhere to go.
-3. **Two things that look broken in a demo and are not.** The
+2. **Two things that look broken in a demo and are not.** The
    "PREVIEW — sample information is shown while the product services are being
    connected" banner on every screen, and question options that read
    `A) … C) … D) … B)` because the letter prefix is baked into the corpus text
@@ -241,8 +236,10 @@ languages. The browser suite still has not run.
 
 ### Step 12 — the parent dashboard, closed 16 August 2026
 
-**Both flows are now live.** `/parent` reads the real module; the student
-dashboard at `/student` is the last fixture screen in the product (open item 45).
+**Both flows are now live.** `/parent` reads the real module. The student
+dashboard at `/student` was the last fixture screen in the product (open item
+45) and **went live on 19 August** — see the profile/dashboard row in the
+build-order table, and D-380.
 
 | Piece | Where | The decision worth knowing |
 |---|---|---|
@@ -258,7 +255,9 @@ dashboard at `/student` is the last fixture screen in the product (open item 45)
 **Verified in the container**: `/parent` returns 200 and renders in both
 languages. **The browser suite still has not run** — port 3000 is held by
 `backend-api-1`. The parent visual baselines are now stale by construction: the
-fixture screen they were recorded against no longer exists.
+fixture screen they were recorded against no longer exists. *(Both resolved
+since: `PLAYWRIGHT_BASE_URL` let the suite run on 18 August, and every baseline
+was re-recorded on 19 August — item 46.)*
 
 ### Steps 10-11 — practice and progress, closed 15 August 2026
 
@@ -933,7 +932,7 @@ because §7 has grown to fifty entries and a list that long stops being read.
 
 | # | Issue | Effort |
 |---|---|---|
-| 51 | **`/student` is the last fixture screen** — sample data on the first screen after login, while every other screen is live | 0.5 d |
+| ~~51~~ | ~~**`/student` is the last fixture screen**~~ ✅ **CLOSED 19 August** — live mission, ledger and profile (D-380) | done |
 | 52 | **The "PREVIEW — sample information" banner** on every authenticated screen. It tells a viewer the product is not connected. It is | 15 min |
 | 53 | **Question options read `A) … C) … D) … B)`** — the letter prefix is baked into the corpus text, then shuffled | 1 h |
 | 43 | **63 of 137 chapter titles are placeholders** like "Part 2 - Chapter 1", now visible on the study browser | data fix |

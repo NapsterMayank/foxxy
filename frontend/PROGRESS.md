@@ -2,6 +2,14 @@
 
 **Last verified:** 12 August 2026  
 **Scope:** product application in `frontend/` and public marketing application in `website/`  
+> **THIS FILE IS A 12 AUGUST SNAPSHOT AND HAS NOT BEEN MAINTAINED SINCE.**
+> Everything from build-order step 9 onward — Foxy chat, practice, progress,
+> parent, billing, the responsive pass, study, the profile screen and the live
+> student dashboard — is recorded in the ROOT `PROGRESS.md`, which is the live
+> register, with the reasoning in `docs/03-DECISION-LOG.md`. Read those first;
+> this file is kept for the step 0-8 detail they do not repeat. **Nothing below
+> should be treated as current state.**
+
 **Status:** build-order steps 0-8 closed. Auth and onboarding call the live backend; the remaining screens (Foxy chat, practice, progress, parent, billing) are still fixtures. The production build runs in the container — see "The build blocker is gone" below. CMS and production content approval remain pending
 
 ## Build-order step 0 and step 6 — 12 August 2026
