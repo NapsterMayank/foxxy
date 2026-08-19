@@ -181,6 +181,8 @@ export interface RecordedAnswer {
   readonly explanationFormatUsed: string | null;
   /** Frozen at answer time so a later correction cannot rewrite history. */
   readonly authoredDifficulty: Difficulty;
+  /** The pace target in force when this question was served (Task 1). */
+  readonly timeTargetMs: number;
   /** ISO 8601, so the jsonb column round-trips without a Date reviver. */
   readonly answeredAt: string;
 }

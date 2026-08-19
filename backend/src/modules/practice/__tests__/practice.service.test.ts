@@ -326,6 +326,40 @@ describe('submitSession — a valid submission writes every table', () => {
     expect(row.authored_difficulty).toBe('medium');
     expect(row.explanation_format_used).toBe('worked_example');
   });
+
+  it('freezes the pace target of the question that was served', async () => {
+    // A medium question is served (seedStudent's default difficulty); the
+    // target recorded must be medium's 45s, not a default and not whatever
+    // TIME_TARGET_MS says when the report is run.
+    const { account, chapterId } = await seedStudent({ questionCount: 1 });
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 1,
+    });
+    const question = started.questions[0]!;
+    expect(question.difficulty).toBe('medium');
+    const correctPosition = question.options.findIndex((option) => option.endsWith('option 0'));
+
+    harness.clock.advanceMs(9_000);
+    await harness.practice.service.submitAnswer(actorOf(account), started.id, {
+      questionId: question.id,
+      selectedIndex: correctPosition,
+      timeSpentMs: 9_000,
+      hintLevelUsed: 0,
+    });
+    await harness.practice.service.submitSession(actorOf(account), started.id);
+
+    const { rows } = await harness.postgres.client.query<{
+      time_target_ms: number;
+      authored_difficulty: string;
+    }>(`select time_target_ms, authored_difficulty from practice_responses where session_id = $1`, [
+      started.id,
+    ]);
+
+    const row = rows[0]!;
+    expect(row.time_target_ms).toBe(45_000);
+    expect(row.authored_difficulty).toBe('medium');
+  });
 });
 
 // ===========================================================================

@@ -36,6 +36,7 @@ import {
   scheduleNextReview,
   type RetentionState,
 } from './domain/spaced-retention';
+import { TIME_TARGET_MS } from './domain/time-targets';
 import { applyDailyCap, calculateXp, type CappedXp } from './domain/xp-rules';
 import type { PracticeRepository, ResponseInput } from './practice.repository';
 import type {
@@ -770,6 +771,9 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         chapterId: chapter.id,
         questionIds: questions.map((question) => question.id),
         optionOrder,
+        // For now, the requested count — a later task makes the serving
+        // adaptive and this becomes the true target rather than an echo.
+        targetQuestionCount: input.questionCount,
         now: clock.now(),
       });
 
@@ -924,6 +928,9 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         // retroactively claim the student faced a harder question — that is
         // exactly what the denormalised column exists to prevent.
         authoredDifficulty: question.difficulty,
+        // Frozen with the difficulty and for the same reason. Read from the
+        // question actually served, never from the rung the ladder is on.
+        timeTargetMs: TIME_TARGET_MS[question.difficulty],
         answeredAt: clock.now().toISOString(),
       };
 
@@ -1040,6 +1047,17 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         confidence: answer.confidence,
         explanationFormatUsed: answer.explanationFormatUsed,
         authoredDifficulty: answer.authoredDifficulty,
+        // An answer recorded before this field existed has no `timeTargetMs`
+        // on its jsonb row — an in-flight session started before this deploy
+        // must still submit. Falls back to the target for the answer's own
+        // frozen difficulty, never to a magic constant.
+        //
+        // The type says `number`, never `undefined` — same as
+        // `firstSelectedIndex`'s note above about a value read back out of a
+        // jsonb column: the TYPE is what a value written since this change
+        // looks like, not a runtime guarantee about rows written before it.
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        timeTargetMs: answer.timeTargetMs ?? TIME_TARGET_MS[answer.authoredDifficulty],
         now,
       }));
 

@@ -112,6 +112,7 @@ export interface CreateSessionInput {
   readonly chapterId: string;
   readonly questionIds: readonly string[];
   readonly optionOrder: Readonly<Record<string, readonly number[]>>;
+  readonly targetQuestionCount: number;
   readonly now: Date;
 }
 
@@ -138,6 +139,7 @@ export interface ResponseInput {
   readonly confidence: string | null;
   readonly explanationFormatUsed: string | null;
   readonly authoredDifficulty: Difficulty;
+  readonly timeTargetMs: number;
   readonly now: Date;
 }
 
@@ -302,6 +304,7 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
           chapterId: input.chapterId,
           questionIds: [...input.questionIds],
           optionOrder: input.optionOrder,
+          targetQuestionCount: input.targetQuestionCount,
           answers: {},
           // From the INJECTED clock, never `defaultNow()`: the anti-cheat rules
           // and the retention schedule both compare against it, and a mix of
@@ -374,6 +377,7 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
             confidence: row.confidence,
             explanationFormatUsed: row.explanationFormatUsed,
             authoredDifficulty: row.authoredDifficulty,
+            timeTargetMs: row.timeTargetMs,
             createdAt: row.now,
           })),
         );
