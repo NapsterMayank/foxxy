@@ -205,28 +205,44 @@ export interface PracticeRepository {
    * key — every earlier question's map is untouched. `where submitted_at is
    * null` is the same guard `saveAnswers` carries, and the same answer.
    *
-   * ALSO REFUSES WHEN `questionId` IS ALREADY IN `question_ids` — the fix for
-   * the review's Finding 1. Two `submitAnswer` calls in flight for the SAME
-   * open question both pass the "not yet answered" check (harmless: both
-   * write an identical answer), and without this second condition both would
-   * go on to choose and append the SAME next question: `array_append` does
-   * not deduplicate, so `question_ids` held it twice — a direct violation of
-   * "never served twice" — and the SECOND merge silently overwrote the
-   * shuffle map the first client was already rendering, translating that
-   * client's next tap through the wrong map. The condition is evaluated by
-   * Postgres inside the row lock the `UPDATE` already takes, so the second of
-   * two genuinely concurrent callers re-checks it against the FIRST caller's
-   * committed row rather than against a stale read — no separate compare-and-
-   * set is needed.
+   * IT IS A COMPARE-AND-SET ON THE ARRAY THE CALLER READ, NOT ON THE ID IT
+   * CHOSE — review round 2, Finding 1. `expectedLength` is
+   * `session.questionIds.length` as it stood at the read that chose this
+   * question, and the UPDATE matches only while `cardinality(question_ids)`
+   * still equals it.
    *
-   * Returns false when the session was submitted, OR this question was
-   * already served, between the read that chose it and this write. The
-   * caller (`submitAnswer`) refuses with a `ConflictError` either way.
+   * WHY THE ID ALONE WAS NOT ENOUGH. Two `submitAnswer` calls in flight for
+   * the SAME open question both pass the "not yet answered" check (harmless:
+   * both write an identical answer) and then both run `chooseQuestion`
+   * independently. That ends in a RANDOM draw among the candidates at the
+   * rung, so on any chapter with more than one candidate the two callers
+   * usually pick DIFFERENT questions — and a guard that tested only "is MY id
+   * already there" let both appends through. `question_ids` then held
+   * `[q1, Q_a, Q_b]` with only one of them ever reachable by the client, and
+   * at submission `questionCount` exceeded `responses.length`: anti-cheat
+   * rule 3 scored the whole attempt ZERO and recorded it invalid. The length
+   * check refuses the loser whichever question it drew.
+   *
+   * The `not (question_ids @> array[$questionId])` condition is KEPT beside
+   * it: it is the guard against a re-append of an id already served (a retry,
+   * a replayed request), which a length check alone would permit whenever the
+   * array had not moved.
+   *
+   * Both conditions are evaluated by Postgres inside the row lock the
+   * `UPDATE` already takes, so the second of two genuinely concurrent callers
+   * re-checks them against the FIRST caller's committed row rather than
+   * against the stale array it itself read.
+   *
+   * Returns false when the session was submitted, OR another caller has
+   * already appended, OR this question was already served, between the read
+   * that chose it and this write. The caller (`submitAnswer`) refuses with a
+   * `ConflictError` in every case.
    */
   appendServedQuestion(
     sessionId: string,
     questionId: string,
     optionOrder: readonly number[],
+    expectedLength: number,
     now: Date,
   ): Promise<boolean>;
 
@@ -390,6 +406,7 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
       sessionId: string,
       questionId: string,
       optionOrder: readonly number[],
+      expectedLength: number,
       now: Date,
     ): Promise<boolean> {
       // The one new key, merged in rather than replacing the column — every
@@ -406,10 +423,14 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
           and(
             eq(practiceSessions.id, sessionId),
             sql`${practiceSessions.submittedAt} is null`,
-            // NEVER TWICE. Re-checked under the row lock the UPDATE already
-            // takes, so a second concurrent caller sees the FIRST caller's
-            // committed `question_ids` rather than the stale array it itself
-            // read — see the interface doc for the failure this closes.
+            // COMPARE-AND-SET ON THE ARRAY THE CALLER READ. Only one of two
+            // concurrent callers can find the array at the length it had when
+            // they both chose — whichever question each of them drew. Under
+            // the row lock the UPDATE already takes, so the loser re-reads the
+            // winner's committed row rather than its own stale one.
+            sql`cardinality(${practiceSessions.questionIds}) = ${expectedLength}`,
+            // NEVER TWICE — a re-append of an id already served, which the
+            // length check alone would permit whenever the array had not moved.
             sql`not (${practiceSessions.questionIds} @> array[${questionId}]::uuid[])`,
           ),
         )

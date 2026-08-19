@@ -177,7 +177,17 @@ function chooseQuestion(
   if (rung === null) return null;
 
   const candidates = unserved.filter((question) => question.difficulty === rung);
-  return candidates[Math.floor(random() * candidates.length)] ?? null;
+  // CLAMPED, NOT `?? null`. `pickRungWithFallback` only returns a rung that is
+  // present in `unserved`, so `candidates` is never empty here and an
+  // out-of-range index can only come from a `random` outside [0, 1). Falling
+  // back to `null` would have let that read to the caller as "the chapter ran
+  // dry" and ended the session early for a reason that never happened.
+  const index = Math.min(candidates.length - 1, Math.max(0, Math.floor(random() * candidates.length)));
+  const drawn = candidates[index];
+  if (drawn === undefined) {
+    throw new Error('practice: the chosen rung had no candidate');
+  }
+  return drawn;
 }
 
 /**
@@ -1077,18 +1087,45 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
 
         const nextContext = await deps.readStudentContext(actor, session.studentUserId);
         const chapterSummary = await deps.readChapter(actor, session.chapterId);
-        if (chapterSummary === null) {
-          throw new NotFoundError(SESSION_NOT_FOUND, {
-            message: 'Practice session references a chapter that is no longer active',
-          });
-        }
 
-        const pool = await deps.readQuestions(actor, {
-          chapterId: session.chapterId,
-          grade: nextContext.grade,
-          subjectCode: chapterSummary.subjectCode,
-          limit: MAX_CHAPTER_POOL,
-        });
+        // ------------------------------------------------------------------
+        // A CHAPTER DEACTIVATED MID-SESSION ENDS THE SESSION, IT DOES NOT
+        // THROW — review round 2, Finding 2.
+        //
+        // `saveAnswers` above has already COMMITTED. A throw from here returns
+        // a 404 with no `AnswerResult`, so the client never learns the answer
+        // landed: it renders no feedback, offers neither Next nor Finish, and
+        // re-answering hits the D-281 duplicate guard and 409s forever. The
+        // answer is safely recorded and the session is stranded in flight — no
+        // XP, no mastery, no history row, permanently.
+        //
+        // Degrading to `nextQuestion: null` ends the session early with
+        // `served === answered`, which `submitSession` scores against what was
+        // actually served (Task 6) — the same path the dry chapter already
+        // takes and already proves.
+        // ------------------------------------------------------------------
+        const pool =
+          chapterSummary === null
+            ? []
+            : await deps.readQuestions(actor, {
+                chapterId: session.chapterId,
+                // Note the two filters differ, deliberately: the draw asks for
+                // the student's CURRENT grade, while `questionsOf` re-reads the
+                // served questions under `chapter.grade`. A grade edited
+                // mid-session therefore ends the session early (an empty pool)
+                // rather than serving a question the session could not later
+                // re-read.
+                grade: nextContext.grade,
+                subjectCode: chapterSummary.subjectCode,
+                limit: MAX_CHAPTER_POOL,
+              });
+
+        if (chapterSummary === null) {
+          logger.warn(
+            { sessionId: session.id, chapterId: session.chapterId },
+            'practice.session.chapter_inactive',
+          );
+        }
 
         // A DIFFICULTY THE CHAPTER CANNOT SUPPLY MUST NEVER MOVE THE LADDER.
         // `pickRungWithFallback`, inside `chooseQuestion`, chooses what to DRAW
@@ -1103,23 +1140,27 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
           const order = [...buildShuffle(chosen.options.length, fractions)];
 
           // THE SAME `where submitted_at is null` GUARD `saveAnswers` CARRIES,
-          // PLUS a guard of its own: `appendServedQuestion` also refuses when
-          // `chosen.id` is already in `question_ids`. That second condition is
-          // what a losing caller hits when two answers to the SAME open
-          // question raced each other here and both drew the same next
-          // question — without it, the loser's append would have gone through
-          // a second time and duplicated the id.
+          // PLUS A COMPARE-AND-SET on the array this call READ: the append
+          // matches only while `question_ids` is still the length it was at
+          // the read above. Two answers to the SAME open question racing here
+          // usually draw DIFFERENT next questions, and a guard on the chosen
+          // id alone let both of them land — see `appendServedQuestion`'s doc.
           const appended = await repository.appendServedQuestion(
             session.id,
             chosen.id,
             order,
+            session.questionIds.length,
             clock.now(),
           );
           if (!appended) {
+            // GENUINELY UNRECOVERABLE HERE, and correct to refuse: another
+            // caller has already served the next question (or the session was
+            // submitted). The client recovers by reloading the session, which
+            // resumes on the one served question that is still unanswered.
             throw new ConflictError('This question has already moved on.', {
               message:
                 'Serving the next question lost a race — the session was submitted, or ' +
-                'another answer in flight for the same question already served it',
+                'another answer in flight for the same question already served one',
             });
           }
 

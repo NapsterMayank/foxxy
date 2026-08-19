@@ -129,6 +129,18 @@ describe('pickRungWithFallback', () => {
     expect(pickRungWithFallback('medium', new Set(['hard']))).toBe('hard');
   });
 
+  /*
+   * THE EQUIDISTANT TIE, PINNED. `easy` and `hard` are both one rung from
+   * `medium`, so nothing about "nearest" decides between them — the stable
+   * sort over `ORDER` does, and it takes the EASIER one. That is the kinder
+   * choice for a student and it is a real decision, not an accident of the
+   * comparator: a sort that reversed equal keys would silently start serving
+   * `hard` to a student the ladder had placed at `medium`.
+   */
+  it('takes the easier rung when two are equidistant', () => {
+    expect(pickRungWithFallback('medium', new Set(['easy', 'hard']))).toBe('easy');
+  });
+
   it('says so plainly when the chapter has nothing left', () => {
     expect(pickRungWithFallback('medium', new Set())).toBeNull();
   });
