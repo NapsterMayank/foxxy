@@ -108,6 +108,13 @@ export const practiceSessions = pgTable(
      * about whatever the client chose to send.
      */
     questionIds: uuid('question_ids').array().notNull(),
+    /**
+     * How many questions this session is MEANT to have.
+     *
+     * `question_ids` grows as questions are served, so its length is progress,
+     * not length. Scoring and anti-cheat rule 3 read this.
+     */
+    targetQuestionCount: integer('target_question_count').notNull().default(6),
     /** `{ [questionId]: number[] }` — presentation index -> ORIGINAL index. */
     optionOrder: jsonb('option_order').notNull().default({}),
     /** `{ [questionId]: { selectedIndex, ... } }`, canonical indices only. */
@@ -128,6 +135,10 @@ export const practiceSessions = pgTable(
   },
   (table) => [
     check('practice_sessions_question_ids_check', sql`cardinality(${table.questionIds}) > 0`),
+    check(
+      'practice_sessions_target_question_count_check',
+      sql`${table.targetQuestionCount} >= 1 and ${table.targetQuestionCount} <= 20`,
+    ),
     check(
       'practice_sessions_score_percent_check',
       sql`${table.scorePercent} is null
@@ -229,6 +240,12 @@ export const practiceResponses = pgTable(
      */
     authoredDifficulty: text('authored_difficulty').notNull(),
 
+    /**
+     * The pace target for this question's difficulty, AS IT WAS when the
+     * question was served. Frozen for the same reason `authored_difficulty` is.
+     */
+    timeTargetMs: integer('time_target_ms').notNull(),
+
     // =======================================================================
     // EVIDENCE CAPTURE — 05-ROADMAP.md §8, row 1: "0.5 d now / UNRECOVERABLE
     // later. History cannot be backfilled."
@@ -327,6 +344,7 @@ export const practiceResponses = pgTable(
       sql`${table.selectedIndex} >= 0 and ${table.selectedIndex} < ${sql.raw(String(OPTIONS_PER_QUESTION))}`,
     ),
     check('practice_responses_time_spent_check', sql`${table.timeSpentMs} >= 0`),
+    check('practice_responses_time_target_ms_check', sql`${table.timeTargetMs} > 0`),
     check(
       'practice_responses_authored_difficulty_check',
       sql`${table.authoredDifficulty} in (${difficultyList})`,
