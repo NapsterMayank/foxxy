@@ -7392,3 +7392,36 @@ against for the difficulty column, and a pace column that ignored the warning on
 would have reintroduced it. The frozen value is what makes the pace query in `PROGRESS.md`
 trustworthy at all: `avg(time_spent_ms) <= avg(time_target_ms)` means something stable only if
 `time_target_ms` cannot move under an already-recorded row.
+
+## Content provenance and its ceiling — recorded 20 August 2026
+
+Not a decision; a set of facts a future session needs before it plans content work, and
+which took an afternoon to establish by reading two repositories and the database.
+
+**What the corpus is.** Mathematics and science, grades 6-10, and nothing else: 4,686 chunks
+(4,666 embedded), 137 chapters, 639 concepts, 2,741 questions. Grades 11 and 12 hold nothing,
+and no other subject exists — while the profile offers grades 6 to 12.
+
+**Where it came from.** NCERT textbook PDFs → `scripts/ncert-ingestion/` in the OLD project at
+`D:\personal\alfanumerik\Alfanumrik` (discover → extract with `pdf-parse` → chunk to 200-500
+tokens → embed → load, tagged `source = 'ncert_2025'`) → Supabase → a one-time read-only export
+into `.corpus-extract/` → `npm run db:import-corpus` into this Postgres.
+
+**The PDFs are in neither repository.** They were a local folder passed as `--source`. Nothing
+in this repository can re-derive a chunk from a book, which is also why 63 of 137 chapter
+titles are placeholders like "Part 2 - Chapter 1": the extraction step failed to find a title
+and there is no document left to recover it from.
+
+**`voyage-3`, or a full re-embed.** Every stored vector is 1,024-dimensional and produced by
+`voyage-3`. A chunk embedded by any other model lands in a different vector space, and the
+symptom is not an error — it is retrieval quietly getting worse. Any future ingestion either
+uses the same model or re-embeds all 4,666 existing chunks in the same pass.
+
+**The abstention floor is calibrated against THIS corpus.** Foxy refuses to answer below a
+measured fused-score threshold, and the retrieval service refuses to start if that threshold is
+uncalibrated. A large import shifts the score distribution and the floor must be re-measured —
+otherwise the product either answers from weak matches or abstains on good ones.
+
+**What the product can honestly claim today:** it tutors mathematics and science for grades 6
+to 10. Asked anything else, Foxy says it does not have the material rather than inventing an
+answer. That is the safe failure and it is also the ceiling.

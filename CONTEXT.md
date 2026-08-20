@@ -1,6 +1,6 @@
 # Context — resume here
 
-**Last session:** 19 August 2026. **The product runs end to end.** Foxy answers
+**Last session:** 20 August 2026. **The product runs end to end.** Foxy answers
 from the corpus on a real model, mail is delivered through Google Workspace, and
 the whole student journey has been driven through a browser with the database
 checked either side. Read `PROGRESS.md` §2 for the verified picture and §7 for
@@ -8,24 +8,28 @@ the ranked issue register; this file is the 30-second version.
 
 ## Current task
 
-**Adaptive practice difficulty is built, proved end to end, and documented.**
-A session now serves one question at a time and the difficulty served moves on
-the answers actually given — up on two quick correct answers, down on one
-wrong or two slow ones, unmoved by anything under three seconds. Migration
-`0008_adaptive_practice`. `tests/integration/practice.integration.test.ts`
-walks a real session through the HTTP surface against a real Postgres and
-proves both halves: every stored response carries the pace target for the
-difficulty it was served at, and the difficulties served are not all the same
-one. Both suites are green; the 14 visual baselines are re-recorded for the
-changed practice screen and pass clean on a second run.
+**Adaptive practice difficulty is MERGED to master** (20 August, merge commit
+`436f556`, 14 commits, branch deleted). A session serves one question at a time
+and the difficulty moves on the answers actually given — up on two quick correct
+answers, down on one wrong or two slow, unmoved by anything under three seconds.
+Both suites green on the merged result: backend 3,261 + 349 integration,
+frontend 508.
 
-**Next, in cost order:** item 53 (option letter prefixes shuffled into
-`A) … C) … D) … B)`, 1 h, at import), item 49 (`questions` has no
-`hint_level_*` and no `question_hi` columns — a migration before any generation
-work), then item 44 (the hint ladder: contracted, unrouted, unpopulated — and
-now it also owes the difficulty ladder an answer, since `classifyAnswer` takes
-no hint level today and a hinted correct answer's effect on the rung is
-undecided).
+**In progress: item 53, the option letter prefixes.** Design agreed, nothing
+written yet. Strip `^[A-D][).]\s*` inside `question-eligibility.ts` (before the
+distinctness check, so future imports reject what it reveals), then a one-off
+idempotent script over the 984 affected rows. **Two questions the prefix was
+hiding must be deactivated, not deleted** — see item 53 in the register for
+both. The write against live data had not run as of this note.
+
+**Then, in cost order:** item 54 (study → practice → Foxy pass the chapter,
+0.5 d, design agreed 20 August), item 55 (Foxy reads mastery and the mission
+engine, 1-1.5 d, carries a copy decision), item 56 (tag questions to concepts,
+2-3 d), item 49 (`questions` has no `hint_level_*` and no `question_hi` columns).
+
+**Blocked on the client:** item 57, the ingestion pipeline. The corpus is
+mathematics and science, grades 6-10, and nothing else. Whether that is the
+pilot scope decides whether item 57 is urgent or Phase 2.
 
 ## How to run it
 
