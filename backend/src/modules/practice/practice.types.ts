@@ -181,6 +181,8 @@ export interface RecordedAnswer {
   readonly explanationFormatUsed: string | null;
   /** Frozen at answer time so a later correction cannot rewrite history. */
   readonly authoredDifficulty: Difficulty;
+  /** The pace target in force when this question was served (Task 1). */
+  readonly timeTargetMs: number;
   /** ISO 8601, so the jsonb column round-trips without a Date reviver. */
   readonly answeredAt: string;
 }
@@ -192,6 +194,15 @@ export interface SessionRecord {
   readonly chapterId: string;
   readonly tenantId: string;
   readonly questionIds: readonly string[];
+  /**
+   * How many questions this session is MEANT to have (Task 5).
+   *
+   * `questionIds` grows one at a time as `submitAnswer` serves the next
+   * question, so its length is PROGRESS, not the target. This is the target —
+   * `AnswerResult.questionCount` reports it, and `submitAnswer` compares
+   * `questionIds.length` against it to decide whether the session is done.
+   */
+  readonly targetQuestionCount: number;
   /** `{ [questionId]: presentationIndex -> canonicalIndex }`. */
   readonly optionOrder: Readonly<Record<string, readonly number[]>>;
   readonly answers: Readonly<Record<string, RecordedAnswer>>;

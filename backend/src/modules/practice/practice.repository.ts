@@ -69,6 +69,7 @@ interface SessionRow {
   chapterId: string;
   tenantId: string;
   questionIds: string[];
+  targetQuestionCount: number;
   optionOrder: unknown;
   answers: unknown;
   startedAt: Date;
@@ -95,6 +96,7 @@ function toSessionRecord(row: SessionRow): SessionRecord {
     chapterId: row.chapterId,
     tenantId: row.tenantId,
     questionIds: row.questionIds,
+    targetQuestionCount: row.targetQuestionCount,
     optionOrder: (row.optionOrder ?? {}) as Record<string, number[]>,
     answers: (row.answers ?? {}) as Record<string, RecordedAnswer>,
     startedAt: row.startedAt,
@@ -112,6 +114,7 @@ export interface CreateSessionInput {
   readonly chapterId: string;
   readonly questionIds: readonly string[];
   readonly optionOrder: Readonly<Record<string, readonly number[]>>;
+  readonly targetQuestionCount: number;
   readonly now: Date;
 }
 
@@ -138,6 +141,7 @@ export interface ResponseInput {
   readonly confidence: string | null;
   readonly explanationFormatUsed: string | null;
   readonly authoredDifficulty: Difficulty;
+  readonly timeTargetMs: number;
   readonly now: Date;
 }
 
@@ -191,6 +195,54 @@ export interface PracticeRepository {
   saveAnswers(
     sessionId: string,
     answers: Readonly<Record<string, RecordedAnswer>>,
+    now: Date,
+  ): Promise<boolean>;
+
+  /**
+   * Appends one served question and its shuffle to a session in flight (Task 5).
+   *
+   * `question_ids` grows by one and `option_order` gains exactly the one new
+   * key — every earlier question's map is untouched. `where submitted_at is
+   * null` is the same guard `saveAnswers` carries, and the same answer.
+   *
+   * IT IS A COMPARE-AND-SET ON THE ARRAY THE CALLER READ, NOT ON THE ID IT
+   * CHOSE — review round 2, Finding 1. `expectedLength` is
+   * `session.questionIds.length` as it stood at the read that chose this
+   * question, and the UPDATE matches only while `cardinality(question_ids)`
+   * still equals it.
+   *
+   * WHY THE ID ALONE WAS NOT ENOUGH. Two `submitAnswer` calls in flight for
+   * the SAME open question both pass the "not yet answered" check (harmless:
+   * both write an identical answer) and then both run `chooseQuestion`
+   * independently. That ends in a RANDOM draw among the candidates at the
+   * rung, so on any chapter with more than one candidate the two callers
+   * usually pick DIFFERENT questions — and a guard that tested only "is MY id
+   * already there" let both appends through. `question_ids` then held
+   * `[q1, Q_a, Q_b]` with only one of them ever reachable by the client, and
+   * at submission `questionCount` exceeded `responses.length`: anti-cheat
+   * rule 3 scored the whole attempt ZERO and recorded it invalid. The length
+   * check refuses the loser whichever question it drew.
+   *
+   * The `not (question_ids @> array[$questionId])` condition is KEPT beside
+   * it: it is the guard against a re-append of an id already served (a retry,
+   * a replayed request), which a length check alone would permit whenever the
+   * array had not moved.
+   *
+   * Both conditions are evaluated by Postgres inside the row lock the
+   * `UPDATE` already takes, so the second of two genuinely concurrent callers
+   * re-checks them against the FIRST caller's committed row rather than
+   * against the stale array it itself read.
+   *
+   * Returns false when the session was submitted, OR another caller has
+   * already appended, OR this question was already served, between the read
+   * that chose it and this write. The caller (`submitAnswer`) refuses with a
+   * `ConflictError` in every case.
+   */
+  appendServedQuestion(
+    sessionId: string,
+    questionId: string,
+    optionOrder: readonly number[],
+    expectedLength: number,
     now: Date,
   ): Promise<boolean>;
 
@@ -302,6 +354,7 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
           chapterId: input.chapterId,
           questionIds: [...input.questionIds],
           optionOrder: input.optionOrder,
+          targetQuestionCount: input.targetQuestionCount,
           answers: {},
           // From the INJECTED clock, never `defaultNow()`: the anti-cheat rules
           // and the retention schedule both compare against it, and a mix of
@@ -349,6 +402,42 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
       return rows.length > 0;
     },
 
+    async appendServedQuestion(
+      sessionId: string,
+      questionId: string,
+      optionOrder: readonly number[],
+      expectedLength: number,
+      now: Date,
+    ): Promise<boolean> {
+      // The one new key, merged in rather than replacing the column — every
+      // earlier question's shuffle map survives untouched.
+      const merge = JSON.stringify({ [questionId]: [...optionOrder] });
+      const rows = await db
+        .update(practiceSessions)
+        .set({
+          questionIds: sql`array_append(${practiceSessions.questionIds}, ${questionId}::uuid)`,
+          optionOrder: sql`${practiceSessions.optionOrder} || ${merge}::jsonb`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(practiceSessions.id, sessionId),
+            sql`${practiceSessions.submittedAt} is null`,
+            // COMPARE-AND-SET ON THE ARRAY THE CALLER READ. Only one of two
+            // concurrent callers can find the array at the length it had when
+            // they both chose — whichever question each of them drew. Under
+            // the row lock the UPDATE already takes, so the loser re-reads the
+            // winner's committed row rather than its own stale one.
+            sql`cardinality(${practiceSessions.questionIds}) = ${expectedLength}`,
+            // NEVER TWICE — a re-append of an id already served, which the
+            // length check alone would permit whenever the array had not moved.
+            sql`not (${practiceSessions.questionIds} @> array[${questionId}]::uuid[])`,
+          ),
+        )
+        .returning({ id: practiceSessions.id });
+      return rows.length > 0;
+    },
+
     async insertResponses(tx: TransactionToken, rows: readonly ResponseInput[]): Promise<void> {
       if (rows.length === 0) {
         return;
@@ -374,6 +463,7 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
             confidence: row.confidence,
             explanationFormatUsed: row.explanationFormatUsed,
             authoredDifficulty: row.authoredDifficulty,
+            timeTargetMs: row.timeTargetMs,
             createdAt: row.now,
           })),
         );

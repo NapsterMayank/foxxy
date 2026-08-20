@@ -570,8 +570,8 @@ describe('the one-way doors', () => {
     const sessionId = await openSession(studentId, chapterId, questionId);
     await postgres.client.query(
       `insert into ${RESPONSES}
-         (session_id, student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty)
-       values ($1, $2, $3, 1, false, 4200, 'medium')`,
+         (session_id, student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty, time_target_ms)
+       values ($1, $2, $3, 1, false, 4200, 'medium', 45000)`,
       [sessionId, studentId, questionId],
     );
 
@@ -586,8 +586,8 @@ describe('the one-way doors', () => {
     const sessionId = await openSession(studentId, chapterId, questionId);
     await postgres.client.query(
       `insert into ${RESPONSES}
-         (session_id, student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty)
-       values ($1, $2, $3, 0, true, 5000, 'easy')`,
+         (session_id, student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty, time_target_ms)
+       values ($1, $2, $3, 0, true, 5000, 'easy', 30000)`,
       [sessionId, studentId, questionId],
     );
 
@@ -607,8 +607,8 @@ describe('the one-way doors', () => {
     await expect(
       postgres.client.query(
         `insert into ${RESPONSES}
-           (session_id, student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty)
-         values ($1, $2, $3, 4, false, 1000, 'easy')`,
+           (session_id, student_user_id, question_id, selected_index, is_correct, time_spent_ms, authored_difficulty, time_target_ms)
+         values ($1, $2, $3, 4, false, 1000, 'easy', 30000)`,
         [sessionId, studentId, questionId],
       ),
     ).rejects.toThrow(new RegExp(`${RESPONSES}_selected_index_check`));

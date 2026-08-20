@@ -3,7 +3,7 @@ import type { Clock } from '@/platform/clock/index';
 import { ConflictError, NotFoundError } from '@/platform/errors/index';
 import type { Logger } from '@/platform/logger/index';
 import type { TransactionToken } from '@/platform/tx/index';
-import type { XpSource } from '@/shared/constants/practice';
+import type { EvidenceLabel, XpSource } from '@/shared/constants/practice';
 import type {
   AnswerResult,
   ChapterProgress,
@@ -19,6 +19,14 @@ import { DEFAULT_SESSION_QUESTION_COUNT } from '@/shared/contracts/practice.cont
 import { deriveAnswerChange } from './domain/answer-change';
 import { validateAttempt, type AttemptResponse } from './domain/anti-cheat';
 import { decideNext } from './domain/decide-next';
+import {
+  classifyAnswer,
+  pickRungWithFallback,
+  rungAfter,
+  startingRung,
+  type AnswerClass,
+  type Rung,
+} from './domain/difficulty-ladder';
 import { evidenceLabel } from './domain/evidence';
 import { availableHintLevels, type QuestionHints } from './domain/hint-ladder';
 import { nextMastery } from './domain/mastery-update';
@@ -36,6 +44,7 @@ import {
   scheduleNextReview,
   type RetentionState,
 } from './domain/spaced-retention';
+import { TIME_TARGET_MS } from './domain/time-targets';
 import { applyDailyCap, calculateXp, type CappedXp } from './domain/xp-rules';
 import type { PracticeRepository, ResponseInput } from './practice.repository';
 import type {
@@ -135,6 +144,53 @@ export interface PracticeServiceDeps {
 const XP_SOURCE: XpSource = 'practice_session';
 
 /**
+ * The chapter pool `chooseQuestion` draws the next question from (Task 5).
+ *
+ * Comfortably above the ~20.5-question average chapter in the corpus, and
+ * bounded so a chapter with hundreds of questions cannot be read whole on
+ * every single answer.
+ */
+const MAX_CHAPTER_POOL = 50;
+
+/**
+ * The next question to serve: the ladder's rung if the chapter has one
+ * unserved question at it, else the nearest rung that does, else `null` when
+ * every question in the pool has already been served — Task 5.
+ *
+ * NOT IN `domain/`, DELIBERATELY. It draws on injected randomness to break
+ * ties among several candidates at the chosen rung, and §2's layer table
+ * forbids a domain function from touching randomness — that is exactly what
+ * keeps `pickRungWithFallback` itself testable with a plain `Set`.
+ */
+function chooseQuestion(
+  pool: readonly PracticeQuestionRecord[],
+  servedIds: readonly string[],
+  wanted: Rung,
+  random: RandomSource,
+): PracticeQuestionRecord | null {
+  const served = new Set(servedIds);
+  const unserved = pool.filter((question) => !served.has(question.id));
+  if (unserved.length === 0) return null;
+
+  const available = new Set<Rung>(unserved.map((question) => question.difficulty));
+  const rung = pickRungWithFallback(wanted, available);
+  if (rung === null) return null;
+
+  const candidates = unserved.filter((question) => question.difficulty === rung);
+  // CLAMPED, NOT `?? null`. `pickRungWithFallback` only returns a rung that is
+  // present in `unserved`, so `candidates` is never empty here and an
+  // out-of-range index can only come from a `random` outside [0, 1). Falling
+  // back to `null` would have let that read to the caller as "the chapter ran
+  // dry" and ended the session early for a reason that never happened.
+  const index = Math.min(candidates.length - 1, Math.max(0, Math.floor(random() * candidates.length)));
+  const drawn = candidates[index];
+  if (drawn === undefined) {
+    throw new Error('practice: the chosen rung had no candidate');
+  }
+  return drawn;
+}
+
+/**
  * ONE message for a session that cannot be reached, whatever the cause.
  *
  * "No such session" and "somebody else's session" must be indistinguishable, or
@@ -220,6 +276,24 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
   }
 
   /**
+   * The evidence label for one chapter, from `readMastery`'s own rows — never
+   * a raw score computed a second way (Task 5).
+   *
+   * `null` is a student with no mastery row for this chapter at all, which
+   * `startingRung` answers the same as `not_assessed`: start where nobody can
+   * fail on arrival.
+   */
+  async function evidenceOf(
+    actor: PracticeActor,
+    studentUserId: string,
+    chapterId: string,
+  ): Promise<EvidenceLabel | null> {
+    const rows = await deps.readMastery(actor, studentUserId);
+    const row = rows.find((candidate) => candidate.chapterId === chapterId);
+    return row === undefined ? null : evidenceLabel(row.masteryScore, row.attempts);
+  }
+
+  /**
    * Loads a session and authorises against it.
    *
    * THE TENANT COMES OFF THE ROW. That is the strongest available form of
@@ -289,21 +363,36 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
       chapterId: session.chapterId,
       startedAt: session.startedAt.toISOString(),
       submittedAt: session.submittedAt?.toISOString() ?? null,
-      questions: questions.map((question) => toQuestionView(question, session)),
+      questions: questions.map((question) =>
+        toQuestionView(question, shuffleFor(session, question.id, question.options.length)),
+      ),
       answeredCount: Object.keys(session.answers).length,
+      targetQuestionCount: session.targetQuestionCount,
     };
   }
 
+  /**
+   * The client-facing shape of ONE question — shuffled options, hint levels,
+   * no answer. See the contract's header for what is deliberately absent.
+   *
+   * THE ONLY PLACE A QUESTION IS SHAPED FOR THE WIRE. `toView` and
+   * `submitAnswer`'s `nextQuestion` both call this rather than each building
+   * their own mapping — a second one is how a `correctIndex` eventually
+   * reaches a client.
+   *
+   * `order` is the shuffle map already resolved by the caller: `toView` reads
+   * it off the session via `shuffleFor`, `submitAnswer` has it fresh off
+   * `buildShuffle` for a question the session does not carry a map for yet.
+   */
   function toQuestionView(
     question: PracticeQuestionRecord,
-    session: SessionRecord,
+    order: readonly number[],
   ): PracticeQuestion {
-    const map = shuffleFor(session, question.id, question.options.length);
     return {
       id: question.id,
       questionText: question.questionText,
       // SHUFFLED. The only place the student's option order is produced.
-      options: applyShuffle([...question.options], map),
+      options: applyShuffle([...question.options], order),
       difficulty: question.difficulty,
       bloomLevel: question.bloomLevel,
       hintLevelsAvailable: availableHintLevels(hintsOf()),
@@ -711,7 +800,9 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
     },
 
     /**
-     * §8.6 — draws a session's questions and freezes their order.
+     * §8.6 — starts a session with its FIRST question and a target length
+     * (Task 5). Every question after it is chosen by the ladder, one at a
+     * time, as `submitAnswer` scores this one.
      *
      * The grade and subject come from the STUDENT'S PROFILE, never from the
      * request, and are passed to `content` as a hard filter. A chapter id from
@@ -738,7 +829,7 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         chapterId: chapter.id,
         grade: context.grade,
         subjectCode: chapter.subjectCode,
-        limit: input.questionCount,
+        limit: MAX_CHAPTER_POOL,
       });
 
       if (questions.length === 0) {
@@ -749,17 +840,32 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         });
       }
 
-      // THE SHUFFLE, AND THE MAP THAT MAKES IT REVERSIBLE (D-058). Built here,
-      // once, and stored with the session: it is the only thing that can
-      // translate a student's tap back into an index misconceptions are keyed by.
-      const optionOrder: Record<string, number[]> = {};
-      for (const question of questions) {
-        const fractions = Array.from(
-          { length: Math.max(0, question.options.length - 1) },
-          () => deps.random(),
-        );
-        optionOrder[question.id] = [...buildShuffle(question.options.length, fractions)];
+      // WHERE THIS STUDENT MEETS THIS CHAPTER. A student with no mastery row
+      // for it starts on `easy` by `startingRung` — nobody can fail on arrival.
+      const evidence = await evidenceOf(actor, actor.userId, chapter.id);
+      const wanted = startingRung(evidence);
+
+      const first = chooseQuestion(questions, [], wanted, deps.random);
+      if (first === null) {
+        // Unreachable while `questions.length > 0`: `pickRungWithFallback`
+        // only returns null when NO rung has an unserved question, and the
+        // served set is empty here. Guarded anyway because `chooseQuestion`'s
+        // contract is "may return null" and this call site must not assume
+        // otherwise.
+        throw new NotFoundError('No practice questions are available for this chapter.', {
+          message: 'Practice start found no eligible questions',
+        });
       }
+
+      // THE SHUFFLE, AND THE MAP THAT MAKES IT REVERSIBLE (D-058). Built here,
+      // once, for the one question served, and stored with the session: it is
+      // the only thing that can translate a student's tap back into an index
+      // misconceptions are keyed by.
+      const fractions = Array.from(
+        { length: Math.max(0, first.options.length - 1) },
+        () => deps.random(),
+      );
+      const order = [...buildShuffle(first.options.length, fractions)];
 
       const session = await repository.createSession({
         studentUserId: actor.userId,
@@ -768,17 +874,18 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         // coincidence.
         tenantId,
         chapterId: chapter.id,
-        questionIds: questions.map((question) => question.id),
-        optionOrder,
+        questionIds: [first.id],
+        optionOrder: { [first.id]: order },
+        targetQuestionCount: input.questionCount,
         now: clock.now(),
       });
 
       logger.info(
-        { chapterId: chapter.id, questionCount: questions.length },
+        { chapterId: chapter.id, difficulty: first.difficulty, targetQuestionCount: input.questionCount },
         'practice.session.started',
       );
 
-      return toView(session, questions);
+      return toView(session, [first]);
     },
 
     async getSession(actor: PracticeActor, sessionId: string): Promise<PracticeSessionView> {
@@ -924,6 +1031,9 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         // retroactively claim the student faced a harder question — that is
         // exactly what the denormalised column exists to prevent.
         authoredDifficulty: question.difficulty,
+        // Frozen with the difficulty and for the same reason. Read from the
+        // question actually served, never from the rung the ladder is on.
+        timeTargetMs: TIME_TARGET_MS[question.difficulty],
         answeredAt: clock.now().toISOString(),
       };
 
@@ -943,6 +1053,124 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         });
       }
 
+      // ---------------------------------------------------------------------
+      // CHOOSE THE NEXT QUESTION — Task 5.
+      //
+      // THE RUNG IS REPLAYED, NEVER STORED. Every answer so far, including the
+      // one just saved, is reclassified and folded through `rungAfter` on every
+      // call — there is no `current_rung` column, no field on the session JSON,
+      // no cache. A stored rung is a second source of truth that can drift from
+      // the rows, and the rows are the evidence — the same rule that keeps XP a
+      // SUM over the ledger rather than a counter.
+      // ---------------------------------------------------------------------
+      const answered = [...orderedAnswers(session), answer];
+      const reachedTarget = answered.length >= session.targetQuestionCount;
+
+      let nextQuestion: PracticeQuestion | null = null;
+
+      if (!reachedTarget) {
+        // Every answer carries the target it was served under, so the replay
+        // is exact even after `TIME_TARGET_MS` is retuned later.
+        const classes: AnswerClass[] = answered.map((recorded) =>
+          classifyAnswer({
+            isCorrect: recorded.isCorrect,
+            timeSpentMs: recorded.timeSpentMs,
+            // Same fallback `submitSession` uses for a pre-deploy answer whose
+            // jsonb row carries no `timeTargetMs` of its own.
+            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+            targetMs: recorded.timeTargetMs ?? TIME_TARGET_MS[recorded.authoredDifficulty],
+          }),
+        );
+
+        const evidence = await evidenceOf(actor, session.studentUserId, session.chapterId);
+        const rung = rungAfter(startingRung(evidence), classes);
+
+        const nextContext = await deps.readStudentContext(actor, session.studentUserId);
+        const chapterSummary = await deps.readChapter(actor, session.chapterId);
+
+        // ------------------------------------------------------------------
+        // A CHAPTER DEACTIVATED MID-SESSION ENDS THE SESSION, IT DOES NOT
+        // THROW — review round 2, Finding 2.
+        //
+        // `saveAnswers` above has already COMMITTED. A throw from here returns
+        // a 404 with no `AnswerResult`, so the client never learns the answer
+        // landed: it renders no feedback, offers neither Next nor Finish, and
+        // re-answering hits the D-281 duplicate guard and 409s forever. The
+        // answer is safely recorded and the session is stranded in flight — no
+        // XP, no mastery, no history row, permanently.
+        //
+        // Degrading to `nextQuestion: null` ends the session early with
+        // `served === answered`, which `submitSession` scores against what was
+        // actually served (Task 6) — the same path the dry chapter already
+        // takes and already proves.
+        // ------------------------------------------------------------------
+        const pool =
+          chapterSummary === null
+            ? []
+            : await deps.readQuestions(actor, {
+                chapterId: session.chapterId,
+                // Note the two filters differ, deliberately: the draw asks for
+                // the student's CURRENT grade, while `questionsOf` re-reads the
+                // served questions under `chapter.grade`. A grade edited
+                // mid-session therefore ends the session early (an empty pool)
+                // rather than serving a question the session could not later
+                // re-read.
+                grade: nextContext.grade,
+                subjectCode: chapterSummary.subjectCode,
+                limit: MAX_CHAPTER_POOL,
+              });
+
+        if (chapterSummary === null) {
+          logger.warn(
+            { sessionId: session.id, chapterId: session.chapterId },
+            'practice.session.chapter_inactive',
+          );
+        }
+
+        // A DIFFICULTY THE CHAPTER CANNOT SUPPLY MUST NEVER MOVE THE LADDER.
+        // `pickRungWithFallback`, inside `chooseQuestion`, chooses what to DRAW
+        // from what is left; `rung` above is untouched by the fallback.
+        const chosen = chooseQuestion(pool, session.questionIds, rung, deps.random);
+
+        if (chosen !== null) {
+          const fractions = Array.from(
+            { length: Math.max(0, chosen.options.length - 1) },
+            () => deps.random(),
+          );
+          const order = [...buildShuffle(chosen.options.length, fractions)];
+
+          // THE SAME `where submitted_at is null` GUARD `saveAnswers` CARRIES,
+          // PLUS A COMPARE-AND-SET on the array this call READ: the append
+          // matches only while `question_ids` is still the length it was at
+          // the read above. Two answers to the SAME open question racing here
+          // usually draw DIFFERENT next questions, and a guard on the chosen
+          // id alone let both of them land — see `appendServedQuestion`'s doc.
+          const appended = await repository.appendServedQuestion(
+            session.id,
+            chosen.id,
+            order,
+            session.questionIds.length,
+            clock.now(),
+          );
+          if (!appended) {
+            // GENUINELY UNRECOVERABLE HERE, and correct to refuse: another
+            // caller has already served the next question (or the session was
+            // submitted). The client recovers by reloading the session, which
+            // resumes on the one served question that is still unanswered.
+            throw new ConflictError('This question has already moved on.', {
+              message:
+                'Serving the next question lost a race — the session was submitted, or ' +
+                'another answer in flight for the same question already served one',
+            });
+          }
+
+          nextQuestion = toQuestionView(chosen, order);
+        }
+        // `chosen === null` means the chapter ran dry: every question at every
+        // reachable rung has already been served. The session ends early
+        // rather than repeat one — `nextQuestion` stays null.
+      }
+
       return {
         questionId: question.id,
         isCorrect,
@@ -955,7 +1183,9 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         // Always one more than before: a question already answered never
         // reaches here (D-281).
         answeredCount: Object.keys(session.answers).length + 1,
-        questionCount: session.questionIds.length,
+        // THE SESSION'S TARGET, not how many have been served — Task 5.
+        questionCount: session.targetQuestionCount,
+        nextQuestion,
       };
     },
 
@@ -994,6 +1224,14 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
       }
 
       const answers = orderedAnswers(session);
+
+      /*
+       * THE SERVED COUNT, NOT THE TARGET. A chapter that ran dry ends a session
+       * early (Task 5); scoring those answers against a target that was never
+       * reachable reports a faultless attempt as a failure, and trips the
+       * anti-cheat count rule on top. The target governs how many questions are
+       * SERVED; this governs what the student is scored on.
+       */
       const questionCount = session.questionIds.length;
 
       const now = clock.now();
@@ -1040,6 +1278,17 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         confidence: answer.confidence,
         explanationFormatUsed: answer.explanationFormatUsed,
         authoredDifficulty: answer.authoredDifficulty,
+        // An answer recorded before this field existed has no `timeTargetMs`
+        // on its jsonb row — an in-flight session started before this deploy
+        // must still submit. Falls back to the target for the answer's own
+        // frozen difficulty, never to a magic constant.
+        //
+        // The type says `number`, never `undefined` — same as
+        // `firstSelectedIndex`'s note above about a value read back out of a
+        // jsonb column: the TYPE is what a value written since this change
+        // looks like, not a runtime guarantee about rows written before it.
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        timeTargetMs: answer.timeTargetMs ?? TIME_TARGET_MS[answer.authoredDifficulty],
         now,
       }));
 

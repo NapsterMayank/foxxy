@@ -168,6 +168,15 @@ export const practiceSessionSchema = z.object({
   questions: z.array(practiceQuestionSchema),
   /** How many of them have an answer recorded so far. */
   answeredCount: z.number().int(),
+  /**
+   * How many questions this session is MEANT to have.
+   *
+   * `questions` carries only what has been SERVED, so its length is progress,
+   * not length. A client that needs a total before the first answer reads this
+   * — the alternative was inferring one from today's mission, which is a
+   * different number the moment a session outlives the mission that started it.
+   */
+  targetQuestionCount: z.number().int(),
 });
 export type PracticeSession = z.infer<typeof practiceSessionSchema>;
 
@@ -203,7 +212,19 @@ export const answerResultSchema = z.object({
   decision: z.enum(NEXT_DECISIONS),
   misconceptionCode: z.string().nullable(),
   answeredCount: z.number().int(),
+  /** The session's TARGET length (Task 5) — not how many have been served so far. */
   questionCount: z.number().int(),
+  /**
+   * The question to show next, chosen from this answer by the ladder.
+   *
+   * NULL means the session is over — the target length was reached, or the
+   * chapter has nothing left to serve. The client submits when it sees null.
+   *
+   * Disclosing the previous answer's key here is safe for the same reason it
+   * always was (D-281): the key that is revealed can no longer be changed, and
+   * the question arriving alongside it has revealed nothing.
+   */
+  nextQuestion: practiceQuestionSchema.nullable(),
 });
 export type AnswerResult = z.infer<typeof answerResultSchema>;
 

@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ConflictError, ForbiddenError, NotFoundError } from '@/platform/errors/index';
+import type { Difficulty } from '@/shared/constants/curriculum';
+import type { AnswerResult, PracticeQuestion } from '@/shared/contracts/practice.contract';
 import {
   OTHER_TENANT_ID,
   TEST_TENANT_ID,
@@ -16,6 +18,8 @@ import {
   makeQuestion,
 } from '../../../../tests/fixtures/index';
 import { createPracticeModule } from '../index';
+import { createPracticeRepository, type PracticeRepository } from '../practice.repository';
+import { createPracticeService, type PracticeServiceDeps } from '../practice.service';
 import { XP_RULES } from '../domain/xp-rules';
 
 /**
@@ -115,6 +119,49 @@ function createVaryingShufflePractice(): ReturnType<typeof createPracticeModule>
   });
 }
 
+/**
+ * The harness's OWN practice wiring, with one or two seams replaced.
+ *
+ * Same graph `app/routes.ts` builds and the same one `startAppHarness` wires;
+ * the only reason to build it here rather than use `harness.practice.service`
+ * is that two tests below need a seam the harness does not expose — a
+ * repository they can watch, and a `readChapter` whose answer can change
+ * between two reads inside ONE call.
+ */
+function createServiceWith(
+  overrides: Partial<PracticeServiceDeps>,
+): ReturnType<typeof createPracticeService> {
+  return createPracticeService({
+    repository: createPracticeRepository(harness.container.poolFor('practice')),
+    clock: harness.clock,
+    logger: harness.logger,
+    readQuestions: (actor, query) => harness.content.service.getQuestionsForChapter(actor, query),
+    readChapter: async (actor, id) => {
+      try {
+        return await harness.content.service.getChapter(actor, id);
+      } catch {
+        return null;
+      }
+    },
+    listChapters: (actor, filter) =>
+      harness.content.service.listChapters(actor, {
+        grade: filter.grade,
+        subject: filter.subjectCode,
+        limit: filter.limit,
+      }),
+    readStudentContext: async (actor, studentUserId) => {
+      const profile = await harness.learner.service.getProfile(actor, studentUserId);
+      const subjects = await harness.learner.service.getSubjects(actor, studentUserId);
+      return { grade: profile.grade, subjects };
+    },
+    readMastery: (actor, studentUserId) => harness.learner.service.getMastery(actor, studentUserId),
+    writeMastery: (actor, input) => harness.learner.service.updateMastery(actor, input),
+    readTenantOfStudent: (studentUserId) => harness.identity.service.getTenantOfUser(studentUserId),
+    random: () => 0.5,
+    ...overrides,
+  });
+}
+
 let seedCounter = 0;
 
 /** An onboarded student with one chapter of questions ready to practise. */
@@ -176,6 +223,19 @@ async function seedStudent(options: { heldOut?: boolean; questionCount?: number 
   return { account, chapterId, questionIds };
 }
 
+/** The PRESENTED position of the canonical-correct option (`"correct=N"` in the text). */
+function correctPositionOf(question: Pick<PracticeQuestion, 'questionText' | 'options'>): number {
+  const canonicalCorrect = Number(/correct=(\d)/.exec(question.questionText)?.[1] ?? '0');
+  return question.options.findIndex((option) => option.endsWith(`option ${canonicalCorrect}`));
+}
+
+/** The PRESENTED position of a WRONG option, one canonical index over from correct. */
+function wrongPositionOf(question: Pick<PracticeQuestion, 'questionText' | 'options'>): number {
+  const canonicalCorrect = Number(/correct=(\d)/.exec(question.questionText)?.[1] ?? '0');
+  const canonicalWrong = (canonicalCorrect + 1) % 4;
+  return question.options.findIndex((option) => option.endsWith(`option ${canonicalWrong}`));
+}
+
 /**
  * Answers every question of a session correctly, through the PRESENTATION
  * index — which is the only index a client ever knows.
@@ -189,6 +249,15 @@ async function seedStudent(options: { heldOut?: boolean; questionCount?: number 
  * that claims 48 seconds of work inside a frozen instant is — correctly —
  * `too_fast`. Every honest test here has to spend the time it says it spent;
  * the one that deliberately does not is `answerAllWithoutSpendingTheTime`.
+ *
+ * ===========================================================================
+ * WALKS `nextQuestion` RATHER THAN A FIXED ARRAY — Task 5.
+ *
+ * A session now arrives with ONE question; every question after it is
+ * whatever `submitAnswer` returns as `nextQuestion`. This helper follows that
+ * chain rather than reading `session.questions` a second time, which is the
+ * one and only place the served question actually lives after the first.
+ * ===========================================================================
  */
 async function answerAll(
   account: HarnessAccount,
@@ -197,29 +266,120 @@ async function answerAll(
   timeSpentMs: number = PASSING_TIME_MS,
 ): Promise<void> {
   const session = await harness.practice.service.getSession(actorOf(account), sessionId);
+  let question: PracticeQuestion | null = session.questions[0] ?? null;
 
-  for (const [index, question] of session.questions.entries()) {
+  for (const isCorrect of correctness) {
+    if (question === null) {
+      throw new Error('answerAll: the session ended before the correctness list did');
+    }
     harness.clock.advanceMs(timeSpentMs);
-    // The PRESENTED position of the correct option, found the way a client
-    // would: the fixture names options `"<seed> option <canonicalIndex>"` and
-    // states the canonical correct index in the question text, so this is a
-    // presentation-space lookup with no access to `correctIndex`.
-    const canonicalCorrect = Number(/correct=(\d)/.exec(question.questionText)?.[1] ?? '0');
-    const canonicalWrong = (canonicalCorrect + 1) % 4;
-    const correctPosition = question.options.findIndex((option) =>
-      option.endsWith(`option ${canonicalCorrect}`),
-    );
-    const wrongPosition = question.options.findIndex((option) =>
-      option.endsWith(`option ${canonicalWrong}`),
-    );
+    const selectedIndex = isCorrect ? correctPositionOf(question) : wrongPositionOf(question);
 
-    await harness.practice.service.submitAnswer(actorOf(account), sessionId, {
+    const result = await harness.practice.service.submitAnswer(actorOf(account), sessionId, {
       questionId: question.id,
-      selectedIndex: correctness[index] === false ? wrongPosition : correctPosition,
+      selectedIndex,
       timeSpentMs,
       hintLevelUsed: 0,
     });
+    question = result.nextQuestion;
   }
+}
+
+/** Submits a CORRECT answer to `question` and returns the result — Task 5's ladder tests. */
+async function answerCorrectly(
+  account: HarnessAccount,
+  sessionId: string,
+  question: PracticeQuestion,
+  timeSpentMs: number,
+): Promise<AnswerResult> {
+  harness.clock.advanceMs(timeSpentMs);
+  return harness.practice.service.submitAnswer(actorOf(account), sessionId, {
+    questionId: question.id,
+    selectedIndex: correctPositionOf(question),
+    timeSpentMs,
+    hintLevelUsed: 0,
+  });
+}
+
+/** Submits a WRONG answer to `question` and returns the result — Task 5's ladder tests. */
+async function answerWrongly(
+  account: HarnessAccount,
+  sessionId: string,
+  question: PracticeQuestion,
+  timeSpentMs: number,
+): Promise<AnswerResult> {
+  harness.clock.advanceMs(timeSpentMs);
+  return harness.practice.service.submitAnswer(actorOf(account), sessionId, {
+    questionId: question.id,
+    selectedIndex: wrongPositionOf(question),
+    timeSpentMs,
+    hintLevelUsed: 0,
+  });
+}
+
+/**
+ * An onboarded student with one chapter whose questions carry the given
+ * DIFFICULTIES, in order — Task 5's ladder tests, which care which rung a
+ * question was drawn from and not just how many there are.
+ *
+ * `evidence` seeds `chapter_mastery` before the session starts, through the
+ * real `learner.updateMastery`, so `startingRung` reads the same evidence
+ * label the mission and progress screens would.
+ */
+async function seedStudentWithDifficulties(
+  difficulties: readonly Difficulty[],
+  options: { evidence?: 'developing' | 'strong' } = {},
+): Promise<{ account: HarnessAccount; chapterId: string }> {
+  seedCounter += 1;
+  const account = await onboardAccount(harness, `ladder${seedCounter}@example.test`, 'student');
+  await harness.learner.service.createProfile(actorOf(account), {
+    displayName: `Ladder ${seedCounter}`,
+    grade: '8',
+    subjects: ['science'],
+  });
+
+  const chapterId = await insertChapter(
+    harness.postgres.client,
+    makeChapter(`ladder${seedCounter}`, { grade: '8', subjectCode: 'science', chapterNumber: 1 }),
+  );
+
+  for (const [index, difficulty] of difficulties.entries()) {
+    await insertQuestion(
+      harness.postgres.client,
+      chapterId,
+      makeQuestion(`ladderq${seedCounter}-${index}`, {
+        correctIndex: index % 4,
+        questionText: `Question ${index} correct=${index % 4}?`,
+        difficulty,
+        isHeldOut: false,
+      }),
+    );
+  }
+
+  if (options.evidence === 'developing') {
+    // 0.6 with one attempt: >= DEVELOPING_MASTERY, below STRONG_MASTERY —
+    // `evidenceLabel` reads it as 'developing' regardless of attempt count.
+    await harness.learner.service.updateMastery(actorOf(account), {
+      studentUserId: account.userId,
+      chapterId,
+      masteryScore: 0.6,
+      expectedPreviousScore: null,
+      attemptIncrement: 1,
+      practised: true,
+    });
+  } else if (options.evidence === 'strong') {
+    // 0.9 with two attempts: >= STRONG_MASTERY and >= ATTEMPTS_FOR_STRONG.
+    await harness.learner.service.updateMastery(actorOf(account), {
+      studentUserId: account.userId,
+      chapterId,
+      masteryScore: 0.9,
+      expectedPreviousScore: null,
+      attemptIncrement: 2,
+      practised: true,
+    });
+  }
+
+  return { account, chapterId };
 }
 
 async function countRows(table: string, where: string, values: unknown[]): Promise<number> {
@@ -229,6 +389,577 @@ async function countRows(table: string, where: string, values: unknown[]): Promi
   );
   return result.rowCount ?? 0;
 }
+
+// ===========================================================================
+// SERVE ONE QUESTION, THEN CHOOSE THE NEXT — Task 5
+// ===========================================================================
+
+describe('adaptive serving', () => {
+  it('starts a session with exactly one question', async () => {
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy', 'medium', 'hard']);
+
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 6,
+    });
+
+    expect(session.questions).toHaveLength(1);
+  });
+
+  /*
+   * The client cannot show a true "of N" before the first answer without this
+   * — `AnswerResult.questionCount` is the only other place the target lives,
+   * and it does not exist until an answer has been submitted. `questions`
+   * only ever carries what has been SERVED, so its length is progress, not a
+   * total, and must not be read as one.
+   */
+  it('reports the target it was started with, and it does not move as questions are served', async () => {
+    const { account, chapterId } = await seedStudentWithDifficulties([
+      'easy',
+      'easy',
+      'medium',
+      'hard',
+    ]);
+
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 4,
+    });
+    expect(started.targetQuestionCount).toBe(4);
+    expect(started.questions).toHaveLength(1);
+
+    const fetched = await harness.practice.service.getSession(actorOf(account), started.id);
+    expect(fetched.targetQuestionCount).toBe(4);
+
+    await answerCorrectly(account, started.id, started.questions[0]!, 10_000);
+
+    const afterAnswer = await harness.practice.service.getSession(actorOf(account), started.id);
+    // Still 4 — serving a second question changes `questions`/`answeredCount`,
+    // never the target it was created with.
+    expect(afterAnswer.targetQuestionCount).toBe(4);
+  });
+
+  it('serves the next question on the answer, and steps up after two quick correct ones', async () => {
+    const { account, chapterId } = await seedStudentWithDifficulties([
+      'easy',
+      'easy',
+      'medium',
+      'hard',
+    ]);
+
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 4,
+    });
+    expect(session.questions[0]?.difficulty).toBe('easy');
+
+    const first = await answerCorrectly(account, session.id, session.questions[0]!, 10_000);
+    expect(first.nextQuestion?.difficulty).toBe('easy'); // one qualifying answer is not two
+
+    const second = await answerCorrectly(account, session.id, first.nextQuestion!, 10_000);
+    expect(second.nextQuestion?.difficulty).toBe('medium'); // stepped up
+  });
+
+  it('steps down on a wrong answer', async () => {
+    const { account, chapterId } = await seedStudentWithDifficulties(['medium', 'easy'], {
+      evidence: 'developing',
+    });
+
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 3,
+    });
+    expect(session.questions[0]?.difficulty).toBe('medium'); // developing starts in the middle
+
+    const result = await answerWrongly(account, session.id, session.questions[0]!, 20_000);
+    expect(result.nextQuestion?.difficulty).toBe('easy');
+  });
+
+  it('does not step the ladder when the wanted difficulty is simply absent', async () => {
+    /**
+     * A DISCRIMINATING FIXTURE — review round 1, Finding 2.
+     *
+     * The first version of this test used a MEDIUM-ONLY pool with
+     * `evidence: 'strong'` (wants `hard`). That fixture is vacuous:
+     * `STEP_UP['hard'] = 'hard'`, so a BROKEN implementation that lets the
+     * fallback write back to the ladder converges on the exact same observed
+     * sequence (`medium, medium, medium`, three question ids) as the correct
+     * one — the ladder "moving" to `medium` and immediately re-stepping to
+     * `hard` is invisible from outside, because `hard` was already the
+     * ceiling. The test could not fail no matter which implementation ran.
+     *
+     * This fixture has EASY and HARD, no MEDIUM, with `evidence: 'developing'`
+     * (wants `medium`, absent every time it is asked). Two quick correct
+     * answers:
+     *
+     *   CORRECT (fallback never touches the ladder): the ladder replays as
+     *   medium -> medium -> hard (it only steps on the SECOND qualifying
+     *   answer). `medium` is never available, so draws 1 and 2 both fall back
+     *   to `easy` (the tie-break between equidistant `easy`/`hard`, pinned by
+     *   Task 2). Draw 3 wants `hard` — no fallback needed, since `hard` IS in
+     *   the pool. Observed: easy, easy, HARD.
+     *
+     *   BROKEN (a fallback draw is mistaken for where the ladder now stands):
+     *   after drawing `easy` for the content gap, the ladder is dragged down
+     *   to `easy` instead of staying at `medium`. One qualifying answer from
+     *   `easy` is not two, so it stays at `easy` and draws `easy` again — same
+     *   as correct, so this alone doesn't discriminate. The SECOND qualifying
+     *   answer is what does: from a ladder wrongly sitting at `easy`, two
+     *   qualifying answers step it to `medium` — available nowhere in this
+     *   pool — so the fallback draws `easy` a THIRD time. Observed: easy,
+     *   easy, EASY.
+     *
+     * The two sequences diverge at the third draw and only there — exactly
+     * the "moved or didn't" question this test exists to answer.
+     */
+    const { account, chapterId } = await seedStudentWithDifficulties(
+      ['easy', 'easy', 'hard', 'hard'],
+      { evidence: 'developing' },
+    );
+
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 3,
+    });
+    // `developing` wants `medium`; the chapter has none, so the fallback
+    // (tied between `easy` and `hard`) serves `easy`.
+    expect(session.questions[0]?.difficulty).toBe('easy');
+
+    const first = await answerCorrectly(account, session.id, session.questions[0]!, 5_000);
+    // One qualifying answer is not two — the ladder is still at `medium`,
+    // still absent, so the fallback serves `easy` again.
+    expect(first.nextQuestion?.difficulty).toBe('easy');
+
+    const second = await answerCorrectly(account, session.id, first.nextQuestion!, 5_000);
+    // THE DISCRIMINATING ASSERTION. `hard` here is only reachable if the
+    // ladder stepped medium -> hard, which is only possible if it was still
+    // AT medium going into this answer — i.e. the two `easy` draws above
+    // never moved it.
+    expect(second.nextQuestion?.difficulty).toBe('hard');
+
+    const { rows } = await harness.postgres.client.query<{ question_ids: string[] }>(
+      `select question_ids from practice_sessions where id = $1`,
+      [session.id],
+    );
+    expect(rows[0]?.question_ids).toHaveLength(3);
+  });
+
+  it('returns no next question once the target length is reached', async () => {
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy', 'easy']);
+
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 1,
+    });
+    const result = await answerCorrectly(account, session.id, session.questions[0]!, 10_000);
+
+    expect(result.nextQuestion).toBeNull();
+    expect(result.questionCount).toBe(1);
+  });
+
+  it('ends early rather than repeating a question when the chapter runs dry', async () => {
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy']);
+
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 5,
+    });
+    const result = await answerCorrectly(account, session.id, session.questions[0]!, 10_000);
+
+    // One question exists; it has been served and answered. Nothing is repeated.
+    expect(result.nextQuestion).toBeNull();
+  });
+
+  it('never serves the same question twice', async () => {
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy', 'easy', 'easy']);
+
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 3,
+    });
+    const first = await answerCorrectly(account, session.id, session.questions[0]!, 10_000);
+    const second = await answerCorrectly(account, session.id, first.nextQuestion!, 10_000);
+
+    const served = [session.questions[0]!.id, first.nextQuestion!.id, second.nextQuestion!.id];
+    expect(new Set(served).size).toBe(3);
+  });
+
+  it('refuses an answer to a served question that lost its race with submission', async () => {
+    // The same guard `saveAnswers` carries, on the append that serves the next
+    // question. Not reachable through the service alone — it requires the
+    // session to be submitted between the read and the append — so this drives
+    // `repository.appendServedQuestion` directly against a session that has one
+    // unanswered question still outstanding.
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy', 'easy']);
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 2,
+    });
+
+    await harness.postgres.client.query(
+      `update practice_sessions
+          set submitted_at = now(), score_percent = 0, xp_earned = 0, is_valid = true
+        where id = $1`,
+      [session.id],
+    );
+
+    const repository = createPracticeRepository(harness.container.poolFor('practice'));
+    const appended = await repository.appendServedQuestion(
+      session.id,
+      session.questions[0]!.id,
+      [0],
+      // The array as this caller read it: one served question.
+      1,
+      harness.clock.now(),
+    );
+    expect(appended).toBe(false);
+  });
+
+  it('refuses to append a question that is already in question_ids — review round 1, Finding 1', async () => {
+    // The second half of `appendServedQuestion`'s guard: not just "was this
+    // session submitted", but "is this question already served". Proved
+    // directly and DETERMINISTICALLY here (no timing dependency) before the
+    // genuinely concurrent version below: the SAME not-yet-served question is
+    // appended twice back to back, and the second call must be refused.
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy', 'easy', 'easy']);
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 3,
+    });
+
+    const { rows: poolRows } = await harness.postgres.client.query<{ id: string }>(
+      `select id from questions where chapter_id = $1 and id <> $2`,
+      [chapterId, session.questions[0]!.id],
+    );
+    const nextQuestionId = poolRows[0]!.id;
+
+    const repository = createPracticeRepository(harness.container.poolFor('practice'));
+    const now = harness.clock.now();
+
+    const firstAppend = await repository.appendServedQuestion(
+      session.id,
+      nextQuestionId,
+      [0],
+      1,
+      now,
+    );
+    expect(firstAppend).toBe(true); // A genuinely NEW question — the guard's positive case.
+
+    // `expectedLength: 2` — the array as it stands AFTER the first append, so
+    // the compare-and-set is satisfied and the ONLY thing that can refuse this
+    // call is the never-twice condition. Isolating it is the point: passing a
+    // stale 1 here would pass for the other reason entirely.
+    const secondAppend = await repository.appendServedQuestion(
+      session.id,
+      nextQuestionId,
+      [1, 0],
+      2,
+      now,
+    );
+    expect(secondAppend).toBe(false); // Same id, now already present — refused.
+
+    const { rows } = await harness.postgres.client.query<{ question_ids: string[] }>(
+      `select question_ids from practice_sessions where id = $1`,
+      [session.id],
+    );
+    expect(rows[0]!.question_ids).toHaveLength(2); // [first, nextQuestionId] — not three.
+    expect(rows[0]!.question_ids.filter((id) => id === nextQuestionId)).toHaveLength(1);
+  });
+
+  it('never lets two concurrent answers to the SAME open question append the next one twice — Finding 1', async () => {
+    /**
+     * THE FAILURE SCENARIO FROM THE REVIEW, END TO END.
+     *
+     * Two `submitAnswer` calls in flight for the SAME open question both pass
+     * the "not yet answered" check and both write an identical answer to
+     * `saveAnswers` — harmless. Before the fix, both would then go on to
+     * `chooseQuestion` and `appendServedQuestion` for the SAME next question:
+     * `array_append` does not deduplicate, so `question_ids` held it twice,
+     * and the SECOND merge silently overwrote the first client's shuffle map
+     * out from under it.
+     *
+     * `random: () => 0.5` (the harness default) makes `chooseQuestion` pick
+     * deterministically, so both concurrent calls draw the SAME candidate —
+     * the exact collision the fix has to survive, not a coin flip that might
+     * dodge it.
+     *
+     * `Promise.all` fires both `submitAnswer` calls together; each does
+     * several real awaits against Postgres (`readMastery`, `readQuestions`,
+     * `appendServedQuestion`, …), so the event loop genuinely interleaves
+     * them rather than running one to completion before the other starts.
+     */
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy', 'easy', 'easy']);
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 3,
+    });
+    const question = session.questions[0]!;
+
+    harness.clock.advanceMs(10_000);
+    const outcomes = await Promise.allSettled([
+      harness.practice.service.submitAnswer(actorOf(account), session.id, {
+        questionId: question.id,
+        selectedIndex: correctPositionOf(question),
+        timeSpentMs: 10_000,
+        hintLevelUsed: 0,
+      }),
+      harness.practice.service.submitAnswer(actorOf(account), session.id, {
+        questionId: question.id,
+        selectedIndex: correctPositionOf(question),
+        timeSpentMs: 10_000,
+        hintLevelUsed: 0,
+      }),
+    ]);
+
+    // Exactly one caller actually served the next question; the other lost
+    // the race and was refused with a conflict — never both succeeding with
+    // the same id, and never both silently landing.
+    const fulfilled = outcomes.filter(
+      (outcome): outcome is PromiseFulfilledResult<AnswerResult> => outcome.status === 'fulfilled',
+    );
+    const rejected = outcomes.filter(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
+    );
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBeInstanceOf(ConflictError);
+
+    const { rows } = await harness.postgres.client.query<{
+      question_ids: string[];
+      option_order: Record<string, number[]>;
+    }>(`select question_ids, option_order from practice_sessions where id = $1`, [session.id]);
+
+    // NO DUPLICATE. `question_ids` is [first, next] — two entries, not three.
+    expect(rows[0]!.question_ids).toHaveLength(2);
+    expect(new Set(rows[0]!.question_ids).size).toBe(2);
+
+    // ONE UNTOUCHED MAP. The winner's `nextQuestion` id has exactly the map
+    // it was served with — never silently replaced by a second merge.
+    const nextId = fulfilled[0]!.value.nextQuestion!.id;
+    expect(rows[0]!.option_order[nextId]).toBeDefined();
+  });
+
+  it('never lets two concurrent answers append DIFFERENT next questions — review round 2, Finding 1', async () => {
+    /**
+     * =======================================================================
+     * THE CASE THE ID-ONLY GUARD DID NOT COVER, AND THE LIKELIER ONE.
+     *
+     * The test above pins `random` to a constant, so both concurrent callers
+     * draw the SAME candidate and the old `not (question_ids @> array[$id])`
+     * condition refused the loser. Under production `Math.random`, on any
+     * chapter with more than one candidate at the rung, the two callers
+     * usually draw DIFFERENT questions — and that guard passed for BOTH,
+     * because each tested only for its own id.
+     *
+     * `question_ids` then read `[q1, Q_a, Q_b]` with only one of the two
+     * reachable by the client. At submission `questionCount =
+     * session.questionIds.length` exceeded `responses.length`, anti-cheat
+     * rule 3 returned `response_count_mismatch`, and the whole attempt was
+     * scored ZERO and recorded invalid — a student's record made wrong by a
+     * double tap on a second device.
+     *
+     * THE DRAWS ARE SCRIPTED, NOT HOPED FOR. `chooseQuestion` consumes
+     * exactly one random for the draw and then `options.length - 1` more for
+     * the shuffle, all in one synchronous block with no await between, so the
+     * two callers consume two CONTIGUOUS blocks of four values. The first
+     * block's draw is `0` (the first candidate) and the second's is `0.999`
+     * (the last) — different questions, deterministically, with no timing
+     * dependency in the values themselves.
+     *
+     * The repository is WRAPPED rather than trusted: the test asserts on the
+     * two ids actually offered to `appendServedQuestion`, so "they drew
+     * different questions" is proved rather than assumed. A future change
+     * that made both callers draw the same id would fail this test loudly
+     * instead of turning it into a duplicate of the one above.
+     * =======================================================================
+     */
+    const { account, chapterId } = await seedStudentWithDifficulties([
+      'easy',
+      'easy',
+      'easy',
+      'easy',
+      'easy',
+    ]);
+
+    const script: number[] = [];
+    let cursor = 0;
+    const random = (): number => {
+      const value = script[cursor] ?? 0.5;
+      cursor += 1;
+      return value;
+    };
+
+    /** Every `appendServedQuestion` call this service made, and what it returned. */
+    const appends: { questionId: string; expectedLength: number; accepted: boolean }[] = [];
+    const inner = createPracticeRepository(harness.container.poolFor('practice'));
+    const repository: PracticeRepository = {
+      ...inner,
+      async appendServedQuestion(sessionId, questionId, optionOrder, expectedLength, now) {
+        const accepted = await inner.appendServedQuestion(
+          sessionId,
+          questionId,
+          optionOrder,
+          expectedLength,
+          now,
+        );
+        appends.push({ questionId, expectedLength, accepted });
+        return accepted;
+      },
+    };
+
+    const service = createServiceWith({ repository, random });
+
+    const session = await service.startSession(actorOf(account), { chapterId, questionCount: 3 });
+    const question = session.questions[0]!;
+
+    // Scripted only from here: `startSession` drew and shuffled the first
+    // question with whatever the default values were, and its consumption
+    // must not shift the two blocks below.
+    script.push(0, 0.5, 0.5, 0.5, 0.999, 0.5, 0.5, 0.5);
+    cursor = 0;
+
+    harness.clock.advanceMs(10_000);
+    const outcomes = await Promise.allSettled([
+      service.submitAnswer(actorOf(account), session.id, {
+        questionId: question.id,
+        selectedIndex: correctPositionOf(question),
+        timeSpentMs: 10_000,
+        hintLevelUsed: 0,
+      }),
+      service.submitAnswer(actorOf(account), session.id, {
+        questionId: question.id,
+        selectedIndex: correctPositionOf(question),
+        timeSpentMs: 10_000,
+        hintLevelUsed: 0,
+      }),
+    ]);
+
+    // THE PRECONDITION THIS TEST EXISTS FOR: two appends, for two DIFFERENT
+    // questions. Without it the assertions below would pass under the old
+    // id-only guard and prove nothing.
+    expect(appends).toHaveLength(2);
+    expect(new Set(appends.map((append) => append.questionId)).size).toBe(2);
+    // Both read the same one-question array — the stale read that made the
+    // old guard useless is exactly what the length check now catches.
+    expect(appends.map((append) => append.expectedLength)).toEqual([1, 1]);
+    expect(appends.filter((append) => append.accepted)).toHaveLength(1);
+
+    const fulfilled = outcomes.filter(
+      (outcome): outcome is PromiseFulfilledResult<AnswerResult> => outcome.status === 'fulfilled',
+    );
+    const rejected = outcomes.filter(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
+    );
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBeInstanceOf(ConflictError);
+
+    const { rows } = await harness.postgres.client.query<{ question_ids: string[] }>(
+      `select question_ids from practice_sessions where id = $1`,
+      [session.id],
+    );
+    // GREW BY EXACTLY ONE. Under the defect this read three, and the session
+    // would then have been scored zero for a response count mismatch.
+    expect(rows[0]!.question_ids).toHaveLength(2);
+    expect(rows[0]!.question_ids[1]).toBe(fulfilled[0]!.value.nextQuestion!.id);
+  });
+
+  it('ends the session rather than throwing when the chapter is deactivated mid-session — review round 2, Finding 2', async () => {
+    /**
+     * =======================================================================
+     * A POST-COMMIT THROW STRANDED THE SESSION WITH NO FORWARD PATH.
+     *
+     * `saveAnswers` has already committed by the time the next question is
+     * chosen. Throwing a 404 from there returned no `AnswerResult` at all, so
+     * the client rendered no feedback, offered neither Next nor Finish, and
+     * re-answering hit the D-281 duplicate guard and 409'd forever: the
+     * answer was recorded and the session could never be submitted — no XP,
+     * no mastery, no history row.
+     *
+     * It now degrades to `nextQuestion: null`, which is the dry-chapter path,
+     * and the session submits and scores against what it served.
+     * =======================================================================
+     */
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy', 'easy', 'easy']);
+
+    /*
+     * THE DEACTIVATION LANDS INSIDE ONE `submitAnswer`, and it has to.
+     *
+     * `submitAnswer` reads the chapter twice: once up front to hydrate the
+     * question being answered, and once again — AFTER `saveAnswers` has
+     * committed — to choose the next one. Only the second read is past the
+     * commit, so only a chapter that disappears BETWEEN them reaches the path
+     * under test. Deactivating before the call is a different, pre-commit
+     * refusal that records nothing.
+     *
+     * `readsBeforeHiding` is set to allow exactly the hydration read through.
+     */
+    let reads = 0;
+    let readsBeforeHiding = Number.POSITIVE_INFINITY;
+    const service = createServiceWith({
+      readChapter: async (actor, id) => {
+        reads += 1;
+        if (reads > readsBeforeHiding) return null;
+        try {
+          return await harness.content.service.getChapter(actor, id);
+        } catch {
+          return null;
+        }
+      },
+    });
+
+    const session = await service.startSession(actorOf(account), { chapterId, questionCount: 3 });
+    readsBeforeHiding = reads + 1;
+
+    harness.clock.advanceMs(12_000);
+    const result = await service.submitAnswer(actorOf(account), session.id, {
+      questionId: session.questions[0]!.id,
+      selectedIndex: correctPositionOf(session.questions[0]!),
+      timeSpentMs: 12_000,
+      hintLevelUsed: 0,
+    });
+
+    // A RESULT, NOT A THROW. The client can render the feedback and the
+    // Finish button; before the fix this was a 404 with no result at all and
+    // the session had no forward path of any kind.
+    expect(result.nextQuestion).toBeNull();
+    expect(result.answeredCount).toBe(1);
+    expect(
+      harness.logger.lines.some((line) => line.msg === 'practice.session.chapter_inactive'),
+    ).toBe(true);
+
+    // AND IT SUBMITS. One served, one answered, scored against what was
+    // served rather than against the target of three.
+    const submitted = await service.submitSession(actorOf(account), session.id);
+    expect(submitted.questionCount).toBe(1);
+    expect(submitted.scorePercent).toBe(100);
+  });
+});
+
+// ===========================================================================
+// A SESSION THAT ENDED EARLY IS SCORED AGAINST WHAT IT SERVED — Task 6
+// ===========================================================================
+
+describe('submitSession — scores against what was served, not the target', () => {
+  it('scores a session that ended early against what it served, not its target', async () => {
+    // The chapter holds two questions and the student asked for five. Scoring
+    // two correct answers out of a target of five would report 40% for a
+    // faultless attempt, and the anti-cheat count rule would fail it outright.
+    const { account, chapterId } = await seedStudentWithDifficulties(['easy', 'easy']);
+
+    const session = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 5,
+    });
+    const first = await answerCorrectly(account, session.id, session.questions[0]!, 10_000);
+    await answerCorrectly(account, session.id, first.nextQuestion!, 10_000);
+
+    const result = await harness.practice.service.submitSession(actorOf(account), session.id);
+
+    expect(result.questionCount).toBe(2);
+    expect(result.scorePercent).toBe(100);
+  });
+});
 
 // ===========================================================================
 // A VALID SUBMISSION WRITES EVERY TABLE
@@ -326,6 +1057,40 @@ describe('submitSession — a valid submission writes every table', () => {
     expect(row.authored_difficulty).toBe('medium');
     expect(row.explanation_format_used).toBe('worked_example');
   });
+
+  it('freezes the pace target of the question that was served', async () => {
+    // A medium question is served (seedStudent's default difficulty); the
+    // target recorded must be medium's 45s, not a default and not whatever
+    // TIME_TARGET_MS says when the report is run.
+    const { account, chapterId } = await seedStudent({ questionCount: 1 });
+    const started = await harness.practice.service.startSession(actorOf(account), {
+      chapterId,
+      questionCount: 1,
+    });
+    const question = started.questions[0]!;
+    expect(question.difficulty).toBe('medium');
+    const correctPosition = question.options.findIndex((option) => option.endsWith('option 0'));
+
+    harness.clock.advanceMs(9_000);
+    await harness.practice.service.submitAnswer(actorOf(account), started.id, {
+      questionId: question.id,
+      selectedIndex: correctPosition,
+      timeSpentMs: 9_000,
+      hintLevelUsed: 0,
+    });
+    await harness.practice.service.submitSession(actorOf(account), started.id);
+
+    const { rows } = await harness.postgres.client.query<{
+      time_target_ms: number;
+      authored_difficulty: string;
+    }>(`select time_target_ms, authored_difficulty from practice_responses where session_id = $1`, [
+      started.id,
+    ]);
+
+    const row = rows[0]!;
+    expect(row.time_target_ms).toBe(45_000);
+    expect(row.authored_difficulty).toBe('medium');
+  });
 });
 
 // ===========================================================================
@@ -346,14 +1111,11 @@ describe('submitAnswer — reveal-then-re-answer', () => {
   ): Promise<{ questionId: string; revealedCorrectPosition: number }[]> {
     const session = await harness.practice.service.getSession(actorOf(account), sessionId);
     const revealed: { questionId: string; revealedCorrectPosition: number }[] = [];
+    let question: PracticeQuestion | null = session.questions[0] ?? null;
 
-    for (const question of session.questions) {
+    while (question !== null) {
       harness.clock.advanceMs(PASSING_TIME_MS);
-      const canonicalCorrect = Number(/correct=(\d)/.exec(question.questionText)?.[1] ?? '0');
-      const canonicalWrong = (canonicalCorrect + 1) % 4;
-      const wrongPosition = question.options.findIndex((option) =>
-        option.endsWith(`option ${canonicalWrong}`),
-      );
+      const wrongPosition = wrongPositionOf(question);
 
       const result = await harness.practice.service.submitAnswer(actorOf(account), sessionId, {
         questionId: question.id,
@@ -367,6 +1129,7 @@ describe('submitAnswer — reveal-then-re-answer', () => {
         questionId: question.id,
         revealedCorrectPosition: result.correctPresentationIndex,
       });
+      question = result.nextQuestion;
     }
 
     return revealed;
@@ -648,35 +1411,44 @@ describe('the per-question shuffle map — EACH QUESTION HAS ITS OWN, AND IT IS 
       questionCount: 6,
     });
 
-    const { rows: sessionRows } = await harness.postgres.client.query<{
-      option_order: Record<string, number[]>;
-    }>(`select option_order from practice_sessions where id = $1`, [started.id]);
-    const maps = sessionRows[0]!.option_order;
-
-    // THE PRECONDITION, IN TWO PARTS. The maps must reorder, and they must
-    // differ from each other — the harness default satisfies the first and
-    // fails the second, which is the whole gap.
-    const serialised = started.questions.map((question) => maps[question.id]!.join(''));
-    expect(serialised).not.toContain('0123');
-    expect(new Set(serialised).size).toBeGreaterThan(1);
-
     // A position that the question's OWN map moved, chosen per question so a
     // fixed point cannot make the assertion vacuous.
+    //
+    // WALKS `nextQuestion` (Task 5): the session arrives with one question and
+    // its map, and every later question's map is appended only once the one
+    // before it is answered — so each is read from the database right before
+    // it is used, rather than all six being read upfront.
     const tapped = new Map<string, { position: number; canonical: number }>();
-    for (const question of started.questions) {
-      const map = maps[question.id]!;
+    const serialised: string[] = [];
+
+    let question: PracticeQuestion | null = started.questions[0] ?? null;
+    while (question !== null) {
+      const { rows: sessionRows } = await harness.postgres.client.query<{
+        option_order: Record<string, number[]>;
+      }>(`select option_order from practice_sessions where id = $1`, [started.id]);
+      const map = sessionRows[0]!.option_order[question.id]!;
+      serialised.push(map.join(''));
+
       const position = map.findIndex((canonical, index) => canonical !== index);
       expect(position).toBeGreaterThanOrEqual(0);
       tapped.set(question.id, { position, canonical: map[position]! });
 
       harness.clock.advanceMs(PASSING_TIME_MS);
-      await varying.service.submitAnswer(actorOf(account), started.id, {
+      const result = await varying.service.submitAnswer(actorOf(account), started.id, {
         questionId: question.id,
         selectedIndex: position,
         timeSpentMs: PASSING_TIME_MS,
         hintLevelUsed: 0,
       });
+      question = result.nextQuestion;
     }
+
+    // THE PRECONDITION, IN TWO PARTS. The maps must reorder, and they must
+    // differ from each other — the harness default satisfies the first and
+    // fails the second, which is the whole gap.
+    expect(serialised).not.toContain('0123');
+    expect(new Set(serialised).size).toBeGreaterThan(1);
+
     await varying.service.submitSession(actorOf(account), started.id);
 
     const { rows } = await harness.postgres.client.query<{
@@ -711,19 +1483,23 @@ describe('the per-question shuffle map — EACH QUESTION HAS ITS OWN, AND IT IS 
       questionCount: 6,
     });
 
-    const { rows: sessionRows } = await harness.postgres.client.query<{
-      option_order: Record<string, number[]>;
-    }>(`select option_order from practice_sessions where id = $1`, [started.id]);
-    const maps = sessionRows[0]!.option_order;
-
     // WRONG AND RIGHT ALTERNATE, so the wrong-answer streak never reaches
     // `RECOVERY_WRONG_STREAK` — past that point `decideNext` correctly returns
     // `flag_for_recovery` with no code, and the assertion would be about the
     // wrong branch.
-    for (const [index, question] of started.questions.entries()) {
+    //
+    // WALKS `nextQuestion` (Task 5) — each question's map is read right before
+    // it is used, once `submitAnswer` has appended it.
+    let question: PracticeQuestion | null = started.questions[0] ?? null;
+    let index = 0;
+    while (question !== null) {
+      const { rows: sessionRows } = await harness.postgres.client.query<{
+        option_order: Record<string, number[]>;
+      }>(`select option_order from practice_sessions where id = $1`, [started.id]);
+      const map = sessionRows[0]!.option_order[question.id]!;
+
       const canonicalCorrect = Number(/correct=(\d)/.exec(question.questionText)?.[1] ?? '0');
       const canonicalWrong = (canonicalCorrect + 1) % 4;
-      const map = maps[question.id]!;
       const answerWrong = index % 2 === 0;
       const position = map.indexOf(answerWrong ? canonicalWrong : canonicalCorrect);
 
@@ -744,6 +1520,9 @@ describe('the per-question shuffle map — EACH QUESTION HAS ITS OWN, AND IT IS 
       }
       // The overlay highlights the correct option where THIS question showed it.
       expect(result.correctPresentationIndex).toBe(map.indexOf(canonicalCorrect));
+
+      question = result.nextQuestion;
+      index += 1;
     }
   });
 });
@@ -769,7 +1548,24 @@ describe('startSession — A HELD-OUT QUESTION IS NEVER SERVED', () => {
       questionCount: 20,
     });
 
-    const served = started.questions.map((question) => question.id);
+    // WALKS `nextQuestion` (Task 5) to the end of the chapter — with only two
+    // real questions the session ends early rather than repeat one, so this
+    // collects every id actually served rather than reading `session.questions`
+    // once for a full array that no longer exists.
+    const served: string[] = [];
+    let question: PracticeQuestion | null = started.questions[0] ?? null;
+    while (question !== null) {
+      served.push(question.id);
+      harness.clock.advanceMs(PASSING_TIME_MS);
+      const result = await harness.practice.service.submitAnswer(actorOf(account), started.id, {
+        questionId: question.id,
+        selectedIndex: correctPositionOf(question),
+        timeSpentMs: PASSING_TIME_MS,
+        hintLevelUsed: 0,
+      });
+      question = result.nextQuestion;
+    }
+
     expect(served).not.toContain(heldOut[0]!.id);
     expect(served).toHaveLength(2);
   });
@@ -864,16 +1660,15 @@ describe('submitSession — the SERVER bounds the claimed time (the contract’s
     claimedMs: number,
   ): Promise<void> {
     const session = await harness.practice.service.getSession(actorOf(account), sessionId);
-    for (const question of session.questions) {
-      const canonical = /correct=(\d)/.exec(question.questionText)?.[1] ?? '0';
-      await harness.practice.service.submitAnswer(actorOf(account), sessionId, {
+    let question: PracticeQuestion | null = session.questions[0] ?? null;
+    while (question !== null) {
+      const result = await harness.practice.service.submitAnswer(actorOf(account), sessionId, {
         questionId: question.id,
-        selectedIndex: question.options.findIndex((option) =>
-          option.endsWith(`option ${canonical}`),
-        ),
+        selectedIndex: correctPositionOf(question),
         timeSpentMs: claimedMs,
         hintLevelUsed: 0,
       });
+      question = result.nextQuestion;
     }
   }
 
@@ -955,25 +1750,28 @@ describe('submitSession — the same-answer rule reads the SCREEN POSITION', () 
       chapterId,
       questionCount: 6,
     });
-    const session = await varying.service.getSession(actorOf(account), started.id);
 
+    // WALKS `nextQuestion` (Task 5): each question's own map is read right
+    // before it is tapped, since only the served ones exist yet.
     const TAPPED_POSITION = 2;
-    for (const question of session.questions) {
+    const canonicals: number[] = [];
+    let question: PracticeQuestion | null = started.questions[0] ?? null;
+    while (question !== null) {
+      const { rows: sessionRows } = await harness.postgres.client.query<{
+        option_order: Record<string, number[]>;
+      }>(`select option_order from practice_sessions where id = $1`, [started.id]);
+      canonicals.push(sessionRows[0]!.option_order[question.id]![TAPPED_POSITION]!);
+
       harness.clock.advanceMs(PASSING_TIME_MS);
-      await varying.service.submitAnswer(actorOf(account), started.id, {
+      const result = await varying.service.submitAnswer(actorOf(account), started.id, {
         questionId: question.id,
         selectedIndex: TAPPED_POSITION,
         timeSpentMs: PASSING_TIME_MS,
         hintLevelUsed: 0,
       });
+      question = result.nextQuestion;
     }
 
-    const { rows: sessionRows } = await harness.postgres.client.query<{
-      option_order: Record<string, number[]>;
-    }>(`select option_order from practice_sessions where id = $1`, [started.id]);
-    const canonicals = session.questions.map(
-      (question) => sessionRows[0]!.option_order[question.id]![TAPPED_POSITION],
-    );
     // THE PRECONDITION. If every map were identical this would be one value and
     // the old rule would have caught it too, proving nothing.
     expect(new Set(canonicals).size).toBeGreaterThan(1);
@@ -1025,19 +1823,21 @@ describe('submitSession — the same-answer rule reads the SCREEN POSITION', () 
       chapterId,
       questionCount: 6,
     });
-    const session = await varying.service.getSession(actorOf(account), started.id);
 
+    // WALKS `nextQuestion` (Task 5), one question at a time.
     const positions: number[] = [];
-    for (const question of session.questions) {
+    let question: PracticeQuestion | null = started.questions[0] ?? null;
+    while (question !== null) {
       const position = question.options.findIndex((option) => option.endsWith('option 1'));
       positions.push(position);
       harness.clock.advanceMs(PASSING_TIME_MS);
-      await varying.service.submitAnswer(actorOf(account), started.id, {
+      const result = await varying.service.submitAnswer(actorOf(account), started.id, {
         questionId: question.id,
         selectedIndex: position,
         timeSpentMs: PASSING_TIME_MS,
         hintLevelUsed: 0,
       });
+      question = result.nextQuestion;
     }
     // The student really did tap different places. Without varied maps this
     // test would say nothing.

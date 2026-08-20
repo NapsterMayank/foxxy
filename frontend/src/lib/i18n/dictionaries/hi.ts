@@ -322,6 +322,7 @@ export const hi: Dictionary = {
     answerAction: 'मेरा उत्तर जाँचें',
     nextAction: 'अगला सवाल',
     finishAction: 'पूरा करें और नतीजा देखें',
+    resumeReadyDescription: 'इस सत्र के सभी सवालों के उत्तर हो चुके हैं।',
     loadingSession: 'आपके सवाल तैयार हो रहे हैं',
 
     feedbackCorrect: 'यह सही है।',

@@ -380,6 +380,8 @@ export const en = {
     answerAction: 'Check my answer',
     nextAction: 'Next question',
     finishAction: 'Finish and see my result',
+    /* Shown when a session is re-opened with every served question answered. */
+    resumeReadyDescription: 'You have answered everything in this session.',
     loadingSession: 'Getting your questions ready',
 
     feedbackCorrect: 'That is right.',

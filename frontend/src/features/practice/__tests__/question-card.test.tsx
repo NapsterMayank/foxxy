@@ -24,6 +24,7 @@ const result: AnswerResult = {
   misconceptionCode: null,
   answeredCount: 1,
   questionCount: 6,
+  nextQuestion: null,
 };
 
 function setup(overrides: Partial<React.ComponentProps<typeof QuestionCard>> = {}) {

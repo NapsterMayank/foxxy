@@ -192,8 +192,8 @@ async function practise(child: HarnessAccount, correct: number, total: number): 
     await harness.postgres.client.query(
       `insert into practice_responses
          (session_id, student_user_id, question_id, selected_index, is_correct,
-          time_spent_ms, authored_difficulty, tenant_id, created_at)
-       values ($1, $2, $3, 0, $4, 9000, 'medium', $5, $6)`,
+          time_spent_ms, authored_difficulty, time_target_ms, tenant_id, created_at)
+       values ($1, $2, $3, 0, $4, 9000, 'medium', 45000, $5, $6)`,
       [sessionId, child.userId, questionId, index < correct, TEST_TENANT_ID, harness.clock.now()],
     );
   }
