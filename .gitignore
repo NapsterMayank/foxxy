@@ -54,3 +54,5 @@ docker/data/
 frontend/node_modules/
 frontend/.next/
 demo-shots/
+.gstack/
+artifacts/
