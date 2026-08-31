@@ -3,6 +3,7 @@ import { apiBaseUrl, apiVersionPrefix } from '@/lib/config/env';
 import { errorResponseSchema } from './generated/contracts/identity.contract';
 import { ERROR_CODES, type ErrorCode } from './generated/error-codes';
 import { ApiError } from './errors';
+import { currentVisitId } from './visit-id';
 
 /**
  * ===========================================================================
@@ -127,6 +128,35 @@ export async function toApiError(
   });
 }
 
+/**
+ * Headers for a request that carries a body.
+ *
+ * ===========================================================================
+ * `x-visit-id` IS SENT ONLY HERE, AND THAT IS THE WHOLE POINT — D-401.
+ *
+ * A custom request header is not CORS-simple, so it forces a preflight OPTIONS
+ * on every request that carries one. `content-type: application/json` already
+ * forces that preflight for every request with a body, so riding along costs
+ * nothing. Adding it to bodyless GETs — which are most of the app's traffic and
+ * currently preflight-free — would double the round trips on every read to
+ * label a request that starts nothing.
+ *
+ * The two endpoints that record a visit (`POST /foxy/sessions`,
+ * `POST /practice/sessions`) both send a body, so both are covered.
+ *
+ * A NULL VISIT SENDS NO HEADER rather than an empty one: absent and "present
+ * but blank" would be the same fact wearing two shapes, and the server would
+ * have to know about both.
+ * ===========================================================================
+ */
+function bodyHeaders(): Record<string, string> {
+  const visitId = currentVisitId();
+  return {
+    'content-type': 'application/json',
+    ...(visitId === null ? {} : { 'x-visit-id': visitId }),
+  };
+}
+
 export async function apiRequest<T>(request: ApiRequest<T>): Promise<T> {
   const method = request.method ?? 'GET';
   const url = `${apiBaseUrl}${apiVersionPrefix}${request.path}`;
@@ -137,7 +167,7 @@ export async function apiRequest<T>(request: ApiRequest<T>): Promise<T> {
       method,
       // See point 1. The single most consequential line in this file.
       credentials: 'include',
-      headers: request.body === undefined ? {} : { 'content-type': 'application/json' },
+      headers: request.body === undefined ? {} : bodyHeaders(),
       ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     });

@@ -8,6 +8,7 @@ import type {
   FoxySessionResponse,
 } from '@/shared/contracts/foxy.contract';
 import { requireActor as requireRequestActor } from '@/shared/http/require-actor';
+import { readVisitId } from '@/shared/http/visit-id';
 import { listActions } from './domain/actions';
 import { listModes } from './domain/modes';
 import { SSE_HEADERS, encodeFrame } from './domain/sse';
@@ -106,10 +107,14 @@ export function registerFoxyRoutes(app: FastifyInstance, deps: FoxyRoutesDeps): 
     // than passed as `undefined`. The two are different facts to the type
     // system, and "present and undefined" is the shape that would eventually
     // write a NULL nobody intended.
+    // D-401 — the header, not the body. `null` is OMITTED for the same
+    // `exactOptionalPropertyTypes` reason as `chapterId` on the next line.
+    const visitId = readVisitId(request);
     const session = await deps.service.startSession(requireActor(request), {
       mode: input.mode,
       subject: input.subject,
       ...(input.chapterId === undefined ? {} : { chapterId: input.chapterId }),
+      ...(visitId === null ? {} : { visitId }),
     });
     const body: FoxySessionResponse = { session: toSessionDto(session) };
     return reply.status(201).send(body);

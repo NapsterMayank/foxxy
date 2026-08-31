@@ -524,6 +524,9 @@ export function createFoxyService(deps: FoxyServiceDeps): FoxyService {
         chapterId: input.chapterId ?? null,
         language,
         startedAt: clock.now(),
+        // D-401. Straight through, unvalidated beyond `readVisitId`'s uuid
+        // parse — there is nothing here to authorise, and nothing reads it.
+        visitId: input.visitId ?? null,
       });
     },
 

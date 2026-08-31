@@ -51,6 +51,8 @@ export interface NewSession {
   readonly chapterId: string | null;
   readonly language: LanguageCode;
   readonly startedAt: Date;
+  /** D-401. `null` when the caller sent no usable `X-Visit-Id`. */
+  readonly visitId: string | null;
 }
 
 export interface NewMessage {
@@ -188,6 +190,7 @@ export function createFoxyRepository(handle: FoxyDbHandle): FoxyRepository {
           chapterId: input.chapterId,
           language: input.language,
           startedAt: input.startedAt,
+          visitId: input.visitId,
         })
         .returning();
 

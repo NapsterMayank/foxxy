@@ -6,6 +6,7 @@ import type {
   ProgressResponse,
   SubmissionResponse,
 } from '@/shared/contracts/practice.contract';
+import { readVisitId } from '@/shared/http/visit-id';
 import { parseInput, practiceSchemas } from './practice.schema';
 import type { PracticeService } from './practice.service';
 import type { PracticeActor } from './practice.types';
@@ -55,7 +56,12 @@ export function registerPracticeRoutes(app: FastifyInstance, deps: PracticeRoute
   /** §8.6 — draws the questions and freezes their order for this session. */
   app.post(`${API_PREFIX}/practice/sessions`, authenticated, async (request, reply) => {
     const input = parseInput(practiceSchemas.startSession, request.body);
-    const session = await deps.service.startSession(requireActor(request), input);
+    // D-401 — the `X-Visit-Id` header, not the body. See `shared/http/visit-id`.
+    const session = await deps.service.startSession(
+      requireActor(request),
+      input,
+      readVisitId(request),
+    );
     const body: PracticeSessionResponse = { session };
     return reply.status(201).send(body);
   });

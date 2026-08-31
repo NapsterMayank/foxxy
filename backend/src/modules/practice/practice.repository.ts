@@ -116,6 +116,8 @@ export interface CreateSessionInput {
   readonly optionOrder: Readonly<Record<string, readonly number[]>>;
   readonly targetQuestionCount: number;
   readonly now: Date;
+  /** D-401. `null` when the caller sent no usable `X-Visit-Id`. */
+  readonly visitId: string | null;
 }
 
 export interface CompleteSessionInput {
@@ -355,6 +357,8 @@ export function createPracticeRepository(handle: PracticeDbHandle): PracticeRepo
           questionIds: [...input.questionIds],
           optionOrder: input.optionOrder,
           targetQuestionCount: input.targetQuestionCount,
+          // D-401. A label on the session, never a key it is found by.
+          visitId: input.visitId,
           answers: {},
           // From the INJECTED clock, never `defaultNow()`: the anti-cheat rules
           // and the retention schedule both compare against it, and a mix of

@@ -53,7 +53,13 @@ describe('the shape of every request', () => {
     await apiRequest({ path: '/auth/login', method: 'POST', body: { a: 1 }, schema: okSchema });
     const withBody = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(withBody.body).toBe('{"a":1}');
-    expect(withBody.headers).toEqual({ 'content-type': 'application/json' });
+    // `content-type` and the D-401 visit id, which rides along on exactly the
+    // requests that already carry a body. `objectContaining` rather than an
+    // exact match so this assertion stays about the CONTENT TYPE — the visit
+    // header has its own suite in `visit-id.test.ts`.
+    expect(withBody.headers).toEqual(
+      expect.objectContaining({ 'content-type': 'application/json' }),
+    );
 
     fetchMock.mockClear();
     await apiRequest({ path: '/auth/logout', method: 'POST', schema: okSchema });

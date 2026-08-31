@@ -117,6 +117,30 @@ export const chatSessions = pgTable(
      * count, and copying `started_at` here at creation would erase it.
      */
     lastMessageAt: timestamp('last_message_at', { withTimezone: true }),
+    /**
+     * WHICH OPEN OF THE APP THIS CONVERSATION BELONGS TO — D-401.
+     *
+     * A correlation id and nothing else. The client mints one uuid per app
+     * launch and sends it as `X-Visit-Id`; every chat and practice session
+     * started under that launch carries it. It is what turns "this student did
+     * six things today" into "this student did six things across two visits",
+     * which is the question neither table could answer before.
+     *
+     * NOT the auth session id, and the distinction matters: `sessions` is one
+     * row per LOGIN, and a cookie survives weeks of opens, so the auth session
+     * is constant across exactly the visits this column exists to separate.
+     *
+     * NULLABLE, and it stays nullable. It is absent on every row written before
+     * this migration, on any non-browser caller, and whenever a proxy strips the
+     * header. A NOT NULL would make a missing correlation id fail a learning
+     * action — trading a working product for a tidy column.
+     *
+     * NEVER AUTHORISES ANYTHING. It is client-supplied, so it is read for
+     * correlation only: no lookup is scoped by it, no access check consults it,
+     * and `readVisitId` discards anything that is not a uuid rather than
+     * storing what the caller sent.
+     */
+    visitId: uuid('visit_id'),
   },
   (table) => [
     check('chat_sessions_mode_check', sql`${table.mode} in (${modeList})`),
@@ -127,6 +151,12 @@ export const chatSessions = pgTable(
     index('chat_sessions_student_idx').on(table.studentUserId, table.startedAt.desc()),
     index('chat_sessions_tenant_idx').on(table.tenantId),
     index('chat_sessions_chapter_idx').on(table.chapterId),
+    // PARTIAL. Most rows written before D-401 have no visit, and a full index
+    // over a column that is mostly NULL pays for entries no query will read —
+    // every lookup here is `visit_id = $1`, which never matches NULL.
+    index('chat_sessions_visit_idx')
+      .on(table.visitId)
+      .where(sql`visit_id is not null`),
   ],
 );
 

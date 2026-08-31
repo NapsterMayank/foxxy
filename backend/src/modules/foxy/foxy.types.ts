@@ -184,6 +184,19 @@ export interface StartSessionInput {
   readonly mode: FoxyMode;
   readonly subject: Subject;
   readonly chapterId?: string;
+  /**
+   * Which open of the app this conversation belongs to — D-401.
+   *
+   * NOT ON THE WIRE BODY. It arrives as the `X-Visit-Id` header and the route
+   * reads it with `readVisitId`; a body field would be a second, editable
+   * place to put it and the two would eventually disagree.
+   *
+   * Optional, like `chapterId` above and under the same
+   * `exactOptionalPropertyTypes` rule: the route OMITS it rather than passing
+   * `undefined`, because "present and undefined" is the shape that writes a
+   * NULL nobody intended.
+   */
+  readonly visitId?: string;
 }
 
 /** What `sendMessage` takes. Exactly one of the two is present. */

@@ -132,6 +132,19 @@ export const practiceSessions = pgTable(
       .references(() => tenants.id, { onDelete: 'restrict' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * WHICH OPEN OF THE APP THIS SESSION BELONGS TO — D-401.
+     *
+     * The same correlation id `chat_sessions.visit_id` carries, minted once per
+     * app launch by the client and sent as `X-Visit-Id`. It is the only column
+     * that ties a practice session to the conversation the student had beside
+     * it: the two tables share no other key but the student and the clock, and
+     * a clock cannot tell two visits in one afternoon apart.
+     *
+     * Nullable, never authoritative, never authorises. See the fuller note on
+     * `chat_sessions.visit_id`.
+     */
+    visitId: uuid('visit_id'),
   },
   (table) => [
     check('practice_sessions_question_ids_check', sql`cardinality(${table.questionIds}) > 0`),
@@ -168,6 +181,10 @@ export const practiceSessions = pgTable(
     index('practice_sessions_tenant_idx').on(table.tenantId),
     index('practice_sessions_student_idx').on(table.studentUserId, table.startedAt.desc()),
     index('practice_sessions_chapter_idx').on(table.chapterId),
+    // PARTIAL, for the reason given on `chat_sessions_visit_idx`.
+    index('practice_sessions_visit_idx')
+      .on(table.visitId)
+      .where(sql`visit_id is not null`),
   ],
 );
 

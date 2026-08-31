@@ -219,7 +219,19 @@ class StaleMasteryError extends Error {
 
 export interface PracticeService {
   getTodaysMission(actor: PracticeActor): Promise<MissionView | null>;
-  startSession(actor: PracticeActor, input: StartSessionRequest): Promise<PracticeSessionView>;
+  /**
+   * @param visitId D-401 — which open of the app this session belongs to, from
+   * the `X-Visit-Id` header. A THIRD PARAMETER rather than a field on
+   * `StartSessionRequest`, because that type is the zod-inferred WIRE contract
+   * and this value does not travel in the body. Defaulted to `null` so a caller
+   * that has no visit — every test, and any non-browser client — says so by
+   * saying nothing.
+   */
+  startSession(
+    actor: PracticeActor,
+    input: StartSessionRequest,
+    visitId?: string | null,
+  ): Promise<PracticeSessionView>;
   getSession(actor: PracticeActor, sessionId: string): Promise<PracticeSessionView>;
   submitAnswer(
     actor: PracticeActor,
@@ -812,6 +824,7 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
     async startSession(
       actor: PracticeActor,
       input: StartSessionRequest,
+      visitId: string | null = null,
     ): Promise<PracticeSessionView> {
       const tenantId = await tenantOf(actor.userId);
       authorise(actor, 'write', actor.userId, 'practice', tenantId);
@@ -878,6 +891,9 @@ export function createPracticeService(deps: PracticeServiceDeps): PracticeServic
         optionOrder: { [first.id]: order },
         targetQuestionCount: input.questionCount,
         now: clock.now(),
+        // D-401 — which open of the app this session belongs to. Straight
+        // through: there is nothing to authorise and nothing reads it.
+        visitId,
       });
 
       logger.info(

@@ -29,7 +29,17 @@ export async function registerCors(app: FastifyInstance, options: CorsOptions): 
     origin: [...options.origins],
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['content-type', 'x-request-id'],
+    /**
+     * `x-visit-id` is D-401's correlation header. Without it here the browser's
+     * preflight refuses the header and the column silently stays NULL in
+     * production while every backend test — which uses `app.inject`, and
+     * `app.inject` does not enforce CORS — passes. That is the exact failure
+     * shape the SSE note below records; this line is the lesson applied.
+     *
+     * The client sends it ONLY on requests that already carry a body, so it
+     * adds no preflight that `content-type` was not causing anyway.
+     */
+    allowedHeaders: ['content-type', 'x-request-id', 'x-visit-id'],
     exposedHeaders: ['x-request-id', 'retry-after'],
     maxAge: 600,
   });
