@@ -1,0 +1,30 @@
+-- 0010_admin_view_comment — D-402. A comment correction, and nothing else.
+--
+-- ===========================================================================
+-- WHY A MIGRATION FOR A SENTENCE.
+--
+-- `v_learner_activity`'s comment, written one day earlier in 0009, says:
+--
+--     "READ-ONLY AND NOT AUTHORISED - ... it is for operations and psql, not
+--      for a route. A route reads its own module's table through that
+--      module's repository."
+--
+-- `GET /api/v1/admin/learners/:id/activity` is now a route that reads it. The
+-- rule was right about ordinary routes and wrong about this one, and the
+-- honest move is to change the rule on the record rather than leave a comment
+-- in the database that the code contradicts. A future reader who finds the
+-- old text and the admin route has to work out which one is stale; that is
+-- exactly the cost this repository writes comments to avoid.
+--
+-- WHAT ACTUALLY CHANGED: nothing about the view. No column, no predicate, no
+-- grant. `COMMENT ON` is metadata, so this migration is instant, needs no
+-- lock worth naming, and its rollback restores the previous sentence exactly.
+--
+-- THE PART OF THE OLD RULE THAT SURVIVES, and it is most of it: the view still
+-- carries NO ACCESS CHECK. It is not authorised, it is not tenant-scoped, and
+-- an ordinary product route still must not read it. What changed is that ONE
+-- caller is now allowed — a route that is gated to `super_admin`, audited on
+-- every read, and deliberately cross-tenant by design rather than by
+-- accident. Any second caller needs the same three properties or it is a leak.
+-- ===========================================================================
+COMMENT ON VIEW v_learner_activity IS 'Every learning activity a student started, chat and practice in one place, keyed by visit_id (D-401). CARRIES NO ACCESS CHECK OF ITS OWN - not authorised, not tenant-scoped. EXACTLY ONE ROUTE MAY READ IT (D-402): GET /api/v1/admin/learners/:id/activity, which is gated to super_admin, audited on every read, and cross-tenant by design. An ordinary product route must NOT read it - it reads its own module''s table through that module''s repository. Any further caller needs the same three properties (gate, audit, deliberate cross-tenant scope) or it is a data leak. Add WHERE tenant_id = ... by hand; nothing here does it for you.';

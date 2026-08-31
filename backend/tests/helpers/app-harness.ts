@@ -9,6 +9,7 @@ import { RecordingMail } from '@/platform/mail/index';
 import { createContainer, type Container } from '../../src/app/container';
 import { createServer } from '../../src/app/server';
 import { createFakeLlm, type FakeLlm, type LlmProvider } from '@/platform/llm/index';
+import { createAdminModule, type AdminModule } from '../../src/modules/admin/index';
 import { createContentModule, type ContentModule } from '../../src/modules/content/index';
 import { createFoxyModule, type ChunkSearch, type FoxyModule } from '../../src/modules/foxy/index';
 import {
@@ -66,6 +67,7 @@ export interface AppHarness {
   readonly notify: NotifyModule;
   readonly retrieval: RetrievalModule;
   readonly foxy: FoxyModule;
+  readonly admin: AdminModule;
   /**
    * The scripted language model the harness wired.
    *
@@ -615,8 +617,32 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     ...(options.digest === undefined ? {} : { digest: options.digest }),
   });
 
+  /**
+   * admin — BUILT HERE BECAUSE ITS ABSENCE WAS INVISIBLE.
+   *
+   * `admin-routes-are-gated.test.ts` asserts that a student gets 404 from every
+   * admin route. With no admin module in this harness those 404s came from
+   * FASTIFY'S ROUTE-NOT-FOUND, so the entire behavioural half of that suite
+   * passed while proving nothing — a gate cannot be observed refusing a route
+   * that was never registered.
+   *
+   * The harness therefore builds what production builds. `readinessUrl` points
+   * at a port nothing is listening on, deliberately: the readiness signal is
+   * then UNMEASURED rather than falsely green, which is the state the blind-spot
+   * assertions want to see.
+   */
+  const admin = createAdminModule({
+    db: container.poolFor('admin'),
+    clock,
+    logger,
+    audit: container.audit,
+    cache: container.cache,
+    requireSession: identity.requireSession,
+    readinessUrl: 'http://127.0.0.1:1/health/ready',
+  });
+
   const app = await createServer(container, {
-    modules: { identity, learner, content, practice, parent, notify, foxy },
+    modules: { identity, learner, content, practice, parent, notify, foxy, admin },
   });
   await app.ready();
 
@@ -632,6 +658,7 @@ export async function startAppHarness(options: AppHarnessOptions = {}): Promise<
     notify,
     retrieval,
     foxy,
+    admin,
     llm: defaultLlm,
     useLlm(next: FakeLlm): void {
       currentLlm = next;

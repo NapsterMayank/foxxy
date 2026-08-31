@@ -68,6 +68,9 @@ describe('buildModules', () => {
     // the intended state for all three — see the notes on `Modules`.
     const modules = buildModules(makeContainer());
     expect(Object.keys(modules).sort()).toEqual([
+      // The operations read model. REGISTERED, unlike the three below, but every
+      // route it adds sits behind a gate that answers 404 to a non-admin.
+      'admin',
       'billing',
       'content',
       'foxy',

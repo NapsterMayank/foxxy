@@ -1,0 +1,35 @@
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+/**
+ * THE GENERATED CONTRACTS MUST MATCH THE BACKEND.
+ *
+ * `src/lib/api/generated/` is a COPY, and a copy that nothing checks is a
+ * hand-written mirror with extra steps: the backend changes a field, this app
+ * keeps compiling against the old shape, and the disagreement is discovered by
+ * whoever is reading the panel during an incident.
+ *
+ * The same guard `frontend/` has, for the same reason. It runs the generator in
+ * `--check` mode, so a stale copy — or an edit made directly to a generated
+ * file — fails with the command that fixes it.
+ *
+ * It SKIPS when `../backend` is absent rather than failing: this app's image is
+ * built from `admin/` alone, and a check that cannot run there must not become
+ * a red suite that teaches people to ignore it. CI checks out the whole
+ * repository, so the gate is real where it matters.
+ */
+const appRoot = resolve(__dirname, '..', '..', '..', '..');
+const backendContracts = resolve(appRoot, '..', 'backend', 'src', 'shared', 'contracts');
+
+describe('generated contracts', () => {
+  it.skipIf(!existsSync(backendContracts))('are identical to the backend originals', () => {
+    expect(() => {
+      execFileSync(process.execPath, ['scripts/sync-contracts.mjs', '--check'], {
+        cwd: appRoot,
+        stdio: 'pipe',
+      });
+    }).not.toThrow();
+  });
+});

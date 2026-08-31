@@ -66,9 +66,24 @@ import {
 let postgres: TestPostgres;
 
 async function tableNames(): Promise<string[]> {
+  /**
+   * `table_type = 'BASE TABLE'` — VIEWS ARE NOT DRIFT.
+   *
+   * `information_schema.tables` counts a view as a table, and `v_learner_activity`
+   * (D-401) is a view that the schema barrel deliberately does not declare:
+   * drizzle-kit cannot emit one, nothing in the application reads it, and a
+   * repository that queried it would be reading two modules' tables through a
+   * back door. So it exists in exactly one of the two declarations this test
+   * compares, ON PURPOSE — and without this predicate that intent reads as
+   * precisely the drift the test exists to catch.
+   *
+   * The narrowing is safe rather than convenient: a real TABLE appearing in the
+   * database and not in the barrel is still caught, which is the property.
+   */
   const result = await postgres.client.query<{ table_name: string }>(
     `select table_name from information_schema.tables
-      where table_schema = 'public' order by table_name`,
+      where table_schema = 'public' and table_type = 'BASE TABLE'
+      order by table_name`,
   );
   return result.rows.map((row) => row.table_name);
 }

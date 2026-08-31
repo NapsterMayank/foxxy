@@ -205,6 +205,16 @@ const DRIVERS: Readonly<Record<ModuleName, (modules: Modules) => Promise<unknown
     // Loads the session from foxy's OWN repository before it authorises — unlike
     // `listSessions`, which resolves the tenant through identity first.
     foxy: (m) => m.foxy.service.getTranscript(ACTOR, '55555555-5555-4555-8555-555555555555'),
+    /**
+     * `jobs` and not `overview`: both start in admin's own repository, but
+     * `overview` also runs the signal collector, which probes `/health/ready`
+     * over HTTP. A driver whose first act is a network call would be measuring
+     * something other than the pool.
+     *
+     * `admin` HAS NO CROSS-MODULE EDGES AT ALL, so any of its reads would do —
+     * that is the property this entry quietly documents.
+     */
+    admin: (m) => m.admin.service.jobs({ ...ACTOR, role: 'super_admin' }),
   },
 );
 

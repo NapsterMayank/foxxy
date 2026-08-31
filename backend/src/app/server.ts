@@ -109,7 +109,6 @@ export async function createServer(
 
   registerRequestId(app, { idGen: container.idGen, logger: container.logger });
   registerErrorHandler(app);
-
   // THE READ LIST. CORS is the outer gate: may this browser talk to us at all.
   await registerCors(app, { origins: container.config.http.corsReadOrigins });
 

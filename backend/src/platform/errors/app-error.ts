@@ -169,9 +169,55 @@ export class InternalError extends AppError {
  * Normalises any thrown value into an AppError. Anything unrecognised becomes
  * an InternalError so no internal message or stack can reach a client.
  */
+/**
+ * Fastify parser failures that are the CALLER's fault, not the server's.
+ *
+ * =============================================================================
+ * A BODYLESS POST WITH A JSON CONTENT TYPE WAS ANSWERING 500 — D-403.
+ *
+ * Fastify's stock JSON parser rejects an empty body with
+ * `FST_ERR_CTP_EMPTY_JSON_BODY`, which arrives here as an ordinary `Error` and
+ * falls through to `InternalError`: 500, "Something went wrong."
+ *
+ * Every bodyless POST in the product was affected — `/auth/logout`,
+ * `/auth/logout-all`, `/admin/monitoring/dry-run` — but ONLY for callers that
+ * set the header. The browser client sends `content-type` only when there is a
+ * body, so the product never tripped it and the defect sat behind a 200. Any
+ * other client trips it at once: curl with an explicit header, Postman's
+ * default, most generated SDKs. Found by driving the admin panel with a real
+ * HTTP client instead of the app's own.
+ *
+ * -----------------------------------------------------------------------------
+ * MAPPED HERE RATHER THAN FIXED IN THE PARSER, AND THAT IS THE SECOND ATTEMPT.
+ *
+ * The first was a root `addContentTypeParser` that treated an empty body as
+ * `undefined`. It broke every billing test with `FST_ERR_CTP_ALREADY_PRESENT`:
+ * `billing.routes.ts` installs a RAW-BODY parser in its own scope so the
+ * webhook HMAC is computed over the exact bytes Razorpay sent, and its comment
+ * says in as many words that a global parser would break it. It was right.
+ *
+ * Translating the error costs nothing, touches no parser, and cannot reach the
+ * signature path. The status becomes 400, which is the honest answer: the
+ * request is malformed for the content type it declared, and the server is
+ * working perfectly.
+ * =============================================================================
+ */
+const CALLER_FAULT_PARSER_CODES = new Set([
+  'FST_ERR_CTP_EMPTY_JSON_BODY',
+  'FST_ERR_CTP_INVALID_MEDIA_TYPE',
+  'FST_ERR_CTP_BODY_TOO_LARGE',
+]);
+
 export function toAppError(value: unknown): AppError {
   if (isAppError(value)) return value;
   if (value instanceof Error) {
+    const code: unknown = (value as { code?: unknown }).code;
+    if (typeof code === 'string' && CALLER_FAULT_PARSER_CODES.has(code)) {
+      return new ValidationError('That request body could not be read.', {
+        message: `${code}: ${value.message}`,
+        cause: value,
+      });
+    }
     return new InternalError({ message: value.message, cause: value });
   }
   return new InternalError({ message: `Non-error thrown: ${String(value)}`, cause: value });

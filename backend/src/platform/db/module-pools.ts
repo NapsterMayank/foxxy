@@ -43,7 +43,8 @@ export type ModuleName =
   | 'knowledge'
   | 'signals'
   | 'retrieval'
-  | 'foxy';
+  | 'foxy'
+  | 'admin';
 
 /**
  * Exhaustive by construction: `Record<ModuleName, PoolName>` means adding a
@@ -76,6 +77,26 @@ export const MODULE_POOLS: Readonly<Record<ModuleName, PoolName>> = Object.freez
 
   retrieval: 'ai',
   foxy: 'ai',
+
+  /**
+   * `admin` GETS `core`, AND THE OBVIOUS ALTERNATIVE IS FORBIDDEN FOR A REASON.
+   *
+   * By cost profile alone it does not belong here: the overview is nine
+   * `count(*)` over whole tables and the metrics screen sums a window of
+   * `metrics_events`, all of it refreshed by an operator during exactly the
+   * incident when `core` has least to spare. `worker` looked like the answer.
+   *
+   * IT IS NOT AVAILABLE. `worker` is reached from the worker ENTRY POINT, not
+   * from a module — a module on it would be live traffic competing with
+   * background jobs, which is the thing §3.2 separates the processes to avoid,
+   * and `module-pools.test.ts` asserts no module is on it.
+   *
+   * So `core` it is, knowingly. If an admin screen is ever measured starving
+   * learner traffic the fix is a real `ops` pool with its own budget and role
+   * caps — a change to `pool-budget.ts` and the config schema, which is an ADR
+   * and not a one-line edit to this table.
+   */
+  admin: 'core',
 });
 
 /**

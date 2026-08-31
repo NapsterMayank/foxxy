@@ -290,6 +290,92 @@ const MIGRATION_LIST_PATTERNS = [
 const MIGRATION_NAME = /^([0-9]{4}_[a-z0-9_]+?)(\.down)?(\.sql)?$/;
 const MAX_MIGRATIONS_NAMED_PER_FILE = 2;
 
+/**
+ * =============================================================================
+ * `admin` READS. IT DOES NOT WRITE, AND THAT IS THE LOAD-BEARING CLAIM.
+ *
+ * The admin routes deliberately bypass `assertCanAccess` — an operations
+ * surface reads across every tenant by definition, so the one authorisation
+ * primitive in this codebase that is airtight cannot guard them. Three things
+ * stand in for it (D-402):
+ *
+ *   1. the `requireAdmin` gate is the only door, proved by route enumeration
+ *   2. every read writes an audit row
+ *   3. NOTHING WRITES
+ *
+ * Property 3 is the one a comment cannot hold. It is one `update` away from
+ * being false, the diff that adds it looks helpful ("just let an operator
+ * deactivate a bad question"), and the moment it lands the admin module is a
+ * cross-tenant mutation surface with no `assertCanAccess` anywhere near it.
+ *
+ * So it is a lint rule. A write in an admin repository fails the build, and the
+ * message says where the write belongs instead: in the module that owns the
+ * table, behind that module's own guard.
+ *
+ * WHAT IT MATCHES: `.insert(`, `.update(`, `.delete(` — the drizzle builders —
+ * and a raw `sql` template whose first keyword is INSERT, UPDATE, DELETE,
+ * TRUNCATE, MERGE, DROP, ALTER, CREATE or GRANT. Both, because this module uses
+ * both styles and blocking only one would be theatre.
+ *
+ * WHAT IT CANNOT MATCH is a write assembled at runtime out of fragments. That
+ * is accepted: this rule is a ratchet against the easy accident, not a sandbox
+ * against a determined author. A determined author is what code review is for.
+ * =============================================================================
+ */
+const WRITE_METHODS = new Set(['insert', 'update', 'delete']);
+const WRITE_SQL = /^\s*(insert|update|delete|truncate|merge|drop|alter|create|grant)\b/i;
+
+const adminReadOnlyPlugin = {
+  rules: {
+    'no-writes': {
+      meta: {
+        type: 'problem',
+        schema: [],
+        messages: {
+          write:
+            'D-402: the admin module READS and never writes, and this is a {{what}}. ' +
+            'The admin routes deliberately bypass assertCanAccess because an operations ' +
+            'surface is cross-tenant by definition; "nothing writes" is one of the three ' +
+            'properties standing in for it, alongside the requireAdmin gate and the audit ' +
+            'row per read. A write here would be a cross-tenant mutation with no ' +
+            'authorisation primitive anywhere near it. Put it in the module that OWNS the ' +
+            'table, behind that module\'s own guard, and have admin read the result.',
+        },
+      },
+      create(context) {
+        return {
+          /** Drizzle: `db.insert(...)`, `tx.update(...)`, `db.delete(...)`. */
+          CallExpression(node) {
+            const callee = node.callee;
+            if (callee.type !== 'MemberExpression' || callee.computed) return;
+            const property = callee.property;
+            if (property.type !== 'Identifier') return;
+            if (!WRITE_METHODS.has(property.name)) return;
+            context.report({ node, messageId: 'write', data: { what: `.${property.name}() call` } });
+          },
+          /** Raw SQL: sql`update ...`, however it is indented. */
+          TaggedTemplateExpression(node) {
+            const tag = node.tag;
+            const tagName =
+              tag.type === 'Identifier'
+                ? tag.name
+                : tag.type === 'MemberExpression' && tag.property.type === 'Identifier'
+                  ? tag.property.name
+                  : null;
+            if (tagName !== 'sql') return;
+
+            const first = node.quasi.quasis[0];
+            const cooked = first === undefined ? null : first.value.cooked;
+            if (typeof cooked !== 'string') return;
+            if (!WRITE_SQL.test(cooked)) return;
+            context.report({ node, messageId: 'write', data: { what: 'writing SQL statement' } });
+          },
+        };
+      },
+    },
+  },
+};
+
 const migrationChainPlugin = {
   rules: {
     'no-migration-chain': {
@@ -483,7 +569,22 @@ export default tseslint.config(
     // The composition root is the other: it is what BUILDS the db handle and
     // hands it to repositories. Narrowed to that one file on purpose — if this
     // list ever grows, the boundary has stopped meaning anything.
-    files: ['src/modules/**/*.repository.ts'],
+    //
+    // `src/platform/**` JOINED THE GLOB WHEN ALERTING MOVED INTO `src/`.
+    //
+    // `platform/alerts/alerts.repository.ts` reads `metrics_events` and
+    // `pg_stat_activity`; those queries were legal under `scripts/`, where this
+    // rule does not reach, and became illegal the moment the module moved so the
+    // API could run a dry-run evaluation.
+    //
+    // The one-line alternative was to add `platform/alerts` to the D-181 block
+    // below, whose own closing sentence is "adding a fourth is not". So the SQL
+    // was put in a file named for what it is instead. This widening is NOT a
+    // fourth exemption: an exemption lets a file break the rule, and this lets a
+    // file KEEP it. After the change the boundary is stronger than before,
+    // because "SQL lives in a *.repository.ts" is now true of all of `src/`
+    // rather than of `src/modules/` with a quiet hole beside it.
+    files: ['src/modules/**/*.repository.ts', 'src/platform/**/*.repository.ts'],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -553,6 +654,22 @@ export default tseslint.config(
       'no-restricted-properties': 'off',
       'no-restricted-imports': 'off',
       'no-restricted-syntax': 'off',
+    },
+  },
+  {
+    /**
+     * D-402 — the admin module reads and never writes. See the rule definition
+     * near the top of this file for why a comment could not have held this.
+     *
+     * Scoped to the REPOSITORIES rather than to the whole module: they are the
+     * only files with a database handle, so they are the only files that could
+     * write. Scoping wider would flag `Array.prototype.delete`-shaped calls in
+     * a service and teach people to disable the rule.
+     */
+    files: ['src/modules/admin/**/*.repository.ts'],
+    plugins: { admin: adminReadOnlyPlugin },
+    rules: {
+      'admin/no-writes': 'error',
     },
   },
   {

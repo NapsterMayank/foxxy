@@ -1,0 +1,11 @@
+-- Rollback for drizzle/migrations/0010_admin_view_comment.sql
+--
+-- Restores 0009's wording verbatim. Nothing else in this migration to undo:
+-- it changed a comment, so the rollback changes it back and no data moves.
+--
+-- NOTE FOR WHOEVER RUNS THIS: rolling the comment back does not remove the
+-- admin route that reads the view. If this is being reverted because that
+-- route is being withdrawn, withdraw the route too - otherwise the database
+-- will once again carry a sentence the code contradicts, which is the exact
+-- state D-402 existed to end.
+COMMENT ON VIEW v_learner_activity IS 'Every learning activity a student started, chat and practice in one place, keyed by visit_id (D-401). READ-ONLY AND NOT AUTHORISED - it carries no access check of its own, so it is for operations and psql, not for a route. A route reads its own module''s table through that module''s repository. Add `WHERE tenant_id = ...` to every query against it by hand; nothing here does it for you.';

@@ -31,6 +31,8 @@
     "db:round-trip": "tsx --env-file-if-exists=.env scripts/ops/migration-round-trip.ts",
     "ops:alerts": "tsx --env-file-if-exists=.env scripts/ops/alert-evaluator-main.ts",
     "ops:preflight": "tsx --env-file-if-exists=.env scripts/ops/preflight-env.ts",
+    "ops:admin-create": "tsx --env-file-if-exists=.env scripts/ops/admin-create.ts",
+    "ops:admin-revoke": "tsx --env-file-if-exists=.env scripts/ops/admin-revoke.ts",
     "ops:env-contract": "tsx scripts/ops/env-contract-check.ts",
     "eval:retrieval:calibrate": "tsx --env-file-if-exists=.env eval/retrieval/calibrate.ts",
     "eval:retrieval:sparse": "tsx --env-file-if-exists=.env eval/retrieval/sparse-probe.ts",

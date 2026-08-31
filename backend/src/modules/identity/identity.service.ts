@@ -398,6 +398,31 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
   });
   /** The ABSOLUTE ceiling. The sliding window is `SESSION_IDLE_TTL_MS`. */
   const absoluteSessionTtlMs = deps.sessionTtlDays * 24 * 60 * 60 * 1000;
+
+  /**
+   * ===========================================================================
+   * AN OPERATOR SESSION IS MUCH SHORTER THAN A LEARNER SESSION — D-403.
+   *
+   * A learner is meant to stay signed in: the product is a habit, and a monthly
+   * re-login is friction on the thing it wants people to do daily. A
+   * `super_admin` cookie is the opposite kind of object. It reads every
+   * learner record in the product across every tenant (D-402), and it is
+   * carried on whatever laptop an operator happened to open the panel on.
+   *
+   * Thirty days of that was the learner policy applied to a credential nothing
+   * about the learner policy was reasoning about. Twelve hours is roughly a
+   * working day: an operator signs in when they start and again tomorrow, and a
+   * stolen cookie is worth hours rather than weeks.
+   *
+   * APPLIED AT ISSUE, not at validation. The ceiling is compared against
+   * `created_at`, so shortening it here shortens sessions minted from now on
+   * and leaves existing ones alone — which is the correct blast radius for a
+   * policy change, and means this cannot log every operator out mid-incident.
+   * ===========================================================================
+   */
+  const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+  const ceilingFor = (role: string): number =>
+    role === 'super_admin' ? Math.min(ADMIN_SESSION_TTL_MS, absoluteSessionTtlMs) : absoluteSessionTtlMs;
   const audit: AuditPort = deps.audit ?? createNoopAudit();
   const metrics: MetricsSink = deps.metrics ?? { increment: (): void => undefined };
   /** Every identifier hash in this module. Salted once, here — D-221. */
@@ -538,7 +563,7 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
     // `now` is also the row's `created_at` (the insert below carries no explicit
     // one, and the column defaults to the transaction clock), so at issue time
     // the sliding window is the binding bound and the ceiling is 30 days out.
-    const expiresAt = sessionDeadline(now, now, SESSION_IDLE_TTL_MS, absoluteSessionTtlMs);
+    const expiresAt = sessionDeadline(now, now, SESSION_IDLE_TTL_MS, ceilingFor(user.role));
 
     await repository.createSession({
       userId: user.id,
@@ -926,7 +951,14 @@ export function createIdentityService(deps: IdentityServiceDeps): IdentityServic
        * unclamped `expires_at` that may sit past its own ceiling. Clamping the
        * write alone would leave those rows immortal.
        */
-      const pastCeiling = isPastAbsoluteLifetime(found.session.createdAt, now, absoluteSessionTtlMs);
+      // The ceiling is read from the CURRENT role, so promoting an account to
+      // super_admin immediately shortens the life of the session it is already
+      // holding rather than waiting for the next login.
+      const pastCeiling = isPastAbsoluteLifetime(
+        found.session.createdAt,
+        now,
+        ceilingFor(found.role),
+      );
       if (pastCeiling || isExpired(found.session.expiresAt, now)) {
         // Reap it rather than leave a dead row that will be looked up again.
         await repository.deleteSessionByTokenHash(hashToken(token));

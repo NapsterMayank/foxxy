@@ -4,6 +4,7 @@ import { NotFoundError } from '../platform/errors/index';
 import type { Payer } from '../platform/payments/index';
 import { createRateLimiter } from '../platform/rate-limit/index';
 import type { FoxyPlan } from '../shared/constants/foxy';
+import { createAdminModule, type AdminModule } from '../modules/admin/index';
 import {
   createBillingModule,
   hasFeature,
@@ -59,6 +60,15 @@ import type { Container } from './container';
  */
 export interface Modules {
   readonly identity: IdentityModule;
+  /**
+   * THE OPERATIONS READ MODEL. Owns no tables, writes nothing, and reads across
+   * every other module — see `modules/admin/index.ts` for why that is allowed.
+   *
+   * Optional in this record like the rest, and in `buildModules` it is built
+   * unconditionally: an admin surface that appears only under some condition is
+   * an admin surface whose absence nobody notices until they need it.
+   */
+  readonly admin: AdminModule;
   readonly learner: LearnerModule;
   readonly content: ContentModule;
   readonly practice: PracticeModule;
@@ -1050,6 +1060,32 @@ export function buildModules(container: Container, options: BuildModulesOptions 
     logger: container.logger,
   });
 
+  /**
+   * admin — BUILT LAST, because it depends on identity's session validator and
+   * on nothing else in this file.
+   *
+   * `db` follows the ordinary `forWorker` shape. `MODULE_POOLS` gives `admin`
+   * the `core` bulkhead — see the long note there for why the `worker` pool,
+   * which its cost profile would have preferred, is not available to a module.
+   */
+  const admin = createAdminModule({
+    db: forWorker ? container.pools.worker : container.poolFor('admin'),
+    clock: container.clock,
+    logger: container.logger,
+    audit: container.audit,
+    cache: container.cache,
+    requireSession: identity.requireSession,
+    /**
+     * THE API PROBES ITS OWN READINESS, exactly as the alert CLI does.
+     *
+     * Slightly odd to look at and correct: the number an operator needs is the
+     * one the pager would act on, and re-deriving readiness inside this process
+     * would be a second answer to a question `/health/ready` already answers.
+     * Two answers disagree the first time either changes.
+     */
+    readinessUrl: `${config.urls.api}/health/ready`,
+  });
+
   return {
     identity,
     learner,
@@ -1062,6 +1098,7 @@ export function buildModules(container: Container, options: BuildModulesOptions 
     billing,
     knowledge,
     signals,
+    admin,
   };
 }
 
@@ -1093,6 +1130,16 @@ export async function registerRoutes(
   modules.parent?.registerRoutes(app);
   modules.notify?.registerRoutes(app);
   modules.foxy?.registerRoutes(app);
+  /**
+   * REGISTERED LIKE ANY OTHER MODULE, and gated like no other.
+   *
+   * Every route it adds sits behind `requireAdmin`, which answers 404 to
+   * anybody who is not a `super_admin` — so to a learner's browser this
+   * registration adds nothing that exists. `admin-routes-are-gated.test.ts`
+   * walks the route table afterwards and proves it, rather than trusting this
+   * comment.
+   */
+  modules.admin?.registerRoutes(app);
   /**
    * AWAITED, unlike every module above it except `identity`.
    *

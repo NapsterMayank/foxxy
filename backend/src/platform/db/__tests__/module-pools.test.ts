@@ -86,6 +86,9 @@ describe('MODULE_POOLS — the §3.1 table', () => {
       'signals',
       'retrieval',
       'foxy',
+      // The operations read model. `core`, because the `worker` pool its cost
+      // profile would prefer is reserved for the worker entry point.
+      'admin',
     ];
     for (const module of modules) {
       expect(MODULE_POOLS[module]).toBeDefined();

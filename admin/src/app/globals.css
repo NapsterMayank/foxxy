@@ -1,0 +1,84 @@
+:root {
+  color-scheme: dark;
+  --bg: #0e1116;
+  --panel: #161b22;
+  --line: #262c36;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+  --mask: #6e7681;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/*
+ * MONOSPACE THROUGHOUT, AND DARK BY DEFAULT.
+ *
+ * Not an aesthetic. Every screen here is dense tabular data read next to a
+ * terminal during an incident: monospace makes uuids, counts and thresholds
+ * line up and makes a transposed digit visible. There is no light theme because
+ * there is no second audience to please.
+ */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+a { color: var(--accent); }
+
+.layout { display: grid; grid-template-columns: 200px 1fr; min-height: 100vh; }
+
+nav.side {
+  border-right: 1px solid var(--line);
+  padding: 16px 0;
+  background: var(--panel);
+}
+nav.side h1 { font-size: 12px; color: var(--muted); margin: 0 16px 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+nav.side a { display: block; padding: 5px 16px; color: var(--text); text-decoration: none; }
+nav.side a:hover { background: var(--line); }
+nav.side .group { color: var(--muted); font-size: 11px; margin: 14px 16px 4px; text-transform: uppercase; letter-spacing: 0.08em; }
+
+main { padding: 20px 24px; overflow-x: auto; }
+h2 { font-size: 16px; margin: 0 0 4px; font-weight: 600; }
+.sub { color: var(--muted); margin: 0 0 18px; }
+
+table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.card { border: 1px solid var(--line); background: var(--panel); padding: 12px 14px; border-radius: 6px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 22px; }
+.card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.card .value { font-size: 22px; font-variant-numeric: tabular-nums; }
+
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.bad { color: var(--bad); }
+.muted { color: var(--muted); }
+
+/* A masked value is styled so it reads as deliberately withheld rather than as
+   missing data — the two mean different things and look the same otherwise. */
+.masked { color: var(--mask); letter-spacing: 0.04em; }
+
+button {
+  font: inherit;
+  background: var(--line);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+
+.error { border: 1px solid var(--bad); color: var(--bad); padding: 10px 12px; border-radius: 6px; }

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   applyAllMigrations,
+  listMigrations,
   readDownMigration,
   readMigration,
   splitStatements,
@@ -51,6 +52,39 @@ async function run(sql: string): Promise<void> {
   }
 }
 
+/**
+ * Rolls the schema back through `target`, newest first.
+ *
+ * ===========================================================================
+ * IT USED TO PEEL EXACTLY ONE FILE, AND THAT WAS ONLY EVER TRUE BY LUCK.
+ *
+ * The note at the call site says peeling should happen "in the order a real
+ * rollback does it", and then peeled a single named migration — which works
+ * only while nothing newer depends on what it drops. D-401 ended that: it added
+ * `v_learner_activity`, a view over `practice_sessions`, and a view is a
+ * dependency. Postgres answered the one-file peel with `cannot drop table
+ * practice_sessions because other objects depend on it`.
+ *
+ * The fix is not to name the newer migration here. Naming it would make this
+ * file a hand-maintained list of which migrations exist — the D-075 defect the
+ * repository has a lint rule against, and one that would break again on the
+ * next migration that touches practice. The set is DISCOVERED from
+ * `listMigrations()`, so a migration added tomorrow is peeled with no edit.
+ * ===========================================================================
+ */
+async function rollBackThrough(target: string): Promise<void> {
+  const ordered = listMigrations();
+  const index = ordered.indexOf(target);
+  if (index < 0) {
+    throw new Error(`rollBackThrough: ${target} is not in the migration set`);
+  }
+  // Inclusive of the target and REVERSED — the exact order a real rollback
+  // walks, which is the whole claim being made.
+  for (const name of ordered.slice(index).reverse()) {
+    await run(readDownMigration(name.replace(/\.sql$/, '.down.sql')));
+  }
+}
+
 async function isNullable(table: string): Promise<boolean> {
   const result = await postgres.client.query<{ is_nullable: string }>(
     `select is_nullable from information_schema.columns
@@ -86,7 +120,7 @@ beforeAll(async () => {
  * mention it, and editing the superseded files would destroy the oracle
  * `baseline-collapse.test.ts` diffs the baseline against.
  */
-  await run(readDownMigration('0002_practice.down.sql'));
+  await rollBackThrough('0002_practice.sql');
 }, 180_000);
 
 afterAll(async () => {
