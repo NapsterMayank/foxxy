@@ -8,8 +8,19 @@
 | Flows | Student, Parent |
 | Core capability | Foxy — NCERT-grounded RAG AI tutor with citations |
 | Brand | Alfanumrik is the platform · Foxy is the AI tutor · Foxxy is the repository name |
-| Repo layout | `backend/` (Node + Fastify API) · `frontend/` (product Next.js) · `website/` (marketing + CMS) · `docs/` |
+| Repo layout | `backend/` (Node + Fastify API) · `frontend/` (product Next.js) · `admin/` (operations panel, D-402) · `website/` (marketing) · `docs/` |
 | Team | 1 engineer |
+
+> **This document describes TRACK A — the Foxxy product, everything in this
+> repository.** A second workstream exists since 21 August 2026: **Track B**, a
+> new retrieval module in its own repository, designed against the client's AGTS
+> dossier. **It changes nothing described here**, and Foxxy's `retrieval` module
+> is permanently out of its scope (D-387). Its documents live at
+> `docs/superpowers/plans/2026-08-21-rag-build-guide.md` (start here),
+> `.../2026-08-21-phase-0-howto.md`, and
+> `docs/superpowers/specs/2026-08-20-ncert-rag-design.md`. **Do not apply this
+> file's third-party policy or module conventions to Track B** — it is Python,
+> it is a different repository, and it has its own architecture.
 
 ---
 

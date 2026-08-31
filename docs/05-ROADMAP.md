@@ -2,7 +2,14 @@
 
 **Update rule:** revised whenever a phase completes or scope changes, with the reason recorded. Estimates are in solo person-days. If a number here disagrees with `PROGRESS.md`, PROGRESS.md wins — it is measured, this is planned.
 
-Last updated: **9 August 2026**
+Last updated: **9 August 2026** · Track B note added **22 August 2026**
+
+> **This roadmap covers TRACK A only** — the Foxxy product. **Track B**, the new
+> retrieval module opened 21 August, has its own phase plan at
+> `docs/superpowers/plans/2026-08-21-rag-build-guide.md` (~17-19 weeks, Phase 0
+> not yet started). **The two are not additive on one person's calendar.** If
+> both are live at once, this roadmap's solo-capacity arithmetic below is wrong
+> and needs redoing against whoever actually staffs Track B.
 
 ---
 

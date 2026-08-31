@@ -1,0 +1,623 @@
+[
+ {
+  "type": "decision",
+  "content": "Track B is a new retrieval module; Foxxy retrieval stays untouched",
+  "tags": [
+   "rag",
+   "scope",
+   "track-b"
+  ],
+  "files": [
+   "docs/superpowers/specs/2026-08-20-ncert-rag-design.md",
+   "docs/03-DECISION-LOG.md"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "decision",
+  "content": "Client AGTS dossier is parent architecture; our spec implements its sections 5-6",
+  "tags": [
+   "rag",
+   "architecture",
+   "track-b"
+  ],
+  "files": [
+   "docs/superpowers/specs/2026-08-20-ncert-rag-design.md"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "decision",
+  "content": "Blocks stored separately from learning objects so re-chunking never re-parses",
+  "tags": [
+   "rag",
+   "ingestion",
+   "schema"
+  ],
+  "files": [
+   "docs/superpowers/specs/2026-08-20-ncert-rag-design.md"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "decision",
+  "content": "Gold labels anchor to block ids, never object ids",
+  "tags": [
+   "rag",
+   "eval"
+  ],
+  "files": [
+   "docs/superpowers/specs/2026-08-20-ncert-rag-design.md"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "decision",
+  "content": "Every source quarantined by default; NCERT is copyrighted, not exempt",
+  "tags": [
+   "rag",
+   "rights",
+   "legal"
+  ],
+  "files": [
+   "docs/superpowers/specs/2026-08-20-ncert-rag-design.md"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "decision",
+  "content": "Policy filters execute before scoring, never after",
+  "tags": [
+   "rag",
+   "retrieval",
+   "security"
+  ],
+  "files": [
+   "docs/superpowers/specs/2026-08-20-ncert-rag-design.md"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "decision",
+  "content": "Keep post-rerank pack recall gate; AGTS G1 measures candidates only",
+  "tags": [
+   "rag",
+   "eval",
+   "gates"
+  ],
+  "files": [
+   "docs/superpowers/specs/2026-08-20-ncert-rag-design.md"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "next",
+  "content": "Write Track B Phase 0 implementation plan, Phase 0 only",
+  "tags": [
+   "rag",
+   "track-b",
+   "planning"
+  ],
+  "files": [
+   "docs/superpowers/specs/2026-08-20-ncert-rag-design.md"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "decision",
+  "content": "Client holds NCERT and other book rights; quarantine stays as mechanism only",
+  "tags": [
+   "rag",
+   "rights",
+   "track-b"
+  ],
+  "files": [
+   "docs/03-DECISION-LOG.md"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "blocker",
+  "content": "Track B Phase 1 blocked only on named pilot scope; rights cleared",
+  "tags": [
+   "rag",
+   "track-b",
+   "client"
+  ],
+  "files": [],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "next",
+  "content": "Phase 0 chapter: grade 10 Science Light Reflection and Refraction",
+  "tags": [
+   "rag",
+   "track-b",
+   "phase-0"
+  ],
+  "files": [
+   "docs/superpowers/plans/2026-08-21-rag-build-guide.md"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "fact",
+  "content": "Foxxy golden set has no gold chunk ids; retrieval accuracy never measured",
+  "tags": [
+   "retrieval",
+   "eval",
+   "foxxy"
+  ],
+  "files": [
+   "backend/eval/retrieval/golden/types.ts",
+   "backend/eval/retrieval/harness.ts"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "fact",
+  "content": "Foxxy chunks cannot be re-chunked; source pipeline and PDFs are gone",
+  "tags": [
+   "corpus",
+   "foxxy",
+   "ingestion"
+  ],
+  "files": [
+   "backend/scripts/import-corpus.ts"
+  ],
+  "date": "2026-08-21"
+ },
+ {
+  "type": "decision",
+  "content": "Client AI-native build guide supersedes our 17-19 week Track B plan",
+  "tags": [
+   "rag",
+   "track-b",
+   "planning"
+  ],
+  "files": [
+   "docs/superpowers/plans/2026-08-21-rag-build-guide.md",
+   "docs/03-DECISION-LOG.md"
+  ],
+  "date": "2026-08-24"
+ },
+ {
+  "type": "decision",
+  "content": "Track B code lives in D:/personal/agts-retrieval, its own repository",
+  "tags": [
+   "rag",
+   "track-b",
+   "repo"
+  ],
+  "files": [
+   "docs/03-DECISION-LOG.md"
+  ],
+  "date": "2026-08-24"
+ },
+ {
+  "type": "blocker",
+  "content": "Source rights blocking again; verbal assurance is not a rights record",
+  "tags": [
+   "rag",
+   "rights",
+   "client"
+  ],
+  "files": [
+   "docs/03-DECISION-LOG.md"
+  ],
+  "date": "2026-08-24"
+ },
+ {
+  "type": "blocker",
+  "content": "Named pilot scope still open; blocks curriculum spine and gold set",
+  "tags": [
+   "rag",
+   "track-b",
+   "client"
+  ],
+  "files": [],
+  "date": "2026-08-24"
+ },
+ {
+  "type": "fact",
+  "content": "recall@20 scored 100% for baseline and all four broken retrievers",
+  "tags": [
+   "rag",
+   "eval",
+   "gates"
+  ],
+  "files": [],
+  "date": "2026-08-24"
+ },
+ {
+  "type": "decision",
+  "content": "Abstention threshold calibrated from score separation, never hand-picked",
+  "tags": [
+   "rag",
+   "eval"
+  ],
+  "files": [],
+  "date": "2026-08-24"
+ },
+ {
+  "type": "next",
+  "content": "Send four open questions to client before further Track B work",
+  "tags": [
+   "rag",
+   "track-b",
+   "client"
+  ],
+  "files": [],
+  "date": "2026-08-24"
+ },
+ {
+  "type": "fact",
+  "content": "Client v1.0 backend/DB architecture doc reviewed against Foxxy schema",
+  "tags": [
+   "architecture",
+   "db"
+  ],
+  "files": [
+   "backend/drizzle/migrations/0000_baseline.sql"
+  ],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "blocker",
+  "content": "No consent, tombstone or retention tables; DPDP minor-consent gap",
+  "tags": [
+   "governance",
+   "privacy"
+  ],
+  "files": [],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "fact",
+  "content": "chapters unique key lacks board; second board collides",
+  "tags": [
+   "curriculum",
+   "schema"
+  ],
+  "files": [
+   "backend/drizzle/migrations/0000_baseline.sql"
+  ],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "fact",
+  "content": "Mastery is chapter-grained; client spec requires concept-grained state",
+  "tags": [
+   "adaptive",
+   "schema"
+  ],
+  "files": [],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "fact",
+  "content": "No composite tenant FKs and no RLS; class_enrolments has no tenant_id",
+  "tags": [
+   "tenancy",
+   "security"
+  ],
+  "files": [],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "fact",
+  "content": "Three session tables unrelated: sessions, chat_sessions, practice_sessions",
+  "tags": [
+   "schema",
+   "sessions"
+  ],
+  "files": [],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "fact",
+  "content": "chat_sessions never end; practice_sessions abandoned rows never swept",
+  "tags": [
+   "schema",
+   "sessions"
+  ],
+  "files": [],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "decision",
+  "content": "D-401: visit_id per app open on chat and practice sessions",
+  "tags": [
+   "schema",
+   "sessions"
+  ],
+  "files": [
+   "backend/drizzle/migrations/0009_visit_correlation.sql"
+  ],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "decision",
+  "content": "v_learner_activity view unions chat and practice for ops",
+  "tags": [
+   "schema",
+   "ops"
+  ],
+  "files": [
+   "backend/drizzle/migrations/0009_visit_correlation.sql"
+  ],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "next",
+  "content": "Still open: chat ended_at, practice abandon sweeper, learner_daily_facts",
+  "tags": [
+   "schema",
+   "sessions"
+  ],
+  "files": [],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "decision",
+  "content": "Admin panel: read-only, CLI-seeded super_admin, separate admin app",
+  "tags": [
+   "admin",
+   "architecture"
+  ],
+  "files": [
+   "docs/superpowers/specs/2026-08-25-admin-panel-design.md"
+  ],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "decision",
+  "content": "Alerts lifted to src/platform/alerts; SQL split into alerts.repository",
+  "tags": [
+   "admin",
+   "alerts"
+  ],
+  "files": [
+   "backend/src/platform/alerts/index.ts"
+  ],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "fact",
+  "content": "admin gate answers 404 not 403; enumeration test proves every route gated",
+  "tags": [
+   "admin",
+   "security"
+  ],
+  "files": [
+   "backend/src/shared/http/require-admin.ts"
+  ],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "fact",
+  "content": "app-harness omitted admin; admin 404 tests were passing vacuously",
+  "tags": [
+   "admin",
+   "testing"
+  ],
+  "files": [
+   "backend/tests/helpers/app-harness.ts"
+  ],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "next",
+  "content": "Admin phases 4 and 5 inline, then agents for phase 6 UI",
+  "tags": [
+   "admin"
+  ],
+  "files": [],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "decision",
+  "content": "D-402: admin panel read-only; amends D-401 view rule",
+  "tags": [
+   "admin"
+  ],
+  "files": [
+   "docs/03-DECISION-LOG.md"
+  ],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "fact",
+  "content": "Masking server-side; no email or content field on any admin response",
+  "tags": [
+   "admin",
+   "privacy"
+  ],
+  "files": [
+   "backend/src/modules/admin/domain/masking.ts"
+  ],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "next",
+  "content": "Admin phase 5: reveal endpoint, no-write lint rule",
+  "tags": [
+   "admin"
+  ],
+  "files": [],
+  "date": "2026-08-25"
+ },
+ {
+  "type": "fact",
+  "content": "admin/no-writes eslint rule proven on both write forms",
+  "tags": [
+   "admin",
+   "lint"
+  ],
+  "files": [
+   "backend/eslint.config.js"
+  ],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "fact",
+  "content": "Admin routes must use parseInput; bare zod parse returns 500",
+  "tags": [
+   "admin",
+   "validation"
+  ],
+  "files": [
+   "backend/src/modules/admin/admin.schema.ts"
+  ],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "next",
+  "content": "Admin phase 6: agents build the admin Next.js app",
+  "tags": [
+   "admin"
+  ],
+  "files": [],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "fact",
+  "content": "Admin panel complete: 19 endpoints, 11 screens, separate admin app",
+  "tags": [
+   "admin"
+  ],
+  "files": [
+   "admin/"
+  ],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "fact",
+  "content": "D-077 confirmed live: 0 of 2741 questions carry misconceptions",
+  "tags": [
+   "content",
+   "admin"
+  ],
+  "files": [],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "blocker",
+  "content": "Overview counts active chunks, coverage counts all; totals differ",
+  "tags": [
+   "admin",
+   "schema"
+  ],
+  "files": [
+   "backend/src/modules/admin/admin.repository.ts"
+  ],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "decision",
+  "content": "D-403: admin audit fixes - indexes, 12h operator session, reveal throttle",
+  "tags": [
+   "admin",
+   "security"
+  ],
+  "files": [
+   "docs/03-DECISION-LOG.md"
+  ],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "fact",
+  "content": "CORS defaults now include 3001 and 3002; admin blocked without them",
+  "tags": [
+   "admin",
+   "config"
+  ],
+  "files": [
+   "backend/.env.example"
+  ],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "next",
+  "content": "Admin panel never opened in a browser; screens unverified by eye",
+  "tags": [
+   "admin"
+  ],
+  "files": [],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "fact",
+  "content": "Admin panel verified in browser; 5 issues found and fixed",
+  "tags": [
+   "admin",
+   "qa"
+  ],
+  "files": [
+   "admin/README.md"
+  ],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "fact",
+  "content": "Bodyless POST with json content-type returned 500; now 400",
+  "tags": [
+   "http",
+   "bug"
+  ],
+  "files": [
+   "backend/src/platform/errors/app-error.ts"
+  ],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "next",
+  "content": "Commit admin work: ~30 untracked paths, nothing in git",
+  "tags": [
+   "admin",
+   "git"
+  ],
+  "files": [],
+  "date": "2026-08-26"
+ },
+ {
+  "type": "fact",
+  "content": "Track B: chemistry ch1 now parsed through repo adapters, 493 blocks",
+  "tags": [
+   "agts",
+   "parsing"
+  ],
+  "files": [],
+  "date": "2026-08-30"
+ },
+ {
+  "type": "decision",
+  "content": "EvaluationLicence lets quarantined sources be measured, never served",
+  "tags": [
+   "agts",
+   "rights"
+  ],
+  "files": [],
+  "date": "2026-08-30"
+ },
+ {
+  "type": "fact",
+  "content": "Real-content run: abstention margin -0.497, does not separate",
+  "tags": [
+   "agts",
+   "eval"
+  ],
+  "files": [],
+  "date": "2026-08-30"
+ },
+ {
+  "type": "next",
+  "content": "Build \u00a77.3 search representations; section objects too coarse to retrieve",
+  "tags": [
+   "agts",
+   "retrieval"
+  ],
+  "files": [],
+  "date": "2026-08-30"
+ }
+]
