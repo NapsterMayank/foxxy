@@ -32,13 +32,15 @@
  * produced by the exact fault it is meant to detect.
  */
 
-import { sql } from 'drizzle-orm';
-import type { DbHandle } from '../../src/platform/db/index';
+import type { DbHandle } from '../db/index';
 // D-333 — the ONE per-worker liveness read. This file used to carry a second
 // copy of it. See `collectWorkerHeartbeatAge`.
-import { readWorkerLiveness } from '../../src/platform/jobs/index';
-import type { Logger } from '../../src/platform/logger/index';
+import { readWorkerLiveness } from '../jobs/index';
+import type { Logger } from '../logger/index';
 import { SIGNALS } from './alert-rules';
+// The three database reads, in the one file allowed to make them. See the
+// header of `alerts.repository.ts` for why they are not inline here any more.
+import { collectMetricCounts, collectPoolSaturation, readDatabaseNow } from './alerts.repository';
 
 export interface SignalCollectionOptions {
   readonly db: DbHandle;
@@ -79,133 +81,6 @@ export function producibleSignals(options: { readonly backupDir?: string | undef
     names.push(SIGNALS.BACKUP_AGE_HOURS);
   }
   return names;
-}
-
-/** Metric names as emitted by `platform/metrics`. Duplicated here on purpose:
- *  see the note in collectMetricCounts. */
-const METRIC = {
-  BREAKER_TRANSITION: 'platform.breaker.transition',
-  BREAKER_REJECTED: 'platform.breaker.rejected',
-  CONCURRENCY_REJECTED: 'platform.concurrency.rejected',
-  PORT_TIMEOUT: 'platform.port.timeout',
-  /**
-   * The fast-failure counter — the one that makes an ordinary outage visible.
-   *
-   * The three above are all emitted by the GUARD refusing or abandoning a call.
-   * A dependency that REJECTS — connection refused, DNS failure, provider 500 —
-   * emits none of them and, until this existed, produced no row at all. An audit
-   * drove the real wiring with a dead embedding provider and a dead payments
-   * host and read `metrics_events` back empty both times.
-   *
-   * Disjoint from the other three by construction (`createPortFailureBridge`
-   * declines to emit for a timeout or either rejection), which is what makes the
-   * four safe to add together below.
-   */
-  PORT_CALL_FAILED: 'platform.port.call_failed',
-  JOB_DEAD: 'platform.job.dead',
-  NOTIFY_FAILED: 'platform.notify.failed',
-  /** D-146 — per NOTIFICATION, not per channel. See `SIGNALS.NOTIFY_UNDELIVERABLE`. */
-  NOTIFY_UNDELIVERABLE: 'platform.notify.undeliverable',
-  /**
-   * THE RATE-LIMIT FALLBACK IS EMITTED UNDER MORE THAN ONE NAME, AND ONLY ONE OF
-   * THEM WAS BEING COLLECTED.
-   *
-   * `platform/rate-limit` takes the metric name from its constructor, so each
-   * limiter namespaces its own. `identity` was here; `app`'s authenticated
-   * throttle — built in `src/app/server.ts` — was not. Under a cache outage the
-   * audit observed six activations of the app one and zero of them reached the
-   * `rate_limit_fallback` page, because the collector was not looking at that
-   * name. D-034's whole point is that a silent security downgrade is found out;
-   * collecting one of the two limiters that can degrade is finding out half the
-   * time.
-   *
-   * `billing.webhook_rate_limit.in_process_fallback` is deliberately NOT summed
-   * in. It is a webhook throttle, not an authentication control, and folding it
-   * into a page whose body says "authentication rate limits are weaker" would
-   * make the alert text false on every billing occurrence. It needs its own rule
-   * if it needs one — see the report accompanying this change.
-   */
-  RATE_LIMIT_FALLBACK_IDENTITY: 'identity.rate_limit.in_process_fallback',
-  RATE_LIMIT_FALLBACK_APP: 'app.authenticated_rate_limit.in_process_fallback',
-} as const;
-
-interface MetricCountRow {
-  readonly name: string;
-  readonly to_state: string | null;
-  readonly total: string | number;
-}
-
-/**
- * ONE query for every counting signal.
- *
- * Not one query per rule: this runs every 60 seconds forever, and the index on
- * `(name, recorded_at desc)` serves a single grouped scan far better than seven
- * separate ones. Cheap observability stays switched on; expensive observability
- * gets switched off during the incident it was bought for.
- */
-async function collectMetricCounts(
-  db: DbHandle,
-  windowMinutes: number,
-): Promise<Record<string, number>> {
-  const names = Object.values(METRIC);
-
-  const result = await db.db.execute(sql`
-    select
-      name,
-      tags ->> 'to' as to_state,
-      coalesce(sum(value), 0) as total
-    from metrics_events
-    where recorded_at >= now() - make_interval(mins => ${windowMinutes})
-      and name = any(${sql.raw(`array[${names.map((name) => `'${name}'`).join(',')}]`)})
-    group by name, tags ->> 'to'
-  `);
-
-  const rows = result.rows as unknown as MetricCountRow[];
-  const total = (name: string, toState?: string): number =>
-    rows
-      .filter((row) => row.name === name && (toState === undefined || row.to_state === toState))
-      .reduce((sum, row) => sum + Number(row.total), 0);
-
-  return {
-    // Transitions INTO open only. Counting every transition would count the
-    // recovery (open -> half-open -> closed) as three more incidents.
-    [SIGNALS.BREAKER_OPENED]: total(METRIC.BREAKER_TRANSITION, 'open'),
-    // BOTH limiters. See the METRIC comment — collecting only `identity` meant
-    // the app-level authenticated throttle degraded silently.
-    [SIGNALS.RATE_LIMIT_FALLBACK]:
-      total(METRIC.RATE_LIMIT_FALLBACK_IDENTITY) + total(METRIC.RATE_LIMIT_FALLBACK_APP),
-    [SIGNALS.JOB_DEAD_LETTERED]: total(METRIC.JOB_DEAD),
-    [SIGNALS.NOTIFY_FAILED]: total(METRIC.NOTIFY_FAILED),
-    [SIGNALS.NOTIFY_UNDELIVERABLE]: total(METRIC.NOTIFY_UNDELIVERABLE),
-    // FOUR summands, not three. The fourth is the one that moves during an
-    // ordinary outage: a dependency that fails fast emits none of the other
-    // three. They are disjoint by construction, so this is a sum and not a
-    // double count.
-    [SIGNALS.DEPENDENCY_ERRORS]:
-      total(METRIC.PORT_TIMEOUT) +
-      total(METRIC.BREAKER_REJECTED) +
-      total(METRIC.CONCURRENCY_REJECTED) +
-      total(METRIC.PORT_CALL_FAILED),
-  };
-}
-
-interface SaturationRow {
-  readonly used: string | number;
-  readonly capacity: string | number;
-}
-
-/** §2 F4 — the most under-estimated failure in the model. */
-async function collectPoolSaturation(db: DbHandle): Promise<number> {
-  const result = await db.db.execute(sql`
-    select
-      (select count(*) from pg_stat_activity where datname = current_database()) as used,
-      current_setting('max_connections')::int as capacity
-  `);
-  const row = (result.rows as unknown as SaturationRow[])[0];
-  if (row === undefined) throw new Error('pg_stat_activity returned no row');
-  const capacity = Number(row.capacity);
-  if (capacity <= 0) throw new Error('max_connections is not a positive number');
-  return Number(row.used) / capacity;
 }
 
 /**
@@ -292,13 +167,7 @@ async function collectPoolSaturation(db: DbHandle): Promise<number> {
 const WORKER_HEARTBEAT_STALE_AFTER_MS = 300_000;
 
 async function collectWorkerHeartbeatAge(db: DbHandle): Promise<number> {
-  const clockResult = await db.db.execute<{ now: Date | string }>(sql`select now() as now`);
-  const clockRow = clockResult.rows[0];
-  if (clockRow === undefined) throw new Error('select now() returned no row');
-  // D-305's lesson, applied at this boundary too: `db.execute` returns WIRE TEXT
-  // for a `timestamptz` unless a type parser says otherwise, so a bare
-  // `.getTime()` here would be the same TypeError in a different file.
-  const now = clockRow.now instanceof Date ? clockRow.now : new Date(clockRow.now);
+  const now = await readDatabaseNow(db);
 
   const workers = await readWorkerLiveness(db, now, WORKER_HEARTBEAT_STALE_AFTER_MS);
 

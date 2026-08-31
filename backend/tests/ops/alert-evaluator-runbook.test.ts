@@ -6,8 +6,8 @@ import type {
   ChannelRecipient,
   NotificationDispatcher,
 } from '../../src/platform/notify-channel/index';
-import { ALERT_RULES } from '../../scripts/ops/alert-rules';
-import { createAlertEvaluator, withRunbookLine } from '../../scripts/ops/alert-evaluator';
+import { ALERT_RULES } from '../../src/platform/alerts/index';
+import { createAlertEvaluator, withRunbookLine } from '../../src/platform/alerts/index';
 
 /**
  * THE RUNBOOK PATH HAS TO SURVIVE DELIVERY.

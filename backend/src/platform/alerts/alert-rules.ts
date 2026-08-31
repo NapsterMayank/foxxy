@@ -41,7 +41,7 @@
  * arrives as a notification somebody swipes away at 3am.
  */
 
-import type { BilingualText } from '../../src/platform/notify-channel/index';
+import type { BilingualText } from '../notify-channel/index';
 
 /** Who this reaches, and when. */
 export type AlertSeverity = 'page' | 'ticket';

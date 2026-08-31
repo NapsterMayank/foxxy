@@ -2,8 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type DbHandle } from '../../src/platform/db/index';
 import { FakeLogger } from '../../src/platform/logger/index';
 import { PLATFORM_METRICS } from '../../src/platform/metrics/index';
-import { SIGNALS } from '../../scripts/ops/alert-rules';
-import { collectSignals } from '../../scripts/ops/alert-sources';
+import { SIGNALS } from '../../src/platform/alerts/index';
+import { collectSignals } from '../../src/platform/alerts/index';
 import { applyAllMigrations, startTestPostgres, type TestPostgres } from '../helpers/postgres';
 
 /**

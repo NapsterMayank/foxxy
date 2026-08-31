@@ -34,14 +34,14 @@
  * infrastructure incident, is the likely case.
  */
 
-import type { Clock } from '../../src/platform/clock/index';
-import type { Logger } from '../../src/platform/logger/index';
+import type { Clock } from '../clock/index';
+import type { Logger } from '../logger/index';
 import type {
   BilingualText,
   ChannelPolicy,
   ChannelRecipient,
   NotificationDispatcher,
-} from '../../src/platform/notify-channel/index';
+} from '../notify-channel/index';
 import type { Alert, AlertRule, Signals } from './alert-rules';
 import { ALERT_RULES, CooldownLedger, evaluate } from './alert-rules';
 

@@ -31,7 +31,7 @@ import { describe, expect, it } from 'vitest';
  * =============================================================================
  */
 
-const ALERT_SOURCES = join(process.cwd(), 'scripts', 'ops', 'alert-sources.ts');
+const ALERT_SOURCES = join(process.cwd(), 'src', 'platform', 'alerts', 'alert-sources.ts');
 
 function source(): string {
   return readFileSync(ALERT_SOURCES, 'utf8');

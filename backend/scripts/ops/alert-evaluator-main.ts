@@ -46,9 +46,9 @@ import {
   createPushChannel,
   createWhatsAppChannel,
 } from '../../src/platform/notify-channel/index';
-import { ALERT_RULES, assertRulesAreSatisfiable } from './alert-rules';
-import { ALERT_CHANNEL_POLICY, createAlertEvaluator } from './alert-evaluator';
-import { collectSignals, createFsBackupAgeSource, producibleSignals } from './alert-sources';
+import { ALERT_RULES, assertRulesAreSatisfiable } from '../../src/platform/alerts/index';
+import { ALERT_CHANNEL_POLICY, createAlertEvaluator } from '../../src/platform/alerts/index';
+import { collectSignals, createFsBackupAgeSource, producibleSignals } from '../../src/platform/alerts/index';
 
 interface Options {
   readonly loop: boolean;

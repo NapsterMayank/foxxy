@@ -23,9 +23,9 @@ import {
   type AlertRule,
   type AlertSeverity,
   type Comparison,
-} from '../../scripts/ops/alert-rules';
-import { producibleSignals } from '../../scripts/ops/alert-sources';
-import { ALERT_CHANNEL_POLICY, ALERT_KIND_PAGE, ALERT_KIND_TICKET } from '../../scripts/ops/alert-evaluator';
+} from '../../src/platform/alerts/index';
+import { producibleSignals } from '../../src/platform/alerts/index';
+import { ALERT_CHANNEL_POLICY, ALERT_KIND_PAGE, ALERT_KIND_TICKET } from '../../src/platform/alerts/index';
 
 /** Every signal the shipped collectors can produce, with a backup dir configured. */
 const PRODUCIBLE = producibleSignals({ backupDir: '/backup' });
