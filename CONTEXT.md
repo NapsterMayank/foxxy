@@ -7,13 +7,23 @@ the design and D-401..D-403 in `docs/03-DECISION-LOG.md` for the decisions.
 
 > **Two workstreams still.** Track A is the Foxxy product. Track B is the
 > separate retrieval module in `D:\personal\agts-retrieval` (D-400).
-> **30 August: Track B advanced substantially and Track A did not change.**
-> Phases 0-2 are built and holdout-validated there — 8/8 unanswerable refused
-> and 27/30 answered on unseen cases, citation completeness 96.3%, 0 lineage
-> failures, 138 tests, corpus persisted in its own Postgres container. Still
-> blocked on the client for *release*, not for construction: rights records
-> (Q3), named pilot scope (Q1), holdout seal timing (Q2), §9 scope (Q5), two
-> named adjudicators, and a Mathpix key. Start at `agts-retrieval/README.md`.
+> **1 September: Track B advanced again and Track A did not change.**
+> Holdout now reads 24/24 unanswerable refused and 38/40 answered, citation
+> completeness 97.4% holdout, 0 lineage failures, 248 tests, corpus persisted
+> in its own Postgres container and served over HTTP. The embedding model
+> moved to `voyage-4-large` and candidate recall reached 99.1%.
+>
+> Three defects found there are worth knowing because the same shapes could
+> appear in Track A: corrected rows never reached the database because one
+> table took `ON CONFLICT DO NOTHING` while every check compared something a
+> layer above it; a quality heuristic excused broken text for carrying a
+> relation symbol; and a retriever kept one window per section, so a 0.007
+> score difference decided which paragraph a learner saw.
+>
+> Still blocked on the client for *release*, not for construction: rights
+> records (Q3), named pilot scope (Q1), holdout seal timing (Q2), §9 scope
+> (Q5), and two named adjudicators for 95 cases. Start at
+> `agts-retrieval/README.md` and `agts-retrieval/docs/04-how-to-continue.md`.
 
 ## The admin panel — new this session
 
